@@ -11,7 +11,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Register Firestore REST Client
+        $this->app->singleton(\App\Services\Firebase\FirestoreRestClient::class, function ($app) {
+            return new \App\Services\Firebase\FirestoreRestClient();
+        });
     }
 
     /**
