@@ -1,0 +1,494 @@
+<?php
+
+namespace App\Http\Controllers\Admin;
+
+use App\Domains\Geofences\Models\Geofence;
+use App\Domains\Sites\Models\Site;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * GeofenceController - Manages polygon boundaries with MySQL spatial validation
+ *
+ * Provides operations for virtual boundaries around sites:
+ * - Polygon creation and editing with coordinate validation
+ * - MySQL spatial ST_CONTAINS point-in-polygon testing
+ * - Interactive map integration for boundary drawing
+ * - Version control and active/inactive status management
+ */
+class GeofenceController extends Controller
+{
+    /**
+     * Display geofences for a specific site.
+     */
+    public function index(Request $request, string $siteId): JsonResponse
+    {
+        try {
+            $site = Site::findOrFail($siteId);
+
+            $geofences = Geofence::where('site_id', $siteId)
+                ->with(['creator'])
+                ->when($request->get('active_only'), function($query) {
+                    $query->where('is_active', true);
+                })
+                ->orderBy('version', 'desc')
+                ->get();
+
+            // Add coordinate arrays for frontend display
+            $geofences->each(function($geofence) {
+                $geofence->coordinates = $geofence->getPolygonCoordinates();
+            });
+
+            return response()->json([
+                'success' => true,
+                'site' => $site,
+                'geofences' => $geofences
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Error loading geofences: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Store a new geofence (polygon or circle).
+     */
+    public function store(Request $request): JsonResponse
+    {
+        // Debug incoming request
+        \Log::info('Geofence creation request', [
+            'all' => $request->all(),
+            'raw_input' => $request->getContent(),
+            'content_type' => $request->header('Content-Type')
+        ]);
+
+        // Handle coordinates that come as JSON string
+        $coordinates = $request->get('coordinates');
+        if (is_string($coordinates)) {
+            $coordinates = json_decode($coordinates, true);
+        }
+
+        $validator = Validator::make(array_merge($request->all(), ['coordinates' => $coordinates]), [
+            'site_id' => 'required|exists:sites,id',
+            'type' => 'required|in:polygon,circle',
+            'coordinates' => 'required',
+            'is_active' => 'boolean'
+        ]);
+
+        // Additional validation based on type
+        if ($request->get('type') === 'polygon') {
+            $validator->sometimes('coordinates', 'array|min:3', function($input) {
+                return $input->type === 'polygon';
+            });
+            $validator->sometimes('coordinates.*', 'array|size:2', function($input) {
+                return $input->type === 'polygon';
+            });
+        } else if ($request->get('type') === 'circle') {
+            $validator->sometimes('coordinates.center', 'required|array|size:2', function($input) {
+                return $input->type === 'circle';
+            });
+            $validator->sometimes('coordinates.radius', 'required|numeric|min:1', function($input) {
+                return $input->type === 'circle';
+            });
+        }
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        DB::beginTransaction();
+
+        try {
+            $site = Site::findOrFail($request->site_id);
+
+            // Get next version number for this site
+            $nextVersion = Geofence::where('site_id', $site->id)->max('version') + 1;
+
+            // If this is set as active, deactivate other geofences for this site
+            if ($request->boolean('is_active', true)) {
+                Geofence::where('site_id', $site->id)->update(['is_active' => false]);
+            }
+
+            // Generate UUID for the geofence
+            $geofenceId = \Illuminate\Support\Str::uuid()->toString();
+
+            // Create WKT geometry string based on type
+            $wkt = '';
+            $name = $request->get('name', $site->name . ' Geofence');
+
+            if ($request->get('type') === 'circle') {
+                // Convert circle to polygon approximation
+                $center = $coordinates['center'];
+                $radius = $coordinates['radius'];
+                $polygonCoords = $this->circleToPolygon($center[0], $center[1], $radius);
+                $wkt = Geofence::createPolygonFromCoordinates($polygonCoords);
+                $name = $name . ' (Circle ' . $radius . 'm)';
+            } else {
+                $wkt = Geofence::createPolygonFromCoordinates($coordinates);
+                $name = $name . ' (Polygon)';
+            }
+
+            // Create geofence record with polygon in one operation using raw SQL
+            $adminId = Auth::guard('admin')->user()?->id ?? session('admin_id');
+            $now = now();
+
+            DB::statement(
+                "INSERT INTO geofences (id, site_id, name, polygon, version, is_active, created_by, created_at, updated_at) VALUES (?, ?, ?, ST_GeomFromText(?, 4326), ?, ?, ?, ?, ?)",
+                [
+                    $geofenceId,
+                    $site->id,
+                    $name,
+                    $wkt,
+                    $nextVersion,
+                    $request->boolean('is_active', true) ? 1 : 0,
+                    $adminId,
+                    $now,
+                    $now
+                ]
+            );
+
+            // Load the created geofence
+            $geofence = Geofence::find($geofenceId);
+
+            DB::commit();
+
+            // Reload with coordinates for response
+            $geofence->load('creator', 'site');
+            $geofence->coordinates = $geofence->getPolygonCoordinates();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Geofence created successfully',
+                'geofence' => $geofence
+            ]);
+        } catch (\Exception $e) {
+            DB::rollback();
+
+            \Log::error('Geofence creation failed', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => 'Error creating geofence: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Convert a circle to a polygon approximation.
+     */
+    private function circleToPolygon(float $lat, float $lng, float $radius, int $points = 32): array
+    {
+        $polygon = [];
+        $earthRadius = 6371000; // Earth's radius in meters
+
+        for ($i = 0; $i < $points; $i++) {
+            $angle = (2 * M_PI * $i) / $points;
+
+            // Calculate offset in meters
+            $dx = $radius * cos($angle);
+            $dy = $radius * sin($angle);
+
+            // Convert to lat/lng offset
+            $deltaLat = $dy / $earthRadius * (180 / M_PI);
+            $deltaLng = $dx / ($earthRadius * cos($lat * M_PI / 180)) * (180 / M_PI);
+
+            $polygon[] = [$lat + $deltaLat, $lng + $deltaLng];
+        }
+
+        return $polygon;
+    }
+
+    /**
+     * Display the specified geofence.
+     */
+    public function show(string $id): JsonResponse
+    {
+        try {
+            $geofence = Geofence::with(['site', 'creator'])->findOrFail($id);
+            $geofence->coordinates = $geofence->getPolygonCoordinates();
+
+            return response()->json([
+                'success' => true,
+                'geofence' => $geofence
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Geofence not found'
+            ], 404);
+        }
+    }
+
+    /**
+     * Update the specified geofence polygon.
+     */
+    public function update(Request $request, string $id): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255',
+            'coordinates' => 'required|array|min:3',
+            'coordinates.*' => 'required|array|size:2',
+            'coordinates.*.0' => 'required|numeric|between:-90,90',
+            'coordinates.*.1' => 'required|numeric|between:-180,180',
+            'is_active' => 'boolean'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        DB::beginTransaction();
+
+        try {
+            $geofence = Geofence::findOrFail($id);
+
+            // If setting as active, deactivate others for this site
+            if ($request->boolean('is_active') && !$geofence->is_active) {
+                Geofence::where('site_id', $geofence->site_id)
+                    ->where('id', '!=', $geofence->id)
+                    ->update(['is_active' => false]);
+            }
+
+            // Update geofence properties
+            $geofence->update([
+                'name' => $request->name,
+                'is_active' => $request->boolean('is_active'),
+            ]);
+
+            // Update polygon coordinates
+            $geofence->setPolygonFromCoordinates($request->coordinates);
+
+            DB::commit();
+
+            // Reload with coordinates
+            $geofence->load('creator', 'site');
+            $geofence->coordinates = $geofence->getPolygonCoordinates();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Geofence updated successfully',
+                'geofence' => $geofence
+            ]);
+        } catch (\Exception $e) {
+            DB::rollback();
+            return response()->json([
+                'success' => false,
+                'error' => 'Error updating geofence: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Remove the specified geofence.
+     */
+    public function destroy(string $id): JsonResponse
+    {
+        try {
+            $geofence = Geofence::findOrFail($id);
+
+            // Business rule: Check for active shifts using this geofence
+            $activeShifts = DB::table('shifts')
+                ->where('geofence_id', $geofence->id)
+                ->whereIn('status', ['scheduled', 'active'])
+                ->count();
+
+            if ($activeShifts > 0) {
+                return response()->json([
+                    'success' => false,
+                    'error' => "Cannot delete geofence with {$activeShifts} active shifts. Please complete shifts first."
+                ], 422);
+            }
+
+            $geofence->delete();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Geofence deleted successfully'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Error deleting geofence: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Remove all geofences for a specific site.
+     */
+    public function destroyBySite(string $siteId): JsonResponse
+    {
+        try {
+            $site = Site::findOrFail($siteId);
+
+            // Get all geofences for this site
+            $geofences = Geofence::where('site_id', $siteId)->get();
+
+            if ($geofences->isEmpty()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'No geofences found to delete'
+                ]);
+            }
+
+            // Check for active shifts using any of these geofences
+            $geofenceIds = $geofences->pluck('id');
+            $activeShifts = DB::table('shifts')
+                ->whereIn('geofence_id', $geofenceIds)
+                ->whereIn('status', ['scheduled', 'active'])
+                ->count();
+
+            if ($activeShifts > 0) {
+                return response()->json([
+                    'success' => false,
+                    'error' => "Cannot delete geofences with {$activeShifts} active shifts. Please complete shifts first."
+                ], 422);
+            }
+
+            // Delete all geofences for this site
+            $deletedCount = Geofence::where('site_id', $siteId)->delete();
+
+            return response()->json([
+                'success' => true,
+                'message' => "{$deletedCount} geofence(s) deleted successfully"
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Error deleting geofences: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Toggle geofence active status.
+     */
+    public function toggleStatus(Request $request, string $id): JsonResponse
+    {
+        DB::beginTransaction();
+
+        try {
+            $geofence = Geofence::findOrFail($id);
+
+            if (!$geofence->is_active) {
+                // Activating this geofence - deactivate others for this site
+                Geofence::where('site_id', $geofence->site_id)
+                    ->where('id', '!=', $geofence->id)
+                    ->update(['is_active' => false]);
+
+                $geofence->update(['is_active' => true]);
+                $message = 'Geofence activated successfully';
+            } else {
+                $geofence->update(['is_active' => false]);
+                $message = 'Geofence deactivated successfully';
+            }
+
+            DB::commit();
+
+            return response()->json([
+                'success' => true,
+                'message' => $message,
+                'geofence' => $geofence
+            ]);
+        } catch (\Exception $e) {
+            DB::rollback();
+            return response()->json([
+                'success' => false,
+                'error' => 'Error updating geofence status: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Test if a point is inside the geofence using MySQL ST_CONTAINS.
+     * Used for testing geofence boundaries during setup.
+     */
+    public function testPoint(Request $request, string $id): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'latitude' => 'required|numeric|between:-90,90',
+            'longitude' => 'required|numeric|between:-180,180'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $geofence = Geofence::findOrFail($id);
+            $isInside = $geofence->containsPoint(
+                $request->latitude,
+                $request->longitude
+            );
+
+            return response()->json([
+                'success' => true,
+                'is_inside' => $isInside,
+                'test_point' => [
+                    'latitude' => $request->latitude,
+                    'longitude' => $request->longitude
+                ],
+                'geofence' => [
+                    'id' => $geofence->id,
+                    'name' => $geofence->name
+                ]
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Error testing point: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get active geofence for a site (for shift assignment).
+     */
+    public function getActiveGeofence(string $siteId): JsonResponse
+    {
+        try {
+            $geofence = Geofence::where('site_id', $siteId)
+                ->where('is_active', true)
+                ->with('site')
+                ->first();
+
+            if (!$geofence) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No active geofence found for this site'
+                ], 404);
+            }
+
+            $geofence->coordinates = $geofence->getPolygonCoordinates();
+
+            return response()->json([
+                'success' => true,
+                'geofence' => $geofence
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Error loading geofence: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+}

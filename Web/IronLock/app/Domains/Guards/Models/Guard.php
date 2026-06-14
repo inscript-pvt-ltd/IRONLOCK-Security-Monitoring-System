@@ -98,4 +98,12 @@ class Guard extends Authenticatable
     {
         return $this->sia_licence_expiry <= now()->addDays($days);
     }
+
+    /**
+     * Get the shifts for the guard.
+     */
+    public function shifts()
+    {
+        return $this->hasMany(\App\Domains\Shifts\Models\Shift::class, 'guard_id', 'id');
+    }
 }
