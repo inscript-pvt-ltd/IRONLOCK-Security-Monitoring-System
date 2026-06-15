@@ -1,13 +1,3 @@
-/**
- * Shift Calendar Management System
- *
- * Handles the weekly calendar interface for shift scheduling with:
- * - Working Time Regulations validation
- * - Real-time WTR compliance checking
- * - Guard and site assignment
- * - Interactive calendar grid
- */
-
 class ShiftCalendar {
     constructor() {
         this.currentWeek = this.getCurrentWeekDates();
@@ -22,469 +12,674 @@ class ShiftCalendar {
 
     static init() {
         window.shiftCalendar = new ShiftCalendar();
-
-        // Make functions globally accessible for onclick attributes
-        window.closeShiftModal = () => window.shiftCalendar.closeShiftModal();
+        window.closeShiftDrawer = () => window.shiftCalendar.closeShiftDrawer();
     }
+
+    // ── Week helpers ───────────────────────────────────────────
 
     getCurrentWeekDates() {
         const today = new Date();
-        const monday = new Date(today.setDate(today.getDate() - today.getDay() + 1));
+        const monday = new Date(today);
+        monday.setDate(today.getDate() - today.getDay() + 1);
+        monday.setHours(0, 0, 0, 0);
+
         const dates = [];
-
         for (let i = 0; i < 7; i++) {
-            const date = new Date(monday);
-            date.setDate(monday.getDate() + i);
-            dates.push(date);
+            const d = new Date(monday);
+            d.setDate(monday.getDate() + i);
+            dates.push(d);
         }
-
         return dates;
     }
 
     formatDate(date) {
-        return date.toISOString().split('T')[0];
+        const p = n => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
     }
 
-    formatTime(dateTime) {
-        return new Date(dateTime).toTimeString().slice(0, 5);
+    formatTime(dateTimeStr) {
+        return new Date(dateTimeStr).toTimeString().slice(0, 5);
     }
+
+    // ── Event binding ──────────────────────────────────────────
 
     bindEvents() {
-        // New shift button
         document.getElementById('new-shift-btn').addEventListener('click', () => {
-            this.openShiftModal();
+            this.openShiftDrawer();
         });
 
-        // Week selector
+        // Close drawer when clicking outside it and outside the calendar table
+        document.addEventListener('click', (e) => {
+            const drawer = document.getElementById('shift-drawer');
+            if (!drawer || !drawer.classList.contains('open')) return;
+            if (drawer.contains(e.target)) return;
+            if (e.target.closest('#calendar-table, #new-shift-btn, #week-selector')) return;
+            this.closeShiftDrawer();
+        });
+
         document.getElementById('week-selector').addEventListener('change', (e) => {
             this.changeWeek(e.target.value);
         });
 
-        // Shift form submission
         document.getElementById('shift-form').addEventListener('submit', (e) => {
             e.preventDefault();
             this.saveShift();
         });
 
-        // Live WTR validation
-        ['guard-select', 'shift-date', 'shift-start', 'shift-end'].forEach(id => {
-            const element = document.getElementById(id);
-            if (element) {
-                element.addEventListener('change', () => {
+        ['guard-select', 'shift-date', 'shift-start', 'shift-duration'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('change', () => {
+                    this.clearDrawerError();
+                    this.updateEndTimeDisplay();
                     this.validateWTR();
                 });
+                // also react to typing in the duration number input
+                if (id === 'shift-duration') {
+                    el.addEventListener('input', () => {
+                        this.clearDrawerError();
+                        this.updateEndTimeDisplay();
+                    });
+                }
             }
         });
 
-        // Initial data load
         this.loadInitialData();
     }
 
+    // ── Data loading ───────────────────────────────────────────
+
     async loadInitialData() {
         try {
-            await Promise.all([
-                this.loadGuards(),
-                this.loadSites(),
-                this.loadShifts()
-            ]);
+            await Promise.all([this.loadGuards(), this.loadSites(), this.loadShifts()]);
             this.renderCalendar();
         } catch (error) {
             console.error('Failed to load initial data:', error);
-            this.showError('Failed to load data. Please refresh the page.');
         }
     }
 
     async loadGuards() {
         try {
-            const response = await fetch('/admin/guards/list');
-            if (!response.ok) throw new Error('Failed to load guards');
-
-            const data = await response.json();
+            const res = await fetch('/admin/guards/list');
+            if (!res.ok) throw new Error('Failed to load guards');
+            const data = await res.json();
             this.guards = data.guards || [];
             this.populateGuardSelect();
-        } catch (error) {
-            console.error('Error loading guards:', error);
+        } catch (e) {
+            console.error(e);
             this.guards = [];
         }
     }
 
     async loadSites() {
         try {
-            const response = await fetch('/admin/sites/list');
-            if (!response.ok) throw new Error('Failed to load sites');
-
-            const data = await response.json();
+            const res = await fetch('/admin/sites/list');
+            if (!res.ok) throw new Error('Failed to load sites');
+            const data = await res.json();
             this.sites = data.sites || [];
             this.populateSiteSelect();
-        } catch (error) {
-            console.error('Error loading sites:', error);
+        } catch (e) {
+            console.error(e);
             this.sites = [];
         }
     }
 
     async loadShifts() {
         try {
-            const startDate = this.formatDate(this.currentWeek[0]);
-            const endDate = this.formatDate(this.currentWeek[6]);
-
-            const response = await fetch(`/admin/shifts?date_from=${startDate}&date_to=${endDate}`);
-            if (!response.ok) throw new Error('Failed to load shifts');
-
-            const data = await response.json();
+            const from = this.formatDate(this.currentWeek[0]);
+            const to   = this.formatDate(this.currentWeek[6]);
+            const res  = await fetch(`/admin/shifts?date_from=${from}&date_to=${to}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!res.ok) throw new Error('Failed to load shifts');
+            const data = await res.json();
             this.shifts = data.shifts || [];
-        } catch (error) {
-            console.error('Error loading shifts:', error);
+        } catch (e) {
+            console.error(e);
             this.shifts = [];
         }
     }
 
     populateGuardSelect() {
-        const select = document.getElementById('guard-select');
-        select.innerHTML = '<option value="">Select Guard</option>';
-
-        this.guards.forEach(guard => {
-            const option = document.createElement('option');
-            option.value = guard.id;
-            option.textContent = `${guard.first_name} ${guard.last_name}`;
-            select.appendChild(option);
+        const sel = document.getElementById('guard-select');
+        sel.innerHTML = '<option value="">Select Guard</option>';
+        this.guards.forEach(g => {
+            const opt = document.createElement('option');
+            opt.value = g.id;
+            opt.textContent = `${g.first_name} ${g.last_name}`;
+            sel.appendChild(opt);
         });
     }
 
     populateSiteSelect() {
-        const select = document.getElementById('site-select');
-        select.innerHTML = '<option value="">Select Site</option>';
-
-        this.sites.forEach(site => {
-            const option = document.createElement('option');
-            option.value = site.id;
-            option.textContent = site.name;
-            select.appendChild(option);
+        const sel = document.getElementById('site-select');
+        sel.innerHTML = '<option value="">Select Site</option>';
+        this.sites.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s.id;
+            opt.textContent = s.name;
+            sel.appendChild(opt);
         });
     }
+
+    // ── Calendar rendering ─────────────────────────────────────
 
     renderCalendar() {
-        const grid = document.getElementById('calendar-grid');
+        const table = document.getElementById('calendar-table');
+        const days  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-        // Clear existing guard rows (keep headers)
-        const headers = grid.querySelectorAll('.calendar-header');
-        grid.innerHTML = '';
-        headers.forEach(header => grid.appendChild(header));
+        const thead = `<thead><tr>
+            <th style="width:90px;text-align:left;">Guard</th>
+            ${this.currentWeek.map((d, i) => `<th>${days[i]} ${d.getDate()}</th>`).join('')}
+        </tr></thead>`;
 
-        // Group shifts by guard
         const shiftsByGuard = {};
-        this.shifts.forEach(shift => {
-            if (!shiftsByGuard[shift.guard_id]) {
-                shiftsByGuard[shift.guard_id] = [];
-            }
-            shiftsByGuard[shift.guard_id].push(shift);
+        this.shifts.forEach(s => {
+            if (!shiftsByGuard[s.guard_id]) shiftsByGuard[s.guard_id] = [];
+            shiftsByGuard[s.guard_id].push(s);
         });
 
-        // Render each guard row
-        this.guards.forEach(guard => {
-            this.renderGuardRow(guard, shiftsByGuard[guard.id] || []);
-        });
+        let tbody;
+        if (this.guards.length === 0) {
+            tbody = `<tbody><tr>
+                <td colspan="8" style="text-align:center;padding:28px;color:var(--text-muted);font-size:11px;">
+                    No guards found. Add guards first to schedule shifts.
+                </td>
+            </tr></tbody>`;
+        } else {
+            const rows = this.guards.map(g => this.buildGuardRow(g, shiftsByGuard[g.id] || [])).join('');
+            tbody = `<tbody>${rows}</tbody>`;
+        }
 
+        table.innerHTML = thead + tbody;
+        this.attachCellHandlers();
         this.renderWTRWarnings();
+        this.renderWeeklyHours();
+        this.renderOverrideLog();
     }
 
-    renderGuardRow(guard, guardShifts) {
-        const grid = document.getElementById('calendar-grid');
+    buildGuardRow(guard, guardShifts) {
+        const name = `${guard.first_name.charAt(0)}. ${guard.last_name}`;
 
-        // Guard name cell
-        const nameCell = document.createElement('div');
-        nameCell.className = 'guard-name';
-        nameCell.textContent = `${guard.first_name.charAt(0)}.${guard.last_name.charAt(0)}.`;
-        nameCell.title = `${guard.first_name} ${guard.last_name}`;
-        grid.appendChild(nameCell);
+        const cells = [];
+        const processedShifts = new Set(); // Track shifts we've already rendered to avoid duplicates
 
-        // Day cells
-        this.currentWeek.forEach((date, dayIndex) => {
-            const dayCell = document.createElement('div');
-            dayCell.className = 'day-cell';
-            dayCell.dataset.guardId = guard.id;
-            dayCell.dataset.date = this.formatDate(date);
+        // New logic: Overnight shifts that span exactly 2 days within the current week
+        // are merged into a single cell with colspan="2" to avoid edit conflicts.
 
-            // Find shift for this day
-            const dayShift = guardShifts.find(shift => {
-                const shiftDate = new Date(shift.scheduled_start).toDateString();
-                return shiftDate === date.toDateString();
+        for (let i = 0; i < this.currentWeek.length; i++) {
+            const date = this.currentWeek[i];
+            const dateStr = this.formatDate(date);
+
+            // Skip this cell if it's already been consumed by an overnight shift
+            if (cells.length > i) continue;
+
+            // Shift that STARTS on this day
+            const dayShift = guardShifts.find(s => {
+                return new Date(s.scheduled_start).toDateString() === date.toDateString()
+                       && !processedShifts.has(s.id);
             });
 
             if (dayShift) {
-                const shiftBlock = this.createShiftBlock(dayShift);
-                dayCell.appendChild(shiftBlock);
-            } else {
-                dayCell.addEventListener('click', () => {
-                    this.openShiftModal(guard.id, date);
-                });
+                processedShifts.add(dayShift.id);
+
+                const startFmt = this.fmtAmPm(new Date(dayShift.scheduled_start));
+                const endFmt   = this.fmtAmPm(new Date(dayShift.scheduled_end));
+                const isOvernight = new Date(dayShift.scheduled_end).toDateString() !== date.toDateString();
+
+                // Check if the overnight shift ends within our current week
+                const endsInWeek = isOvernight && i < this.currentWeek.length - 1
+                    && new Date(dayShift.scheduled_end).toDateString() === this.currentWeek[i + 1].toDateString();
+
+                const violations = dayShift.wtr_violations || [];
+                const hasWarn    = violations.some(v => v.severity === 'WARNING');
+                const hasError   = violations.some(v => v.severity === 'ERROR');
+
+                let cls = 'shift-blk';
+                if (dayShift.status === 'active')         cls += ' active';
+                else if (dayShift.status === 'completed') cls += ' completed';
+                else if (dayShift.status === 'cancelled') cls += ' cancelled';
+                if (hasWarn || hasError) cls += ' wtr-warn-block';
+
+                const warnIcon = (hasWarn || hasError) ? ' ⚠' : '';
+
+                if (isOvernight && endsInWeek) {
+                    // Overnight shift that ends within the week - merge into one cell spanning two days
+                    const label = `${startFmt}–${endFmt}`;
+                    cells.push(`<td colspan="2" class="overnight-merged"><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
+
+                    // Add placeholder for the consumed next cell so our indexing stays correct
+                    cells.push(null); // This will be skipped in the final join
+                } else {
+                    // Regular shift (single day) or overnight that extends beyond the week
+                    const label = isOvernight ? `${startFmt}–${endFmt} →` : `${startFmt}–${endFmt}`;
+                    cells.push(`<td><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
+                }
+                continue;
             }
 
-            grid.appendChild(dayCell);
-        });
-    }
+            // Check for overnight continuation from previous day (only if not already processed as merged cell)
+            const prevDay = new Date(date);
+            prevDay.setDate(date.getDate() - 1);
+            const overnight = guardShifts.find(s => {
+                return new Date(s.scheduled_start).toDateString() === prevDay.toDateString()
+                    && new Date(s.scheduled_end).toDateString()   === date.toDateString()
+                    && !processedShifts.has(s.id);
+            });
 
-    createShiftBlock(shift) {
-        const block = document.createElement('div');
-        block.className = `shift-block ${shift.status}`;
+            if (overnight) {
+                // This should only happen if the shift started before our current week view
+                processedShifts.add(overnight.id);
+                const until = this.fmtAmPm(new Date(overnight.scheduled_end));
+                cells.push(`<td><span class="shift-blk shift-cont" data-shift-id="${overnight.id}" title="Overnight from previous day — until ${until}">← ${until}</span></td>`);
+                continue;
+            }
 
-        // Determine block style based on WTR compliance
-        const violations = shift.wtr_violations || [];
-        if (violations.some(v => v.severity === 'ERROR')) {
-            block.classList.add('error');
-        } else if (violations.some(v => v.severity === 'WARNING')) {
-            block.classList.add('warning');
+            // Empty cell — click to create a new shift
+            cells.push(`<td class="day-cell" data-guard-id="${guard.id}" data-date="${dateStr}"></td>`);
         }
 
-        const startTime = this.formatTime(shift.scheduled_start);
-        const endTime = this.formatTime(shift.scheduled_end);
+        // Filter out null placeholders and join
+        const cellsHtml = cells.filter(cell => cell !== null).join('');
 
-        block.innerHTML = `
-            <div class="shift-time">${startTime}-${endTime}</div>
-        `;
-
-        block.addEventListener('click', () => {
-            this.openShiftModal(shift.guard_id, new Date(shift.scheduled_start), shift);
-        });
-
-        return block;
+        return `<tr>
+            <td class="guard-col" title="${guard.first_name} ${guard.last_name}">${name}</td>
+            ${cellsHtml}
+        </tr>`;
     }
 
+    attachCellHandlers() {
+        // Empty cells → open drawer for new shift
+        document.querySelectorAll('#calendar-table td.day-cell[data-guard-id]').forEach(td => {
+            td.addEventListener('click', () => {
+                const date = new Date(td.dataset.date + 'T00:00:00');
+                this.openShiftDrawer(td.dataset.guardId, date);
+            });
+        });
+
+        // Shift blocks → open drawer for editing
+        document.querySelectorAll('#calendar-table .shift-blk[data-shift-id]').forEach(span => {
+            span.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const shift = this.shifts.find(s => s.id === span.dataset.shiftId);
+                if (shift) this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
+            });
+        });
+
+        // Handle clicks on merged overnight cells (in case user clicks the cell but misses the shift block)
+        document.querySelectorAll('#calendar-table td.overnight-merged').forEach(td => {
+            td.addEventListener('click', (e) => {
+                // Only handle if the click wasn't on the shift block itself
+                if (!e.target.closest('.shift-blk')) {
+                    const shiftBlock = td.querySelector('.shift-blk[data-shift-id]');
+                    if (shiftBlock) {
+                        const shift = this.shifts.find(s => s.id === shiftBlock.dataset.shiftId);
+                        if (shift) this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
+                    }
+                }
+            });
+        });
+    }
+
+    // ── WTR warnings below calendar ───────────────────────────
+
     renderWTRWarnings() {
-        const warningsContainer = document.getElementById('wtr-warnings');
-        const warningsList = document.getElementById('wtr-warnings-list');
-        warningsList.innerHTML = '';
+        const section = document.getElementById('wtr-warnings-section');
+        section.innerHTML = '';
 
-        const warnings = [];
-
-        // Collect WTR warnings from all shifts
         this.shifts.forEach(shift => {
             const guard = this.guards.find(g => g.id === shift.guard_id);
             if (!guard) return;
 
             const violations = shift.wtr_violations || [];
-            violations.forEach(violation => {
-                warnings.push({
-                    guard: `${guard.first_name} ${guard.last_name}`,
-                    severity: violation.severity,
-                    message: violation.message,
-                    date: new Date(shift.scheduled_start).toLocaleDateString('en-GB', {
-                        weekday: 'short'
-                    })
+            violations.forEach(v => {
+                const isError = v.severity === 'ERROR';
+                const icon    = isError ? '✗' : '⚠';
+                const dateStr = new Date(shift.scheduled_start).toLocaleDateString('en-GB', {
+                    weekday: 'short', day: 'numeric', month: 'short'
                 });
+
+                const div = document.createElement('div');
+                div.className = `wtr-warn${isError ? ' error dashed' : ''}`;
+                div.textContent = `${icon} ${guard.first_name} ${guard.last_name}: ${v.message} — ${dateStr}`;
+                section.appendChild(div);
             });
         });
+    }
 
-        if (warnings.length === 0) {
-            warningsContainer.style.display = 'none';
+    // ── Weekly hours tracking ──────────────────────────────────
+
+    renderWeeklyHours() {
+        const tbody = document.getElementById('weekly-hours-tbody');
+        if (!tbody) return;
+        tbody.innerHTML = '';
+
+        if (this.guards.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:12px;">No guards</td></tr>';
             return;
         }
 
-        warningsContainer.style.display = 'block';
+        this.guards.forEach(guard => {
+            const gShifts = this.shifts.filter(s => s.guard_id === guard.id && s.status !== 'cancelled');
+            const totalMins = gShifts.reduce((sum, s) => {
+                return sum + (new Date(s.scheduled_end) - new Date(s.scheduled_start)) / 60000;
+            }, 0);
+            const totalH = Math.round(totalMins / 60 * 10) / 10;
 
-        warnings.forEach(warning => {
-            const item = document.createElement('div');
-            item.className = `wtr-warning-item ${warning.severity.toLowerCase()}`;
+            let chipCls  = 'ok', chipTxt = '✓ OK';
+            if (totalH > 48)      { chipCls = 'over'; chipTxt = '✗ Over 48h'; }
+            else if (totalH >= 40){ chipCls = 'warn'; chipTxt = '⚠ Approaching 48h avg'; }
 
-            const icon = warning.severity === 'ERROR' ? '✗' : '⚠';
-            item.innerHTML = `
-                <span class="wtr-icon">${icon}</span>
-                <span>${warning.guard}: ${warning.message} — ${warning.date}</span>
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${guard.first_name} ${guard.last_name}</td>
+                <td>${totalH}h</td>
+                <td style="color:var(--text-muted);">—</td>
+                <td><span class="wtr-status-chip ${chipCls}">${chipTxt}</span></td>
             `;
-
-            warningsList.appendChild(item);
+            tbody.appendChild(tr);
         });
     }
 
-    openShiftModal(guardId = null, date = null, shift = null) {
+    // ── Override log ───────────────────────────────────────────
+
+    renderOverrideLog() {
+        const allOverrides = [];
+        this.shifts.forEach(shift => {
+            (shift.working_time_overrides || []).forEach(ov => {
+                allOverrides.push({ ov, shift });
+            });
+        });
+
+        const summary = document.getElementById('override-log-summary');
+        const toggle  = document.getElementById('override-log-toggle');
+        const entries = document.getElementById('override-history-entries');
+        const btn     = document.getElementById('override-history-btn');
+
+        if (!summary) return;
+
+        if (allOverrides.length === 0) {
+            summary.textContent = '[ No overrides this week ]';
+            toggle.style.display = 'none';
+            entries.style.display = 'none';
+            entries.innerHTML = '';
+            return;
+        }
+
+        const n = allOverrides.length;
+        summary.textContent = `${n} override${n !== 1 ? 's' : ''} this week`;
+        toggle.style.display = 'inline';
+
+        // Reset to collapsed on each re-render
+        entries.style.display = 'none';
+        btn.textContent = 'View override history ↓';
+
+        entries.innerHTML = allOverrides.map(({ ov, shift }) => {
+            const guard = this.guards.find(g => g.id === shift.guard_id);
+            const guardName = guard ? `${guard.first_name} ${guard.last_name}` : 'Unknown guard';
+            const shiftDate = new Date(shift.scheduled_start).toLocaleDateString('en-GB', {
+                weekday: 'short', day: 'numeric', month: 'short'
+            });
+            const typeLabel = ov.override_type === 'duration_12hr'
+                ? '12h duration warning'
+                : '11h rest period';
+            const adminName = ov.approved_by && typeof ov.approved_by === 'object'
+                ? ov.approved_by.name
+                : 'Admin';
+            const approvedAt = ov.approved_at
+                ? new Date(ov.approved_at).toLocaleDateString('en-GB', {
+                    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+                  })
+                : '';
+            return `<div class="override-entry">
+                <strong>${guardName}</strong> — ${shiftDate} — ${typeLabel}<br>
+                <span style="color:var(--text-secondary);">${ov.justification}</span><br>
+                <span style="color:var(--text-muted);font-size:9px;">${adminName} · ${approvedAt}</span>
+            </div>`;
+        }).join('');
+
+        btn.onclick = (e) => {
+            e.preventDefault();
+            const open = entries.style.display !== 'none';
+            entries.style.display = open ? 'none' : 'block';
+            btn.textContent = open ? 'View override history ↓' : 'Hide override history ↑';
+        };
+    }
+
+    // ── Drawer open / close ────────────────────────────────────
+
+    openShiftDrawer(guardId = null, date = null, shift = null) {
         this.editingShift = shift;
-        const modal = document.getElementById('shift-modal');
-        const title = document.querySelector('.modal-title');
 
-        title.textContent = shift ? 'Edit Shift' : 'New Shift';
+        document.getElementById('drawer-title-text').textContent = shift ? 'Edit Shift' : 'New Shift';
 
-        // Reset form
+        // Reset all transient state
         document.getElementById('shift-form').reset();
         document.getElementById('wtr-check').style.display = 'none';
+        document.getElementById('wtr-check').className = 'wtr-inline';
         document.getElementById('override-section').style.display = 'none';
+        document.getElementById('computed-end-time').style.display = 'none';
+        this.clearDrawerError();
 
-        // Pre-fill form if data provided
-        if (guardId) {
-            document.getElementById('guard-select').value = guardId;
-        }
+        const saveBtn = document.getElementById('save-shift-btn');
+        saveBtn.disabled   = false;
+        saveBtn.textContent = 'Save';
 
-        if (date) {
-            document.getElementById('shift-date').value = this.formatDate(date);
-        }
+        // Pre-fill
+        if (guardId) document.getElementById('guard-select').value = guardId;
+        if (date)    document.getElementById('shift-date').value   = this.formatDate(date);
 
         if (shift) {
             document.getElementById('guard-select').value = shift.guard_id;
-            document.getElementById('site-select').value = shift.site_id;
-            document.getElementById('shift-date').value = this.formatDate(new Date(shift.scheduled_start));
-            document.getElementById('shift-start').value = this.formatTime(shift.scheduled_start);
-            document.getElementById('shift-end').value = this.formatTime(shift.scheduled_end);
+            document.getElementById('site-select').value  = shift.site_id;
+            document.getElementById('shift-date').value   = this.formatDate(new Date(shift.scheduled_start));
+            document.getElementById('shift-start').value  = this.formatTime(shift.scheduled_start);
+            const durationMs = new Date(shift.scheduled_end) - new Date(shift.scheduled_start);
+            document.getElementById('shift-duration').value = Math.round(durationMs / 3600000 * 10) / 10;
+            this.updateEndTimeDisplay();
         }
 
-        modal.classList.add('show');
+        document.getElementById('shift-drawer').classList.add('open');
+        document.querySelector('.shifts-main').classList.add('drawer-open');
 
-        // Validate WTR if form has data
-        if (guardId && date) {
-            this.validateWTR();
-        }
+        if (guardId && date) this.validateWTR();
     }
 
-    closeShiftModal() {
-        const modal = document.getElementById('shift-modal');
-        modal.classList.remove('show');
+    closeShiftDrawer() {
+        document.getElementById('shift-drawer').classList.remove('open');
+        document.querySelector('.shifts-main').classList.remove('drawer-open');
         this.editingShift = null;
     }
 
+    // ── Time formatting ────────────────────────────────────────
+
+    // Returns compact AM/PM label: "9AM", "4PM", "3:25AM", "11:30PM"
+    fmtAmPm(dt) {
+        const h = dt.getHours(), m = dt.getMinutes();
+        const period = h >= 12 ? 'PM' : 'AM';
+        const h12 = h % 12 || 12;
+        return m === 0 ? `${h12}${period}` : `${h12}:${m.toString().padStart(2, '0')}${period}`;
+    }
+
+    // ── End-time helpers ───────────────────────────────────────
+
+    computeScheduledEnd() {
+        const date     = document.getElementById('shift-date').value;
+        const start    = document.getElementById('shift-start').value;
+        const duration = parseFloat(document.getElementById('shift-duration').value);
+        if (!date || !start || isNaN(duration) || duration <= 0) return null;
+        return new Date(new Date(`${date}T${start}:00`).getTime() + duration * 3600000);
+    }
+
+    formatLocalDateTime(dt) {
+        const p = n => String(n).padStart(2, '0');
+        return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}:00`;
+    }
+
+    updateEndTimeDisplay() {
+        const endDt   = this.computeScheduledEnd();
+        const display = document.getElementById('computed-end-time');
+        const span    = document.getElementById('computed-end-display');
+        if (!endDt) { display.style.display = 'none'; return; }
+
+        const startDate = document.getElementById('shift-date').value;
+        const endDate   = this.formatDate(endDt);
+        const ampm = endDt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+        span.textContent = endDate !== startDate ? `${ampm} (+1 day)` : ampm;
+        display.style.display = 'block';
+    }
+
+    // ── WTR live validation ────────────────────────────────────
+
     async validateWTR() {
         const guardId = document.getElementById('guard-select').value;
-        const date = document.getElementById('shift-date').value;
-        const startTime = document.getElementById('shift-start').value;
-        const endTime = document.getElementById('shift-end').value;
+        const date    = document.getElementById('shift-date').value;
+        const start   = document.getElementById('shift-start').value;
+        const endDt   = this.computeScheduledEnd();
 
-        if (!guardId || !date || !startTime || !endTime) {
+        if (!guardId || !date || !start || !endDt) {
             document.getElementById('wtr-check').style.display = 'none';
             return;
         }
 
-        const scheduledStart = `${date}T${startTime}:00`;
-        const scheduledEnd = `${date}T${endTime}:00`;
+        if (this.wtrValidationTimeout) clearTimeout(this.wtrValidationTimeout);
 
-        // Clear previous timeout
-        if (this.wtrValidationTimeout) {
-            clearTimeout(this.wtrValidationTimeout);
-        }
-
-        // Debounce validation requests
         this.wtrValidationTimeout = setTimeout(async () => {
             try {
-                const response = await fetch('/admin/shifts/check-wtr', {
+                const res = await fetch('/admin/shifts/check-wtr', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
                     },
                     body: JSON.stringify({
-                        guard_id: guardId,
-                        scheduled_start: scheduledStart,
-                        scheduled_end: scheduledEnd
+                        guard_id:        guardId,
+                        scheduled_start: `${date}T${start}:00`,
+                        scheduled_end:   this.formatLocalDateTime(endDt)
                     })
                 });
 
-                if (!response.ok) throw new Error('WTR validation failed');
-
-                const data = await response.json();
+                if (!res.ok) throw new Error('WTR check failed');
+                const data = await res.json();
                 this.displayWTRResults(data.wtr_compliance);
-            } catch (error) {
-                console.error('WTR validation error:', error);
+            } catch (e) {
+                console.error('WTR validation error:', e);
             }
         }, 500);
     }
 
     displayWTRResults(wtrData) {
-        const wtrCheck = document.getElementById('wtr-check');
-        const wtrText = document.getElementById('wtr-check-text');
-        const wtrViolationsList = document.getElementById('wtr-violations-list');
-        const overrideSection = document.getElementById('override-section');
-        const saveBtn = document.getElementById('save-shift-btn');
+        const wtrCheck      = document.getElementById('wtr-check');
+        const wtrText       = document.getElementById('wtr-check-text');
+        const violationsList = document.getElementById('wtr-violations-list');
+        const overrideSec   = document.getElementById('override-section');
+        const saveBtn       = document.getElementById('save-shift-btn');
 
         wtrCheck.style.display = 'block';
-        wtrCheck.className = 'wtr-compliance-check';
-
-        // Clear previous violations
-        wtrViolationsList.innerHTML = '';
+        wtrCheck.className     = 'wtr-inline';
+        violationsList.innerHTML = '';
 
         if (wtrData.compliant) {
             wtrCheck.classList.add('ok');
-            wtrText.innerHTML = '✓ Working Time Regulations: Compliant';
-            overrideSection.style.display = 'none';
-            saveBtn.disabled = false;
-        } else {
-            const hasBlockers = wtrData.violations.some(v => v.severity === 'ERROR');
-            const hasWarnings = wtrData.violations.some(v => v.severity === 'WARNING');
-
-            if (hasBlockers) {
-                wtrCheck.classList.add('error');
-                wtrText.innerHTML = '✗ WTR Compliance: Violations Detected';
-                overrideSection.style.display = 'none';
-                saveBtn.disabled = true;
-            } else if (hasWarnings) {
-                wtrCheck.classList.add('warning');
-                wtrText.innerHTML = '⚠ WTR Compliance: Warnings Detected';
-                overrideSection.style.display = 'block';
-                saveBtn.disabled = false;
-            }
-
-            // Show violation details in separate list
-            wtrData.violations.forEach(violation => {
-                const violationDiv = document.createElement('div');
-                const icon = violation.severity === 'ERROR' ? '✗' : '⚠';
-                violationDiv.innerHTML = `${icon} ${violation.message}`;
-                wtrViolationsList.appendChild(violationDiv);
-            });
-
-            // Automatically check relevant override checkboxes based on violations
-            wtrData.violations.forEach(violation => {
-                if (violation.type === 'DURATION_12HR_WARNING') {
-                    // Don't auto-check, let admin consciously decide
-                }
-                if (violation.type === 'REST_PERIOD_11HR') {
-                    // Don't auto-check, let admin consciously decide
-                }
-            });
+            wtrText.textContent = '✓ OK — Compliant';
+            overrideSec.style.display = 'none';
+            saveBtn.disabled    = false;
+            return;
         }
+
+        const hasBlockers = wtrData.violations.some(v => v.severity === 'ERROR');
+        const hasWarnings = wtrData.violations.some(v => v.severity === 'WARNING');
+
+        if (hasBlockers) {
+            wtrCheck.classList.add('error');
+            wtrText.textContent = '✗ Blocked — WTR Violation';
+            overrideSec.style.display = 'none';
+            saveBtn.disabled    = true;
+            saveBtn.textContent = 'Save';
+        } else if (hasWarnings) {
+            wtrCheck.classList.add('warning');
+            wtrText.textContent = '⚠ Warning — Confirm to Save';
+            overrideSec.style.display = 'block';
+            saveBtn.disabled    = false;
+            saveBtn.textContent = 'Save';
+        }
+
+        wtrData.violations.forEach(v => {
+            const div  = document.createElement('div');
+            const icon = v.severity === 'ERROR' ? '✗' : '⚠';
+            div.textContent = `${icon} ${v.message}`;
+            violationsList.appendChild(div);
+        });
     }
+
+    // ── Save shift ─────────────────────────────────────────────
 
     async saveShift() {
         const saveBtn = document.getElementById('save-shift-btn');
-        const originalText = saveBtn.textContent;
+
+        const date      = document.getElementById('shift-date').value;
+        const startTime = document.getElementById('shift-start').value;
+        const endDt     = this.computeScheduledEnd();
+
+        if (!endDt) {
+            this.showError('Please set a start time and duration.');
+            return;
+        }
 
         try {
-            saveBtn.disabled = true;
-            saveBtn.innerHTML = '<span class="loading-spinner"></span> Saving...';
+            saveBtn.disabled  = true;
+            saveBtn.innerHTML = '<span class="loading-spinner"></span> Saving…';
 
             const formData = {
-                guard_id: document.getElementById('guard-select').value,
-                site_id: document.getElementById('site-select').value,
-                scheduled_start: `${document.getElementById('shift-date').value}T${document.getElementById('shift-start').value}:00`,
-                scheduled_end: `${document.getElementById('shift-date').value}T${document.getElementById('shift-end').value}:00`,
+                guard_id:              document.getElementById('guard-select').value,
+                site_id:               document.getElementById('site-select').value,
+                scheduled_start:       `${date}T${startTime}:00`,
+                scheduled_end:         this.formatLocalDateTime(endDt),
                 override_12hr_warning: document.getElementById('override-12hr-warning').checked,
-                override_11hr_rest: document.getElementById('override-11hr-rest').checked,
+                override_11hr_rest:    document.getElementById('override-11hr-rest').checked,
                 override_justification: document.getElementById('override-justification').value
             };
 
-            const url = this.editingShift
-                ? `/admin/shifts/${this.editingShift.id}`
-                : '/admin/shifts';
-
+            const url    = this.editingShift ? `/admin/shifts/${this.editingShift.id}` : '/admin/shifts';
             const method = this.editingShift ? 'PUT' : 'POST';
 
-            const response = await fetch(url, {
-                method: method,
+            const res  = await fetch(url, {
+                method,
                 headers: {
                     'Content-Type': 'application/json',
+                    'Accept':       'application/json',
                     'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
                 },
                 body: JSON.stringify(formData)
             });
 
-            const data = await response.json();
+            const data = await res.json();
 
             if (!data.success) {
+                // WTR warning returned from backend
                 if (data.wtr_warning) {
-                    this.displayWTRResults({
-                        compliant: false,
-                        violations: data.violations
-                    });
-                    throw new Error(data.message || 'WTR compliance issues detected');
+                    this.displayWTRResults({ compliant: false, violations: data.violations });
+                    throw new Error(data.message || 'WTR compliance issues detected.');
                 }
-                throw new Error(data.error || 'Failed to save shift');
+                // Laravel validation errors
+                if (data.errors) {
+                    const msgs = Object.values(data.errors).flat();
+                    throw new Error(msgs.join('\n'));
+                }
+                // Shift conflict details
+                if (data.conflicts && data.conflicts.length) {
+                    const lines = data.conflicts.map(c => {
+                        const start = this.fmtAmPm(new Date(c.start));
+                        const end   = this.fmtAmPm(new Date(c.end));
+                        const day   = new Date(c.start).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                        return `• ${c.site_name}: ${day} ${start}–${end} (${c.status})`;
+                    });
+                    throw new Error('Shift conflicts with existing schedule:\n' + lines.join('\n'));
+                }
+                throw new Error(data.error || 'Failed to save shift.');
             }
 
-            this.showSuccess('Shift saved successfully');
-            this.closeShiftModal();
+            this.closeShiftDrawer();
             await this.loadShifts();
             this.renderCalendar();
 
@@ -492,48 +687,36 @@ class ShiftCalendar {
             console.error('Save shift error:', error);
             this.showError(error.message);
         } finally {
-            saveBtn.disabled = false;
-            saveBtn.textContent = originalText;
+            saveBtn.disabled    = false;
+            saveBtn.textContent = 'Save';
         }
     }
+
+    // ── Week navigation ────────────────────────────────────────
 
     changeWeek(direction) {
         const offset = direction === 'next' ? 7 : direction === 'prev' ? -7 : 0;
-
-        this.currentWeek = this.currentWeek.map(date => {
-            const newDate = new Date(date);
-            newDate.setDate(date.getDate() + offset);
-            return newDate;
+        this.currentWeek = this.currentWeek.map(d => {
+            const nd = new Date(d);
+            nd.setDate(d.getDate() + offset);
+            return nd;
         });
-
-        this.loadShifts().then(() => {
-            this.renderCalendar();
-        });
+        this.loadShifts().then(() => this.renderCalendar());
     }
 
-    showSuccess(message) {
-        // Could integrate with the flash message system or show a toast
-        console.log('Success:', message);
-    }
+    // ── Error helpers ──────────────────────────────────────────
 
     showError(message) {
-        // Could integrate with the flash message system or show a toast
-        console.error('Error:', message);
-        alert(message); // Simple fallback for now
+        const el = document.getElementById('shift-drawer-error');
+        if (el) { el.textContent = message; el.style.display = 'block'; }
+    }
+
+    clearDrawerError() {
+        const el = document.getElementById('shift-drawer-error');
+        if (el) { el.textContent = ''; el.style.display = 'none'; }
     }
 }
 
-// Global click handler for modal backdrop
-document.addEventListener('click', function(e) {
-    if (e.target.classList.contains('modal-overlay')) {
-        const modal = document.getElementById('shift-modal');
-        if (modal && modal.classList.contains('show')) {
-            window.shiftCalendar.closeShiftModal();
-        }
-    }
-});
-
-// Initialize when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', ShiftCalendar.init);
 } else {
