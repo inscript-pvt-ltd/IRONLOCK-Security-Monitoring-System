@@ -2,8 +2,9 @@
 
 namespace App\Domains\Guards\Models;
 
-use Illuminate\Database\Eloquent\Model;
+use App\Domains\Admins\Models\Admin;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 
 class Guard extends Authenticatable
@@ -105,5 +106,13 @@ class Guard extends Authenticatable
     public function shifts()
     {
         return $this->hasMany(\App\Domains\Shifts\Models\Shift::class, 'guard_id', 'id');
+    }
+
+    /**
+     * Get the admin who created this guard.
+     */
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(Admin::class, 'created_by');
     }
 }

@@ -64,12 +64,26 @@ class AuthService
     }
 
     /**
-     * Authenticate guard for mobile API.
+     * Verify a guard's mobile login credentials.
+     *
+     * The guard logs in with their **employee code OR email** (the `username`
+     * column is internal-only and is NOT a login credential — see
+     * MOBILE_API_INTEGRATION.md §9 decision #1).
+     *
+     * This ONLY checks credentials and the lock state; it does NOT issue any
+     * token. Token issuance is deliberately split into issueGuardSession() so
+     * the caller can enforce additional gates (e.g. the shift login window)
+     * before a session is created — a rejected login must not mint a token.
+     *
+     * @return array{success: bool, guard?: Guard, code?: string, error?: string}
      */
-    public function authenticateGuard(string $username, string $password, array $deviceInfo): array
+    public function authenticateGuard(string $identifier, string $password): array
     {
-        $guard = Guard::where('username', $username)
-            ->where('employment_status', 'active')
+        $guard = Guard::where('employment_status', 'active')
+            ->where(function ($query) use ($identifier) {
+                $query->where('employee_code', $identifier)
+                    ->orWhere('email', $identifier);
+            })
             ->first();
 
         // Check if account is locked
@@ -102,21 +116,52 @@ class AuthService
             ];
         }
 
-        // Reset failed login count on success
-        $guard->update([
-            'failed_login_count' => 0,
-            'last_login_at' => now()
-        ]);
-
-        // Create guard session and JWT
-        $tokens = $this->createGuardSession($guard, $deviceInfo);
+        // Credentials valid — clear the failed-attempt counter. Tokens are
+        // issued separately via issueGuardSession().
+        $guard->update(['failed_login_count' => 0]);
 
         return [
             'success' => true,
             'guard' => $guard,
-            'access_token' => $tokens['access_token'],
-            'refresh_token' => $tokens['refresh_token'],
-            'expires_at' => $tokens['expires_at']
+        ];
+    }
+
+    /**
+     * Issue a fresh guard session (access + refresh JWT) for an already
+     * authenticated guard. Enforces the single-active-session rule via
+     * createGuardSession() (any prior session is invalidated).
+     *
+     * @return array{access_token: string, refresh_token: string, expires_at: \Illuminate\Support\Carbon}
+     */
+    public function issueGuardSession(Guard $guard, array $deviceInfo): array
+    {
+        $guard->update(['last_login_at' => now()]);
+
+        return $this->createGuardSession($guard, $deviceInfo);
+    }
+
+    /**
+     * Mint a new access token for an existing, validated session (refresh
+     * flow). Rolls the session's stored access-token hash + expiry forward so
+     * the new access token passes GuardAuth; the refresh token is unchanged.
+     *
+     * @return array{access_token: string, expires_at: \Illuminate\Support\Carbon}
+     */
+    public function refreshAccessToken(Guard $guard, string $sessionId): array
+    {
+        $accessToken = $this->generateJWT($guard, 'access', 2); // 2 hours
+        $expiresAt = now()->addHours(2);
+
+        DB::table('guard_sessions')
+            ->where('id', $sessionId)
+            ->update([
+                'access_token_hash' => hash('sha256', $accessToken),
+                'expires_at' => $expiresAt,
+            ]);
+
+        return [
+            'access_token' => $accessToken,
+            'expires_at' => $expiresAt,
         ];
     }
 
@@ -125,6 +170,12 @@ class AuthService
      */
     private function createAdminSession(Admin $admin): string
     {
+        // Enforce a single active session per admin: invalidate any prior
+        // sessions before issuing a new one (mirrors createGuardSession()).
+        DB::table('admin_sessions')
+            ->where('admin_id', $admin->id)
+            ->delete();
+
         $sessionId = Str::uuid();
 
         // Generate session token for web sessions
@@ -211,13 +262,35 @@ class AuthService
     }
 
     /**
+     * Decode and verify a guard JWT, returning the payload as an array.
+     *
+     * Unlike validateJWT() this does NOT swallow failures — it lets the
+     * firebase/php-jwt exceptions propagate so callers (e.g. GuardAuth
+     * middleware) can distinguish an EXPIRED token from a malformed/forged
+     * one and respond with the correct error code (TOKEN_EXPIRED vs
+     * TOKEN_INVALID). Throws:
+     *   - Firebase\JWT\ExpiredException        (exp in the past)
+     *   - Firebase\JWT\SignatureInvalidException (wrong APP_KEY / tampered)
+     *   - Firebase\JWT\BeforeValidException, UnexpectedValueException, ...
+     *
+     * @throws \Exception
+     */
+    public function decodeGuardToken(string $token): array
+    {
+        $decoded = JWT::decode($token, new Key(config('app.key'), 'HS256'));
+        return (array) $decoded;
+    }
+
+    /**
      * Validate JWT token.
+     *
+     * Lenient variant: returns the payload array on success, or null on any
+     * failure. Use decodeGuardToken() when you need to know *why* it failed.
      */
     public function validateJWT(string $token): ?array
     {
         try {
-            $decoded = JWT::decode($token, new Key(config('app.key'), 'HS256'));
-            return (array) $decoded;
+            return $this->decodeGuardToken($token);
         } catch (\Exception $e) {
             return null;
         }

@@ -7,9 +7,9 @@ use App\Domains\Sites\Models\Site;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * GeofenceController - Manages polygon boundaries with MySQL spatial validation
@@ -49,9 +49,10 @@ class GeofenceController extends Controller
                 'geofences' => $geofences
             ]);
         } catch (\Exception $e) {
+            Log::error('Error loading geofences', ['site_id' => $siteId, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error loading geofences: ' . $e->getMessage()
+                'error' => 'Unable to load geofences. Please try again.'
             ], 500);
         }
     }
@@ -62,7 +63,7 @@ class GeofenceController extends Controller
     public function store(Request $request): JsonResponse
     {
         // Debug incoming request
-        \Log::info('Geofence creation request', [
+        Log::info('Geofence creation request', [
             'all' => $request->all(),
             'raw_input' => $request->getContent(),
             'content_type' => $request->header('Content-Type')
@@ -138,7 +139,7 @@ class GeofenceController extends Controller
             }
 
             // Create geofence record with polygon in one operation using raw SQL
-            $adminId = Auth::guard('admin')->user()?->id ?? session('admin_id');
+            $adminId = $this->currentAdminId();
             $now = now();
 
             DB::statement(
@@ -173,15 +174,14 @@ class GeofenceController extends Controller
         } catch (\Exception $e) {
             DB::rollback();
 
-            \Log::error('Geofence creation failed', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
+            Log::error('Geofence creation failed', [
+                'exception' => $e,
                 'request' => $request->all()
             ]);
 
             return response()->json([
                 'success' => false,
-                'error' => 'Error creating geofence: ' . $e->getMessage()
+                'error' => 'Unable to create geofence. Please try again.'
             ], 500);
         }
     }
@@ -287,9 +287,10 @@ class GeofenceController extends Controller
             ]);
         } catch (\Exception $e) {
             DB::rollback();
+            Log::error('Error updating geofence', ['geofence_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error updating geofence: ' . $e->getMessage()
+                'error' => 'Unable to update geofence. Please try again.'
             ], 500);
         }
     }
@@ -302,29 +303,32 @@ class GeofenceController extends Controller
         try {
             $geofence = Geofence::findOrFail($id);
 
-            // Business rule: Check for active shifts using this geofence
-            $activeShifts = DB::table('shifts')
-                ->where('geofence_id', $geofence->id)
-                ->whereIn('status', ['scheduled', 'active'])
-                ->count();
+            return DB::transaction(function () use ($geofence) {
+                // Business rule: Check for active shifts using this geofence
+                $activeShifts = DB::table('shifts')
+                    ->where('geofence_id', $geofence->id)
+                    ->whereIn('status', ['scheduled', 'active'])
+                    ->count();
 
-            if ($activeShifts > 0) {
+                if ($activeShifts > 0) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => "Cannot delete geofence with {$activeShifts} active shifts. Please complete shifts first."
+                    ], 422);
+                }
+
+                $geofence->delete();
+
                 return response()->json([
-                    'success' => false,
-                    'error' => "Cannot delete geofence with {$activeShifts} active shifts. Please complete shifts first."
-                ], 422);
-            }
-
-            $geofence->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Geofence deleted successfully'
-            ]);
+                    'success' => true,
+                    'message' => 'Geofence deleted successfully'
+                ]);
+            });
         } catch (\Exception $e) {
+            Log::error('Error deleting geofence', ['geofence_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error deleting geofence: ' . $e->getMessage()
+                'error' => 'Unable to delete geofence. Please try again.'
             ], 500);
         }
     }
@@ -335,43 +339,47 @@ class GeofenceController extends Controller
     public function destroyBySite(string $siteId): JsonResponse
     {
         try {
-            $site = Site::findOrFail($siteId);
+            // Ensure the site exists before touching its geofences.
+            Site::findOrFail($siteId);
 
-            // Get all geofences for this site
-            $geofences = Geofence::where('site_id', $siteId)->get();
+            return DB::transaction(function () use ($siteId) {
+                // Get all geofences for this site
+                $geofences = Geofence::where('site_id', $siteId)->get();
 
-            if ($geofences->isEmpty()) {
+                if ($geofences->isEmpty()) {
+                    return response()->json([
+                        'success' => true,
+                        'message' => 'No geofences found to delete'
+                    ]);
+                }
+
+                // Check for active shifts using any of these geofences
+                $geofenceIds = $geofences->pluck('id');
+                $activeShifts = DB::table('shifts')
+                    ->whereIn('geofence_id', $geofenceIds)
+                    ->whereIn('status', ['scheduled', 'active'])
+                    ->count();
+
+                if ($activeShifts > 0) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => "Cannot delete geofences with {$activeShifts} active shifts. Please complete shifts first."
+                    ], 422);
+                }
+
+                // Delete all geofences for this site
+                $deletedCount = Geofence::where('site_id', $siteId)->delete();
+
                 return response()->json([
                     'success' => true,
-                    'message' => 'No geofences found to delete'
+                    'message' => "{$deletedCount} geofence(s) deleted successfully"
                 ]);
-            }
-
-            // Check for active shifts using any of these geofences
-            $geofenceIds = $geofences->pluck('id');
-            $activeShifts = DB::table('shifts')
-                ->whereIn('geofence_id', $geofenceIds)
-                ->whereIn('status', ['scheduled', 'active'])
-                ->count();
-
-            if ($activeShifts > 0) {
-                return response()->json([
-                    'success' => false,
-                    'error' => "Cannot delete geofences with {$activeShifts} active shifts. Please complete shifts first."
-                ], 422);
-            }
-
-            // Delete all geofences for this site
-            $deletedCount = Geofence::where('site_id', $siteId)->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => "{$deletedCount} geofence(s) deleted successfully"
-            ]);
+            });
         } catch (\Exception $e) {
+            Log::error('Error deleting geofences for site', ['site_id' => $siteId, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error deleting geofences: ' . $e->getMessage()
+                'error' => 'Unable to delete geofences. Please try again.'
             ], 500);
         }
     }
@@ -408,9 +416,10 @@ class GeofenceController extends Controller
             ]);
         } catch (\Exception $e) {
             DB::rollback();
+            Log::error('Error updating geofence status', ['geofence_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error updating geofence status: ' . $e->getMessage()
+                'error' => 'Unable to update geofence status. Please try again.'
             ], 500);
         }
     }
@@ -453,9 +462,10 @@ class GeofenceController extends Controller
                 ]
             ]);
         } catch (\Exception $e) {
+            Log::error('Error testing geofence point', ['geofence_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error testing point: ' . $e->getMessage()
+                'error' => 'Unable to test point. Please try again.'
             ], 500);
         }
     }
@@ -485,9 +495,10 @@ class GeofenceController extends Controller
                 'geofence' => $geofence
             ]);
         } catch (\Exception $e) {
+            Log::error('Error loading active geofence', ['site_id' => $siteId, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error loading geofence: ' . $e->getMessage()
+                'error' => 'Unable to load geofence. Please try again.'
             ], 500);
         }
     }

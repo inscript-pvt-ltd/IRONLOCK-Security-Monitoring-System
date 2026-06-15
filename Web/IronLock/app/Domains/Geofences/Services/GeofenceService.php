@@ -42,11 +42,17 @@ class GeofenceService
      */
     public function isInsideZone(string $geofenceId, float $latitude, float $longitude): bool
     {
+        // Build the test point as SRID-4326 WKT so it matches the stored
+        // polygon's SRID. ST_GeomFromText(wkt, 4326) is portable across
+        // MariaDB 10.4 and MySQL 8 (MariaDB has no 2-arg ST_SRID()).
+        // NOTE: MySQL expects "longitude latitude" ordering.
+        $point = sprintf('POINT(%F %F)', $longitude, $latitude);
+
         $row = DB::selectOne(
-            'SELECT ST_CONTAINS(polygon, ST_SRID(POINT(?, ?), 4326)) AS is_inside
+            'SELECT ST_CONTAINS(polygon, ST_GeomFromText(?, 4326)) AS is_inside
                FROM geofences
               WHERE id = ? AND is_active = 1',
-            [$longitude, $latitude, $geofenceId]   // NOTE: MySQL POINT(longitude, latitude)
+            [$point, $geofenceId]
         );
 
         return (bool) ($row->is_inside ?? false);

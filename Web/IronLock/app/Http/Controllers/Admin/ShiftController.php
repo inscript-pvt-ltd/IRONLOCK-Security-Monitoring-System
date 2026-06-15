@@ -10,9 +10,10 @@ use App\Domains\Geofences\Models\Geofence;
 use App\Domains\Shifts\Models\WorkingTimeOverride;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Carbon\Carbon;
 
 /**
@@ -33,26 +34,68 @@ class ShiftController extends Controller
      */
     public function index(Request $request)
     {
-        $shifts = Shift::with(['assignedGuard', 'site', 'geofence', 'creator'])
-            ->when($request->get('status'), function($query, $status) {
-                $query->where('status', $status);
-            })
-            ->when($request->get('guard_id'), function($query, $guardId) {
-                $query->where('guard_id', $guardId);
-            })
-            ->when($request->get('site_id'), function($query, $siteId) {
-                $query->where('site_id', $siteId);
-            })
-            ->when($request->get('date_from'), function($query, $dateFrom) {
-                $query->where('scheduled_start', '>=', Carbon::parse($dateFrom)->startOfDay());
-            })
-            ->when($request->get('date_to'), function($query, $dateTo) {
-                $query->where('scheduled_end', '<=', Carbon::parse($dateTo)->endOfDay());
-            })
-            ->orderBy('scheduled_start', 'desc')
-            ->paginate(20);
+        // Validate filter inputs up front so malformed values (e.g. a bad
+        // date string passed to Carbon::parse) cannot trigger an unhandled 500.
+        $validator = Validator::make($request->all(), [
+            'status' => 'nullable|in:scheduled,active,completed,cancelled',
+            'guard_id' => 'nullable|uuid',
+            'site_id' => 'nullable|uuid',
+            'date_from' => 'nullable|date',
+            'date_to' => 'nullable|date|after_or_equal:date_from',
+        ]);
 
-        return view('admin.shifts.index', compact('shifts'));
+        if ($validator->fails()) {
+            if ($request->expectsJson()) {
+                return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+            }
+            return redirect()
+                ->route('admin.shifts.index')
+                ->withErrors($validator)
+                ->withInput();
+        }
+
+        try {
+            $query = Shift::with(['assignedGuard', 'site', 'geofence', 'creator', 'workingTimeOverrides.approvedBy'])
+                ->when($request->get('status'), function($q, $v) {
+                    $q->where('status', $v);
+                })
+                ->when($request->get('guard_id'), function($q, $v) {
+                    $q->where('guard_id', $v);
+                })
+                ->when($request->get('site_id'), function($q, $v) {
+                    $q->where('site_id', $v);
+                })
+                ->when($request->get('date_from'), function($q, $v) {
+                    $q->where('scheduled_start', '>=', Carbon::parse($v)->startOfDay());
+                })
+                ->when($request->get('date_to'), function($q, $v) {
+                    $q->where('scheduled_end', '<=', Carbon::parse($v)->endOfDay());
+                })
+                ->orderBy('scheduled_start', 'asc');
+
+            // AJAX calls from the calendar JS (Accept: application/json) get a
+            // flat array of all matching shifts so the calendar can render them.
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'shifts' => $query->get(),
+                ]);
+            }
+
+            $shifts = $query->paginate(20)->withQueryString();
+
+            return view('admin.shifts.index', compact('shifts'));
+        } catch (\Exception $e) {
+            Log::error('Error loading shifts list', ['exception' => $e]);
+
+            if ($request->expectsJson()) {
+                return response()->json(['success' => false, 'error' => 'Unable to load shifts.'], 500);
+            }
+
+            return redirect()
+                ->route('admin.dashboard')
+                ->with('error', 'Unable to load shifts. Please try again.');
+        }
     }
 
     /**
@@ -108,40 +151,27 @@ class ShiftController extends Controller
 
             // Handle WTR violations
             if (!$wtrValidation['compliant']) {
-                $overrideNeeded = [];
-                $requiresOverride = false;
+                $assessment = $this->assessWtrViolations(
+                    $wtrValidation,
+                    $request->boolean('override_12hr_warning'),
+                    $request->boolean('override_11hr_rest')
+                );
 
-                foreach ($wtrValidation['violations'] as $violation) {
-                    switch ($violation['type']) {
-                        case 'DURATION_16HR_BLOCK':
-                            return response()->json([
-                                'success' => false,
-                                'error' => 'Shift duration exceeds 16 hours maximum. This cannot be overridden.',
-                                'wtr_violation' => $violation
-                            ], 422);
-
-                        case 'DURATION_12HR_WARNING':
-                            if (!$request->boolean('override_12hr_warning')) {
-                                $overrideNeeded[] = '12-hour duration warning';
-                                $requiresOverride = true;
-                            }
-                            break;
-
-                        case 'REST_PERIOD_11HR':
-                            if (!$request->boolean('override_11hr_rest')) {
-                                $overrideNeeded[] = '11-hour rest period';
-                                $requiresOverride = true;
-                            }
-                            break;
-                    }
+                // 16-hour maximum is a hard block — never overridable (spec rule #22).
+                if ($assessment['blocked']) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'Shift duration exceeds 16 hours maximum. This cannot be overridden.',
+                        'wtr_violation' => $assessment['block_violation']
+                    ], 422);
                 }
 
-                if ($requiresOverride) {
+                if (!empty($assessment['override_required'])) {
                     return response()->json([
                         'success' => false,
                         'wtr_warning' => true,
                         'violations' => $wtrValidation['violations'],
-                        'override_required' => $overrideNeeded,
+                        'override_required' => $assessment['override_required'],
                         'message' => 'Working Time Regulations compliance issues detected. Override required with justification.'
                     ], 422);
                 }
@@ -165,7 +195,7 @@ class ShiftController extends Controller
                 'scheduled_start' => $scheduledStart,
                 'scheduled_end' => $scheduledEnd,
                 'status' => 'scheduled',
-                'created_by' => Auth::guard('admin')->user()->id,
+                'created_by' => $this->currentAdminId(),
             ]);
 
             // Create WTR overrides if needed
@@ -183,9 +213,10 @@ class ShiftController extends Controller
             ]);
         } catch (\Exception $e) {
             DB::rollback();
+            Log::error('Error creating shift', ['exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error creating shift: ' . $e->getMessage()
+                'error' => 'Unable to create shift. Please try again.'
             ], 500);
         }
     }
@@ -233,9 +264,11 @@ class ShiftController extends Controller
             }
 
             $validator = Validator::make($request->all(), [
-                'scheduled_start' => 'required|date',
+                'scheduled_start' => 'required|date|after:now',
                 'scheduled_end' => 'required|date|after:scheduled_start',
-                'override_justification' => 'nullable|string|max:500'
+                'override_12hr_warning' => 'nullable|boolean',
+                'override_11hr_rest' => 'nullable|boolean',
+                'override_justification' => 'required_if:override_12hr_warning,true|required_if:override_11hr_rest,true|nullable|string|max:500'
             ]);
 
             if ($validator->fails()) {
@@ -248,37 +281,86 @@ class ShiftController extends Controller
             $scheduledStart = Carbon::parse($request->scheduled_start);
             $scheduledEnd = Carbon::parse($request->scheduled_end);
 
-            // Re-validate WTR
+            // Re-validate WTR (excluding this shift from the rest-period lookup)
             $wtrValidation = $this->validateWorkingTimeRegulations(
                 $shift->guard_id,
                 $scheduledStart,
                 $scheduledEnd,
-                $shift->id // Exclude current shift from conflict checking
+                $shift->id
             );
 
-            if (!$wtrValidation['compliant'] && !$request->override_justification) {
+            // Apply the same WTR rules as store(): the 16-hour maximum is a hard
+            // block that no justification can override; the 12-hour and 11-hour
+            // rest warnings require the matching override flag + justification.
+            if (!$wtrValidation['compliant']) {
+                $assessment = $this->assessWtrViolations(
+                    $wtrValidation,
+                    $request->boolean('override_12hr_warning'),
+                    $request->boolean('override_11hr_rest')
+                );
+
+                if ($assessment['blocked']) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'Shift duration exceeds 16 hours maximum. This cannot be overridden.',
+                        'wtr_violation' => $assessment['block_violation']
+                    ], 422);
+                }
+
+                if (!empty($assessment['override_required'])) {
+                    return response()->json([
+                        'success' => false,
+                        'wtr_warning' => true,
+                        'violations' => $wtrValidation['violations'],
+                        'override_required' => $assessment['override_required'],
+                        'message' => 'Working Time Regulations compliance issues detected. Override required with justification.'
+                    ], 422);
+                }
+            }
+
+            // Check for conflicts with the guard's other shifts.
+            $conflicts = $this->checkShiftConflicts($shift->guard_id, $scheduledStart, $scheduledEnd, $shift->id);
+            if (!empty($conflicts)) {
                 return response()->json([
                     'success' => false,
-                    'wtr_warning' => true,
-                    'violations' => $wtrValidation['violations'],
-                    'message' => 'WTR compliance issues detected. Justification required for update.'
+                    'error' => 'Shift conflicts detected with existing shifts',
+                    'conflicts' => $conflicts
                 ], 422);
             }
 
-            $shift->update([
-                'scheduled_start' => $scheduledStart,
-                'scheduled_end' => $scheduledEnd,
-            ]);
+            DB::beginTransaction();
+            try {
+                $shift->update([
+                    'scheduled_start' => $scheduledStart,
+                    'scheduled_end' => $scheduledEnd,
+                ]);
+
+                // Record override justification when a warning was acknowledged.
+                if (($request->boolean('override_12hr_warning') || $request->boolean('override_11hr_rest')) && $request->override_justification) {
+                    $this->createWorkingTimeOverrides($shift, $wtrValidation['violations'], $request->override_justification);
+                }
+
+                DB::commit();
+            } catch (\Throwable $e) {
+                DB::rollBack();
+                throw $e;
+            }
 
             return response()->json([
                 'success' => true,
                 'message' => 'Shift updated successfully',
                 'shift' => $shift->load('assignedGuard', 'site', 'geofence')
             ]);
-        } catch (\Exception $e) {
+        } catch (ModelNotFoundException $e) {
             return response()->json([
                 'success' => false,
-                'error' => 'Error updating shift: ' . $e->getMessage()
+                'error' => 'Shift not found'
+            ], 404);
+        } catch (\Exception $e) {
+            Log::error('Error updating shift', ['shift_id' => $id, 'exception' => $e]);
+            return response()->json([
+                'success' => false,
+                'error' => 'Unable to update shift. Please try again.'
             ], 500);
         }
     }
@@ -304,10 +386,16 @@ class ShiftController extends Controller
                 'success' => true,
                 'message' => 'Shift cancelled successfully'
             ]);
-        } catch (\Exception $e) {
+        } catch (ModelNotFoundException $e) {
             return response()->json([
                 'success' => false,
-                'error' => 'Error cancelling shift: ' . $e->getMessage()
+                'error' => 'Shift not found'
+            ], 404);
+        } catch (\Exception $e) {
+            Log::error('Error cancelling shift', ['shift_id' => $id, 'exception' => $e]);
+            return response()->json([
+                'success' => false,
+                'error' => 'Unable to cancel shift. Please try again.'
             ], 500);
         }
     }
@@ -354,14 +442,20 @@ class ShiftController extends Controller
     private function validateWorkingTimeRegulations(string $guardId, Carbon $scheduledStart, Carbon $scheduledEnd, ?string $excludeShiftId = null): array
     {
         $violations = [];
-        $duration = $scheduledStart->diffInHours($scheduledEnd, true);
+        $duration = $scheduledStart->diffInHours($scheduledEnd, true); // float, used for comparisons
+
+        // Human-readable duration label: "15 hours and 1 min" instead of "15.016667 hours".
+        $totalMins = (int) round($scheduledStart->diffInMinutes($scheduledEnd));
+        $dHours = intdiv($totalMins, 60);
+        $dMins  = $totalMins % 60;
+        $durationLabel = $dMins > 0 ? "{$dHours}h {$dMins}min" : "{$dHours}h";
 
         // Rule 1: 16-hour absolute maximum (cannot be overridden)
         if ($duration > 16) {
             $violations[] = [
                 'type' => 'DURATION_16HR_BLOCK',
                 'severity' => 'ERROR',
-                'message' => "Shift duration of {$duration} hours exceeds 16-hour maximum",
+                'message' => "Shift duration of {$durationLabel} exceeds the 16-hour maximum and cannot be saved.",
                 'override_allowed' => false
             ];
         }
@@ -371,7 +465,7 @@ class ShiftController extends Controller
             $violations[] = [
                 'type' => 'DURATION_12HR_WARNING',
                 'severity' => 'WARNING',
-                'message' => "Shift duration of {$duration} hours exceeds 12-hour recommendation",
+                'message' => "Shift duration of {$durationLabel} exceeds the 12-hour recommendation.",
                 'override_allowed' => true
             ];
         }
@@ -389,10 +483,13 @@ class ShiftController extends Controller
         if ($lastShift) {
             $restPeriodHours = Carbon::parse($lastShift->scheduled_end)->diffInHours($scheduledStart, true);
             if ($restPeriodHours < 11) {
+                $restMins  = (int) round(Carbon::parse($lastShift->scheduled_end)->diffInMinutes($scheduledStart));
+                $rHours    = intdiv($restMins, 60);
+                $rMinLabel = ($restMins % 60) > 0 ? "{$rHours}h " . ($restMins % 60) . "min" : "{$rHours}h";
                 $violations[] = [
                     'type' => 'REST_PERIOD_11HR',
                     'severity' => 'WARNING',
-                    'message' => "Only {$restPeriodHours} hours rest since last shift. 11 hours required.",
+                    'message' => "Only {$rMinLabel} rest since last shift — 11 hours required.",
                     'override_allowed' => true,
                     'last_shift_end' => $lastShift->scheduled_end
                 ];
@@ -404,6 +501,48 @@ class ShiftController extends Controller
             'violations' => $violations,
             'duration_hours' => $duration,
             'validated_at' => Carbon::now()->toISOString()
+        ];
+    }
+
+    /**
+     * Assess WTR violations against the override flags supplied by the admin.
+     *
+     * Centralises the policy shared by store() and update():
+     *  - DURATION_16HR_BLOCK is a hard block — never overridable (spec rule #22).
+     *  - DURATION_12HR_WARNING / REST_PERIOD_11HR require the matching override
+     *    flag (plus justification, enforced by validation) to proceed.
+     *
+     * @return array{blocked: bool, block_violation: ?array, override_required: array}
+     */
+    private function assessWtrViolations(array $wtrValidation, bool $override12hr, bool $override11hr): array
+    {
+        $blockViolation = null;
+        $overrideRequired = [];
+
+        foreach ($wtrValidation['violations'] as $violation) {
+            switch ($violation['type']) {
+                case 'DURATION_16HR_BLOCK':
+                    $blockViolation = $violation;
+                    break;
+
+                case 'DURATION_12HR_WARNING':
+                    if (!$override12hr) {
+                        $overrideRequired[] = '12-hour duration warning';
+                    }
+                    break;
+
+                case 'REST_PERIOD_11HR':
+                    if (!$override11hr) {
+                        $overrideRequired[] = '11-hour rest period';
+                    }
+                    break;
+            }
+        }
+
+        return [
+            'blocked' => $blockViolation !== null,
+            'block_violation' => $blockViolation,
+            'override_required' => $overrideRequired,
         ];
     }
 
@@ -444,7 +583,7 @@ class ShiftController extends Controller
      */
     private function createWorkingTimeOverrides(Shift $shift, array $violations, string $justification): void
     {
-        $adminId = Auth::guard('admin')->user()->id;
+        $adminId = $this->currentAdminId();
 
         foreach ($violations as $violation) {
             if ($violation['override_allowed']) {
