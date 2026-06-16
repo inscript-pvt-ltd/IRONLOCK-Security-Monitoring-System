@@ -11,6 +11,10 @@ class ShiftCalendar {
     }
 
     static init() {
+        // Idempotent: guard against being called more than once (e.g. a stray
+        // inline init in the view). A second instance would bind a duplicate
+        // form submit handler and double-fire saveShift().
+        if (window.shiftCalendar) return;
         window.shiftCalendar = new ShiftCalendar();
         window.closeShiftDrawer = () => window.shiftCalendar.closeShiftDrawer();
     }
@@ -133,11 +137,28 @@ class ShiftCalendar {
             });
             if (!res.ok) throw new Error('Failed to load shifts');
             const data = await res.json();
-            this.shifts = data.shifts || [];
+            // Shift times are wall-clock site times. Laravel serialises them with
+            // a UTC "Z" marker, which would make `new Date()` shift them by the
+            // browser's timezone offset and drift the schedule on every edit.
+            // Strip the zone so they parse as local wall-clock and round-trip cleanly.
+            this.shifts = (data.shifts || []).map(s => ({
+                ...s,
+                scheduled_start: this.toLocalNaive(s.scheduled_start),
+                scheduled_end:   this.toLocalNaive(s.scheduled_end),
+            }));
         } catch (e) {
             console.error(e);
             this.shifts = [];
         }
+    }
+
+    // Normalise a server datetime (e.g. "2026-06-18T17:19:00.000000Z") to a
+    // timezone-naive local string ("2026-06-18T17:19:00") so `new Date()` reads
+    // it as wall-clock time rather than converting from UTC.
+    toLocalNaive(value) {
+        if (!value) return value;
+        const m = String(value).match(/(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+        return m ? `${m[1]}T${m[2]}` : value;
     }
 
     populateGuardSelect() {
@@ -246,14 +267,14 @@ class ShiftCalendar {
                 if (isOvernight && endsInWeek) {
                     // Overnight shift that ends within the week - merge into one cell spanning two days
                     const label = `${startFmt}–${endFmt}`;
-                    cells.push(`<td colspan="2" class="overnight-merged"><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
+                    cells.push(`<td colspan="2" class="overnight-merged shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
 
                     // Add placeholder for the consumed next cell so our indexing stays correct
                     cells.push(null); // This will be skipped in the final join
                 } else {
                     // Regular shift (single day) or overnight that extends beyond the week
                     const label = isOvernight ? `${startFmt}–${endFmt} →` : `${startFmt}–${endFmt}`;
-                    cells.push(`<td><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
+                    cells.push(`<td class="shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
                 }
                 continue;
             }
@@ -271,7 +292,7 @@ class ShiftCalendar {
                 // This should only happen if the shift started before our current week view
                 processedShifts.add(overnight.id);
                 const until = this.fmtAmPm(new Date(overnight.scheduled_end));
-                cells.push(`<td><span class="shift-blk shift-cont" data-shift-id="${overnight.id}" title="Overnight from previous day — until ${until}">← ${until}</span></td>`);
+                cells.push(`<td class="shift-cell" data-shift-id="${overnight.id}"><span class="shift-blk shift-cont" data-shift-id="${overnight.id}" title="Overnight from previous day — until ${until}">← ${until}</span></td>`);
                 continue;
             }
 
@@ -289,7 +310,7 @@ class ShiftCalendar {
     }
 
     attachCellHandlers() {
-        // Empty cells → open drawer for new shift
+        // Empty cells → open drawer for a NEW shift
         document.querySelectorAll('#calendar-table td.day-cell[data-guard-id]').forEach(td => {
             td.addEventListener('click', () => {
                 const date = new Date(td.dataset.date + 'T00:00:00');
@@ -297,26 +318,15 @@ class ShiftCalendar {
             });
         });
 
-        // Shift blocks → open drawer for editing
-        document.querySelectorAll('#calendar-table .shift-blk[data-shift-id]').forEach(span => {
-            span.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const shift = this.shifts.find(s => s.id === span.dataset.shiftId);
+        // Occupied cells → open drawer for EDITING. The whole cell is clickable
+        // (not just the small text chip) so a click anywhere on the shift always
+        // edits it. This prevents the dead-zone where clicking the cell padding
+        // did nothing and the user re-created the shift via the New form, which
+        // then collided with the existing one as a "conflict".
+        document.querySelectorAll('#calendar-table td.shift-cell[data-shift-id]').forEach(td => {
+            td.addEventListener('click', () => {
+                const shift = this.shifts.find(s => s.id === td.dataset.shiftId);
                 if (shift) this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
-            });
-        });
-
-        // Handle clicks on merged overnight cells (in case user clicks the cell but misses the shift block)
-        document.querySelectorAll('#calendar-table td.overnight-merged').forEach(td => {
-            td.addEventListener('click', (e) => {
-                // Only handle if the click wasn't on the shift block itself
-                if (!e.target.closest('.shift-blk')) {
-                    const shiftBlock = td.querySelector('.shift-blk[data-shift-id]');
-                    if (shiftBlock) {
-                        const shift = this.shifts.find(s => s.id === shiftBlock.dataset.shiftId);
-                        if (shift) this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
-                    }
-                }
             });
         });
     }
@@ -477,6 +487,9 @@ class ShiftCalendar {
             const durationMs = new Date(shift.scheduled_end) - new Date(shift.scheduled_start);
             document.getElementById('shift-duration').value = Math.round(durationMs / 3600000 * 10) / 10;
             this.updateEndTimeDisplay();
+
+            // Load existing WTR overrides if any
+            this.loadExistingOverrides(shift);
         }
 
         document.getElementById('shift-drawer').classList.add('open');
@@ -489,6 +502,31 @@ class ShiftCalendar {
         document.getElementById('shift-drawer').classList.remove('open');
         document.querySelector('.shifts-main').classList.remove('drawer-open');
         this.editingShift = null;
+    }
+
+    // Load existing WTR overrides when editing a shift
+    loadExistingOverrides(shift) {
+        const overrides = shift.working_time_overrides || [];
+        if (overrides.length === 0) return;
+
+        // Show override section since we have existing overrides
+        document.getElementById('override-section').style.display = 'block';
+
+        // Get the most recent override justification (they should all have the same justification)
+        const mostRecentOverride = overrides[overrides.length - 1];
+        if (mostRecentOverride.justification) {
+            document.getElementById('override-justification').value = mostRecentOverride.justification;
+        }
+
+        // Check the appropriate override checkboxes based on what overrides exist
+        const has12hrOverride = overrides.some(ov => ov.override_type === 'duration_12hr');
+        const has11hrOverride = overrides.some(ov => ov.override_type === 'rest_period_11hr');
+
+        document.getElementById('override-12hr-warning').checked = has12hrOverride;
+        document.getElementById('override-11hr-rest').checked = has11hrOverride;
+
+        // Also trigger WTR validation to show current status
+        setTimeout(() => this.validateWTR(), 100);
     }
 
     // ── Time formatting ────────────────────────────────────────
@@ -555,7 +593,10 @@ class ShiftCalendar {
                     body: JSON.stringify({
                         guard_id:        guardId,
                         scheduled_start: `${date}T${start}:00`,
-                        scheduled_end:   this.formatLocalDateTime(endDt)
+                        scheduled_end:   this.formatLocalDateTime(endDt),
+                        // When editing, exclude this shift from its own rest-period
+                        // check so the live preview matches what saving will do.
+                        shift_id:        this.editingShift ? this.editingShift.id : null
                     })
                 });
 
@@ -583,12 +624,24 @@ class ShiftCalendar {
             wtrCheck.classList.add('ok');
             wtrText.textContent = '✓ OK — Compliant';
             overrideSec.style.display = 'none';
+            this.toggleOverrideRow('12hr', false);
+            this.toggleOverrideRow('11hr', false);
             saveBtn.disabled    = false;
             return;
         }
 
         const hasBlockers = wtrData.violations.some(v => v.severity === 'ERROR');
         const hasWarnings = wtrData.violations.some(v => v.severity === 'WARNING');
+
+        // Only surface the override checkbox for a warning that is actually
+        // active. A 12.5h shift with no neighbouring shift triggers the 12h
+        // warning but cannot breach the 11h rest rule, so showing (and letting
+        // the admin tick) the rest override would record an override the backend
+        // has nothing to persist — it silently vanishes on reload.
+        const has12hr = wtrData.violations.some(v => v.type === 'DURATION_12HR_WARNING');
+        const has11hr = wtrData.violations.some(v => v.type === 'REST_PERIOD_11HR');
+        this.toggleOverrideRow('12hr', has12hr);
+        this.toggleOverrideRow('11hr', has11hr);
 
         if (hasBlockers) {
             wtrCheck.classList.add('error');
@@ -610,6 +663,16 @@ class ShiftCalendar {
             div.textContent = `${icon} ${v.message}`;
             violationsList.appendChild(div);
         });
+    }
+
+    // Show/hide a single override checkbox row. When hidden, the checkbox is
+    // cleared so a previously-ticked acknowledgement for a warning that no
+    // longer applies is never submitted (the backend would discard it anyway).
+    toggleOverrideRow(kind, show) {
+        const row = document.getElementById(`override-row-${kind}`);
+        const cb  = document.getElementById(kind === '12hr' ? 'override-12hr-warning' : 'override-11hr-rest');
+        if (row) row.style.display = show ? 'flex' : 'none';
+        if (cb && !show) cb.checked = false;
     }
 
     // ── Save shift ─────────────────────────────────────────────
@@ -669,12 +732,20 @@ class ShiftCalendar {
                 // Shift conflict details
                 if (data.conflicts && data.conflicts.length) {
                     const lines = data.conflicts.map(c => {
-                        const start = this.fmtAmPm(new Date(c.start));
-                        const end   = this.fmtAmPm(new Date(c.end));
-                        const day   = new Date(c.start).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                        const startDt = new Date(this.toLocalNaive(c.start));
+                        const endDt   = new Date(this.toLocalNaive(c.end));
+                        const start = this.fmtAmPm(startDt);
+                        const end   = this.fmtAmPm(endDt);
+                        const day   = startDt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
                         return `• ${c.site_name}: ${day} ${start}–${end} (${c.status})`;
                     });
-                    throw new Error('Shift conflicts with existing schedule:\n' + lines.join('\n'));
+                    // When creating, the overlap is usually the shift the user
+                    // actually meant to edit. Point them at the edit path instead
+                    // of leaving them stuck re-saving a duplicate.
+                    const hint = this.editingShift
+                        ? ''
+                        : '\n\nThis guard is already booked for that time. To change the existing shift, close this and click it on the calendar instead of creating a new one.';
+                    throw new Error('Shift conflicts with existing schedule:\n' + lines.join('\n') + hint);
                 }
                 throw new Error(data.error || 'Failed to save shift.');
             }

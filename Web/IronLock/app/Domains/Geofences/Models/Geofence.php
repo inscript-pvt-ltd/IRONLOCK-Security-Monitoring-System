@@ -50,6 +50,8 @@ class Geofence extends Model
     protected $fillable = [
         'site_id',
         'name',
+        'shape_type',
+        'radius',
         'polygon',
         'version',
         'is_active',
@@ -75,6 +77,7 @@ class Geofence extends Model
     {
         return [
             'version' => 'integer',
+            'radius' => 'integer',
             'is_active' => 'boolean',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',

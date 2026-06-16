@@ -52,12 +52,13 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('geofences/site/{site}/active', [App\Http\Controllers\Admin\GeofenceController::class, 'getActiveGeofence'])->name('geofences.site.active');
 
         // Shift Management routes - D-07 Wireframe with Calendar UI and WTR Compliance
+        // Static/action routes must come before parameterised routes to avoid {shift} swallowing them.
         Route::get('shifts', [App\Http\Controllers\Admin\ShiftController::class, 'index'])->name('shifts.index');
         Route::post('shifts', [App\Http\Controllers\Admin\ShiftController::class, 'store'])->name('shifts.store');
+        Route::post('shifts/check-wtr', [App\Http\Controllers\Admin\ShiftController::class, 'checkWTRCompliance'])->name('shifts.check-wtr');
         Route::get('shifts/{shift}', [App\Http\Controllers\Admin\ShiftController::class, 'show'])->name('shifts.show');
         Route::put('shifts/{shift}', [App\Http\Controllers\Admin\ShiftController::class, 'update'])->name('shifts.update');
         Route::patch('shifts/{shift}/cancel', [App\Http\Controllers\Admin\ShiftController::class, 'cancel'])->name('shifts.cancel');
-        Route::post('shifts/check-wtr', [App\Http\Controllers\Admin\ShiftController::class, 'checkWTRCompliance'])->name('shifts.check-wtr');
 
         // API status endpoint
         Route::get('status', function () {

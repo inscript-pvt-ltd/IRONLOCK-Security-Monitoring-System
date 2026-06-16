@@ -40,11 +40,12 @@ class SiteController extends Controller
         ->orderBy('created_at', 'desc')
         ->paginate(15);
 
-        // Load coordinates for each geofence
+        // Load coordinates for each geofence. The geometry is always a polygon, but
+        // expose the original shape so circles reload as circles (and keep their radius).
         foreach ($sites as $site) {
             foreach ($site->geofences as $geofence) {
                 $geofence->coordinates = $geofence->getPolygonCoordinates();
-                $geofence->type = 'polygon'; // Default type since we're storing everything as polygons
+                $geofence->type = $geofence->shape_type ?? 'polygon';
             }
         }
 

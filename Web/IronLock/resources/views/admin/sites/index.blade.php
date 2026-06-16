@@ -420,14 +420,21 @@
         position: fixed;
         top: 80px;
         right: 20px;
+        max-width: 320px;
+        width: max-content;
+        box-sizing: border-box;
         background: var(--success-green);
         color: white;
         padding: 12px 16px;
         border-radius: 4px;
         font-size: 11px;
         font-weight: 500;
+        line-height: 1.4;
+        word-wrap: break-word;
         z-index: 10000;
-        transform: translateX(400px);
+        /* Width-relative so the toast always tucks fully off-screen no matter how
+           long the message is (a fixed px value left long toasts half-visible). */
+        transform: translateX(calc(100% + 24px));
         transition: transform 0.3s ease;
     }
 
@@ -836,6 +843,10 @@
     function loadSiteGeofence(site) {
         removeGeofenceLayer();
 
+        // Reset the radius box to the default; displayGeofence() overrides it with
+        // the real value when the site has a saved circle.
+        document.getElementById('radiusInput').value = 200;
+
         if (site.geofences && site.geofences.length > 0) {
             const activeGeofence = site.geofences.find(g => g.is_active) || site.geofences[0];
             if (activeGeofence && activeGeofence.coordinates) {
@@ -844,8 +855,27 @@
         }
     }
 
+    // Normalise the shape type across the various shapes a geofence object can take:
+    // freshly drawn ones carry `type`, server-loaded ones carry `shape_type`.
+    function geofenceType(g) {
+        return g.type || g.shape_type || 'polygon';
+    }
+
+    // Average a polygon's vertices to recover the centre of a circle that was
+    // stored as a polygon approximation. Ignores the duplicated closing vertex.
+    function polygonCentroid(points) {
+        let pts = points;
+        if (pts.length > 1) {
+            const first = pts[0], last = pts[pts.length - 1];
+            if (first[0] === last[0] && first[1] === last[1]) pts = pts.slice(0, -1);
+        }
+        let lat = 0, lng = 0;
+        pts.forEach(p => { lat += p[0]; lng += p[1]; });
+        return [lat / pts.length, lng / pts.length];
+    }
+
     // Display a geofence on the map. coordinates may arrive as an array (from the
-    // server) or a JSON string; handle both.
+    // server), a {center, radius} object (a freshly-drawn circle) or a JSON string.
     function displayGeofence(geofence) {
         try {
             let coords = geofence.coordinates;
@@ -854,10 +884,33 @@
             }
             if (!coords) return;
 
-            if (geofence.type === 'circle' && coords.center && coords.radius) {
-                currentGeofence = L.circle(coords.center, { radius: coords.radius, ...GEO_STYLE }).addTo(map);
-                document.getElementById('radiusInput').value = coords.radius;
-            } else if (Array.isArray(coords) && coords.length > 0) {
+            const radiusInput = document.getElementById('radiusInput');
+
+            if (geofenceType(geofence) === 'circle') {
+                // Two circle shapes: a freshly-drawn one ({center, radius}) and a
+                // server-loaded one (polygon array + a separate `radius`). Recover a
+                // real L.Circle from either so the radius box stays accurate and live.
+                let center = null, radius = null;
+                if (!Array.isArray(coords) && coords.center && coords.radius) {
+                    center = coords.center;
+                    radius = coords.radius;
+                } else if (Array.isArray(coords) && coords.length > 0) {
+                    center = polygonCentroid(coords);
+                    radius = geofence.radius;
+                }
+
+                if (center && radius) {
+                    currentGeofence = L.circle(center, { radius: radius, ...GEO_STYLE }).addTo(map);
+                    currentCircle = { center: center, radius: radius };
+                    radiusInput.value = radius;
+                    drawingTool = 'circle';
+                    document.getElementById('radiusGroup').style.display = 'block';
+                    return;
+                }
+            }
+
+            // Polygon (or a circle we couldn't reconstruct) — draw the raw shape.
+            if (Array.isArray(coords) && coords.length > 0) {
                 currentGeofence = L.polygon(coords, GEO_STYLE).addTo(map);
             }
         } catch (e) {
@@ -1052,25 +1105,24 @@
     }
     let radiusSaveTimer = null;
 
-    // Clear button — removes the visual AND deletes the geofence from the server.
+    // Clear button — asks the server to delete the geofence. The visual is only
+    // removed once the server confirms; if the geofence is locked (e.g. an ongoing
+    // shift uses it) the server refuses and we surface why, leaving it on the map.
     function clearGeofence() {
-        removeGeofenceLayer();
-        resetToolButtons();
-        if (currentSiteId) {
-            deleteGeofence();
+        if (!currentSiteId) {
+            updateGeofenceStatus(null, 'Select a site first, then clear its geofence');
+            return;
         }
-        updateGeofenceStatus(null, 'Geofence cleared');
 
-        // Briefly confirm on the button itself
-        const clearBtn = document.getElementById('clearBtn');
-        if (clearBtn) {
-            clearBtn.textContent = '✓ Cleared';
-            clearBtn.classList.add('drawing'); // reuse green confirmation colour
-            setTimeout(() => {
-                clearBtn.textContent = 'Clear';
-                clearBtn.classList.remove('drawing');
-            }, 2000);
+        const site = sites.find(s => s.id == currentSiteId);
+        const hasSaved = site && site.geofences && site.geofences.length > 0;
+        if (!hasSaved && !currentGeofence) {
+            updateGeofenceStatus(null, 'No geofence to clear for this site');
+            return;
         }
+
+        updateGeofenceStatus(null, 'Clearing geofence…');
+        deleteGeofence();
     }
 
     // Re-fetch this site's geofence from the server and redraw ONLY the map layer
@@ -1097,7 +1149,7 @@
             if (geofences.length > 0) {
                 const active = geofences.find(g => g.is_active) || geofences[0];
                 if (active && active.coordinates) {
-                    displayGeofence({ type: 'polygon', coordinates: active.coordinates });
+                    displayGeofence(active);
                 }
             }
             updateGeofenceStatus(site);
@@ -1150,27 +1202,51 @@
         });
     }
 
-    // Delete geofence from server
+    // Delete geofence from server. Only mutates the map/state on a confirmed
+    // success; on failure (e.g. 422 — geofence locked by an ongoing shift) it keeps
+    // the geofence visible and shows the server's reason.
     function deleteGeofence() {
         if (!currentSiteId) return;
 
-        fetch(`/admin/geofences/site/${currentSiteId}`, {
+        const siteId = currentSiteId;
+        const clearBtn = document.getElementById('clearBtn');
+
+        fetch(`/admin/geofences/site/${siteId}`, {
             method: 'DELETE',
             headers: {
                 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
             }
         })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Sync the in-memory data so the cleared state sticks (no reload)
-                const site = sites.find(s => s.id == currentSiteId);
+        .then(response => response.json().then(data => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok && data.success) {
+                // Now it's safe to wipe the visual + in-memory state (no reload)
+                removeGeofenceLayer();
+                resetToolButtons();
+                const site = sites.find(s => s.id == siteId);
                 if (site) site.geofences = [];
                 updateGeofenceStatus(null, 'Geofence cleared');
+
+                if (clearBtn) {
+                    clearBtn.textContent = '✓ Cleared';
+                    clearBtn.classList.add('drawing'); // reuse green confirmation colour
+                    setTimeout(() => {
+                        clearBtn.textContent = 'Clear';
+                        clearBtn.classList.remove('drawing');
+                    }, 2000);
+                }
+            } else {
+                // Geofence stays on the map — surface why it couldn't be cleared.
+                const msg = (data && data.error) || "Can't clear the geofence right now. Please try again.";
+                updateGeofenceStatus(null, msg);
+                showToast(msg, 'error');
             }
         })
         .catch(error => {
             console.error('Error:', error);
+            const msg = "Can't clear the geofence right now. Please try again.";
+            updateGeofenceStatus(null, msg);
+            showToast(msg, 'error');
         });
     }
 

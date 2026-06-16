@@ -90,6 +90,9 @@
         background: var(--border-dark);
     }
 
+    /* Whole occupied cell is clickable to edit, not just the chip. */
+    .cal tbody td.shift-cell { cursor: pointer; }
+
     /* Merged overnight shift cells */
     .cal tbody td.overnight-merged {
         text-align: center;
@@ -567,14 +570,14 @@
                 <textarea id="override-justification" class="drawer-textarea" rows="3"
                     placeholder="Document reason for this WTR override (operational necessity, emergency cover, etc.)…"></textarea>
 
-                <div class="override-cb-row">
+                <div class="override-cb-row" id="override-row-12hr" style="display:none;">
                     <input type="checkbox" id="override-12hr-warning">
                     <div class="override-cb-label">
                         <strong>Override 12h Duration Warning</strong>
                         Acknowledge shift exceeds recommended 12h limit
                     </div>
                 </div>
-                <div class="override-cb-row">
+                <div class="override-cb-row" id="override-row-11hr" style="display:none;">
                     <input type="checkbox" id="override-11hr-rest">
                     <div class="override-cb-label">
                         <strong>Override 11h Rest Warning</strong>
@@ -597,10 +600,9 @@
 @endsection
 
 @section('scripts')
+{{-- shifts.js self-initialises on load (see bottom of the file). Do NOT call
+     ShiftCalendar.init() again here — a second init binds a duplicate form
+     submit handler, which fires saveShift() twice (one PUT + one stray POST
+     that then "conflicts" with the shift just saved). --}}
 <script src="{{ asset('js/admin/shifts.js') }}"></script>
-<script>
-    document.addEventListener('DOMContentLoaded', function () {
-        ShiftCalendar.init();
-    });
-</script>
 @endsection

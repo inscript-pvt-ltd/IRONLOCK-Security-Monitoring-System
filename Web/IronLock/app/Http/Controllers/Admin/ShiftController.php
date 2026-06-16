@@ -264,6 +264,8 @@ class ShiftController extends Controller
             }
 
             $validator = Validator::make($request->all(), [
+                'guard_id' => 'required|exists:guards,id',
+                'site_id' => 'required|exists:sites,id',
                 'scheduled_start' => 'required|date|after:now',
                 'scheduled_end' => 'required|date|after:scheduled_start',
                 'override_12hr_warning' => 'nullable|boolean',
@@ -278,12 +280,32 @@ class ShiftController extends Controller
                 ], 422);
             }
 
+            // The guard and/or site may have been reassigned in the edit form, so
+            // resolve them from the request rather than the existing record.
+            $guard = Guard::findOrFail($request->guard_id);
+            $site = Site::findOrFail($request->site_id);
+
+            // A reassigned site needs its own active geofence; without one the
+            // shift could not be monitored, so block the change just like store().
+            $geofence = Geofence::where('site_id', $site->id)
+                ->where('is_active', true)
+                ->first();
+
+            if (!$geofence) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'No active geofence found for the selected site. Please set up a geofence first.',
+                    'redirect' => '/admin/sites'
+                ], 422);
+            }
+
             $scheduledStart = Carbon::parse($request->scheduled_start);
             $scheduledEnd = Carbon::parse($request->scheduled_end);
 
-            // Re-validate WTR (excluding this shift from the rest-period lookup)
+            // Re-validate WTR for the (possibly reassigned) guard, excluding this
+            // shift from the rest-period lookup so it never clashes with itself.
             $wtrValidation = $this->validateWorkingTimeRegulations(
-                $shift->guard_id,
+                $guard->id,
                 $scheduledStart,
                 $scheduledEnd,
                 $shift->id
@@ -318,8 +340,9 @@ class ShiftController extends Controller
                 }
             }
 
-            // Check for conflicts with the guard's other shifts.
-            $conflicts = $this->checkShiftConflicts($shift->guard_id, $scheduledStart, $scheduledEnd, $shift->id);
+            // Check for conflicts against the (possibly reassigned) guard's other
+            // shifts, excluding this shift itself.
+            $conflicts = $this->checkShiftConflicts($guard->id, $scheduledStart, $scheduledEnd, $shift->id);
             if (!empty($conflicts)) {
                 return response()->json([
                     'success' => false,
@@ -331,14 +354,23 @@ class ShiftController extends Controller
             DB::beginTransaction();
             try {
                 $shift->update([
+                    'guard_id' => $guard->id,
+                    'site_id' => $site->id,
+                    'geofence_id' => $geofence->id,
                     'scheduled_start' => $scheduledStart,
                     'scheduled_end' => $scheduledEnd,
                 ]);
 
-                // Record override justification when a warning was acknowledged.
-                if (($request->boolean('override_12hr_warning') || $request->boolean('override_11hr_rest')) && $request->override_justification) {
-                    $this->createWorkingTimeOverrides($shift, $wtrValidation['violations'], $request->override_justification);
-                }
+                // Reconcile override records to match the shift's current
+                // violations: acknowledged warnings get an up-to-date row, and
+                // any override that no longer applies is pruned. Called
+                // unconditionally so an edit back to a compliant schedule clears
+                // previously-logged overrides.
+                $this->createWorkingTimeOverrides(
+                    $shift,
+                    $wtrValidation['violations'],
+                    (string) ($request->override_justification ?? '')
+                );
 
                 DB::commit();
             } catch (\Throwable $e) {
@@ -408,7 +440,8 @@ class ShiftController extends Controller
         $validator = Validator::make($request->all(), [
             'guard_id' => 'required|exists:guards,id',
             'scheduled_start' => 'required|date',
-            'scheduled_end' => 'required|date|after:scheduled_start'
+            'scheduled_end' => 'required|date|after:scheduled_start',
+            'shift_id' => 'nullable|uuid|exists:shifts,id'
         ]);
 
         if ($validator->fails()) {
@@ -418,10 +451,14 @@ class ShiftController extends Controller
             ], 422);
         }
 
+        // When editing, exclude the shift itself from the rest-period lookup so
+        // it is never compared against its own (pre-edit) database record. This
+        // keeps the live preview consistent with what update() will actually do.
         $wtrValidation = $this->validateWorkingTimeRegulations(
             $request->guard_id,
             Carbon::parse($request->scheduled_start),
-            Carbon::parse($request->scheduled_end)
+            Carbon::parse($request->scheduled_end),
+            $request->input('shift_id')
         );
 
         return response()->json([
@@ -496,6 +533,34 @@ class ShiftController extends Controller
             }
         }
 
+        // Rule 3b: 11-hour rest before the NEXT shift. Scheduling a shift that
+        // ends too close to an already-scheduled later shift is just as much a
+        // rest-period breach as the backward case, so check both directions.
+        $nextShift = Shift::where('guard_id', $guardId)
+            ->where('status', '!=', 'cancelled')
+            ->when($excludeShiftId, function($query) use ($excludeShiftId) {
+                $query->where('id', '!=', $excludeShiftId);
+            })
+            ->where('scheduled_start', '>=', $scheduledEnd)
+            ->orderBy('scheduled_start', 'asc')
+            ->first();
+
+        if ($nextShift) {
+            $restBeforeNext = $scheduledEnd->diffInHours(Carbon::parse($nextShift->scheduled_start), true);
+            if ($restBeforeNext < 11) {
+                $restMins  = (int) round($scheduledEnd->diffInMinutes(Carbon::parse($nextShift->scheduled_start)));
+                $rHours    = intdiv($restMins, 60);
+                $rMinLabel = ($restMins % 60) > 0 ? "{$rHours}h " . ($restMins % 60) . "min" : "{$rHours}h";
+                $violations[] = [
+                    'type' => 'REST_PERIOD_11HR',
+                    'severity' => 'WARNING',
+                    'message' => "Only {$rMinLabel} rest before the next shift — 11 hours required.",
+                    'override_allowed' => true,
+                    'next_shift_start' => $nextShift->scheduled_start
+                ];
+            }
+        }
+
         return [
             'compliant' => empty($violations),
             'violations' => $violations,
@@ -542,7 +607,9 @@ class ShiftController extends Controller
         return [
             'blocked' => $blockViolation !== null,
             'block_violation' => $blockViolation,
-            'override_required' => $overrideRequired,
+            // A backward- and forward-rest breach both map to the single
+            // 11-hour-rest override, so collapse duplicates for a clean message.
+            'override_required' => array_values(array_unique($overrideRequired)),
         ];
     }
 
@@ -551,19 +618,18 @@ class ShiftController extends Controller
      */
     private function checkShiftConflicts(string $guardId, Carbon $start, Carbon $end, ?string $excludeShiftId = null): array
     {
+        // Two half-open intervals [start, end) and [existingStart, existingEnd)
+        // overlap iff existingStart < end AND existingEnd > start. Using strict
+        // comparisons means shifts that merely touch at a boundary (one ends
+        // exactly when the next begins) are NOT treated as a conflict, so
+        // legitimate back-to-back scheduling is allowed.
         $conflicts = Shift::where('guard_id', $guardId)
             ->where('status', '!=', 'cancelled')
             ->when($excludeShiftId, function($query) use ($excludeShiftId) {
                 $query->where('id', '!=', $excludeShiftId);
             })
-            ->where(function($query) use ($start, $end) {
-                $query->whereBetween('scheduled_start', [$start, $end])
-                    ->orWhereBetween('scheduled_end', [$start, $end])
-                    ->orWhere(function($q) use ($start, $end) {
-                        $q->where('scheduled_start', '<=', $start)
-                          ->where('scheduled_end', '>=', $end);
-                    });
-            })
+            ->where('scheduled_start', '<', $end)
+            ->where('scheduled_end', '>', $start)
             ->with('site')
             ->get();
 
@@ -584,17 +650,40 @@ class ShiftController extends Controller
     private function createWorkingTimeOverrides(Shift $shift, array $violations, string $justification): void
     {
         $adminId = $this->currentAdminId();
+        $activeTypes = [];
 
         foreach ($violations as $violation) {
-            if ($violation['override_allowed']) {
-                WorkingTimeOverride::create([
+            if (!($violation['override_allowed'] ?? false)) {
+                continue;
+            }
+
+            $overrideType = $violation['type'] === 'DURATION_12HR_WARNING'
+                ? 'duration_12hr'
+                : 'rest_period_11hr';
+            $activeTypes[$overrideType] = true;
+
+            // Keep a single override record per (shift, type). Re-saving an
+            // edited shift refreshes the justification/admin/timestamp instead
+            // of stacking duplicate rows for the same acknowledged warning.
+            WorkingTimeOverride::updateOrCreate(
+                [
                     'shift_id' => $shift->id,
-                    'override_type' => $violation['type'] === 'DURATION_12HR_WARNING' ? 'duration_12hr' : 'rest_period_11hr',
+                    'override_type' => $overrideType,
+                ],
+                [
                     'justification' => $justification,
                     'approved_by' => $adminId,
                     'approved_at' => Carbon::now(),
-                ]);
-            }
+                ]
+            );
         }
+
+        // Drop any override rows whose warning no longer applies after an edit
+        // (e.g. a rest-period override left behind once the shift was moved).
+        WorkingTimeOverride::where('shift_id', $shift->id)
+            ->when(!empty($activeTypes), function ($query) use ($activeTypes) {
+                $query->whereNotIn('override_type', array_keys($activeTypes));
+            })
+            ->delete();
     }
 }

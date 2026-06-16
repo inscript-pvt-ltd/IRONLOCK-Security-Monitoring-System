@@ -38,9 +38,11 @@ class GeofenceController extends Controller
                 ->orderBy('version', 'desc')
                 ->get();
 
-            // Add coordinate arrays for frontend display
+            // Add coordinate arrays for frontend display, exposing the original
+            // shape so circles reload as resizable circles rather than polygons.
             $geofences->each(function($geofence) {
                 $geofence->coordinates = $geofence->getPolygonCoordinates();
+                $geofence->type = $geofence->shape_type ?? 'polygon';
             });
 
             return response()->json([
@@ -122,17 +124,21 @@ class GeofenceController extends Controller
             // Generate UUID for the geofence
             $geofenceId = \Illuminate\Support\Str::uuid()->toString();
 
-            // Create WKT geometry string based on type
+            // Create WKT geometry string based on type. We always store a POLYGON
+            // (so ST_CONTAINS works), but remember the original shape + radius so a
+            // circle can be reloaded and resized rather than becoming a dumb polygon.
             $wkt = '';
             $name = $request->get('name', $site->name . ' Geofence');
+            $shapeType = $request->get('type');
+            $radiusValue = null;
 
-            if ($request->get('type') === 'circle') {
+            if ($shapeType === 'circle') {
                 // Convert circle to polygon approximation
                 $center = $coordinates['center'];
-                $radius = $coordinates['radius'];
-                $polygonCoords = $this->circleToPolygon($center[0], $center[1], $radius);
+                $radiusValue = (int) round($coordinates['radius']);
+                $polygonCoords = $this->circleToPolygon($center[0], $center[1], $radiusValue);
                 $wkt = Geofence::createPolygonFromCoordinates($polygonCoords);
-                $name = $name . ' (Circle ' . $radius . 'm)';
+                $name = $name . ' (Circle ' . $radiusValue . 'm)';
             } else {
                 $wkt = Geofence::createPolygonFromCoordinates($coordinates);
                 $name = $name . ' (Polygon)';
@@ -143,11 +149,13 @@ class GeofenceController extends Controller
             $now = now();
 
             DB::statement(
-                "INSERT INTO geofences (id, site_id, name, polygon, version, is_active, created_by, created_at, updated_at) VALUES (?, ?, ?, ST_GeomFromText(?, 4326), ?, ?, ?, ?, ?)",
+                "INSERT INTO geofences (id, site_id, name, shape_type, radius, polygon, version, is_active, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ST_GeomFromText(?, 4326), ?, ?, ?, ?, ?)",
                 [
                     $geofenceId,
                     $site->id,
                     $name,
+                    $shapeType,
+                    $radiusValue,
                     $wkt,
                     $nextVersion,
                     $request->boolean('is_active', true) ? 1 : 0,
@@ -361,9 +369,10 @@ class GeofenceController extends Controller
                     ->count();
 
                 if ($activeShifts > 0) {
+                    $shiftWord = $activeShifts === 1 ? 'shift' : 'shifts';
                     return response()->json([
                         'success' => false,
-                        'error' => "Cannot delete geofences with {$activeShifts} active shifts. Please complete shifts first."
+                        'error' => "Can't clear the geofence while it's linked to {$activeShifts} ongoing or scheduled {$shiftWord}. Complete or cancel them first."
                     ], 422);
                 }
 
