@@ -5,701 +5,604 @@
 
 @section('topbar-actions')
     <select id="week-selector" class="topbar-filter">
-        <option value="current">Week: {{ date('d') }}-{{ date('d', strtotime('+6 days')) }} {{ date('M') }}</option>
-        <option value="next">Week: {{ date('d', strtotime('+7 days')) }}-{{ date('d', strtotime('+13 days')) }} {{ date('M') }}</option>
-        <option value="prev">Week: {{ date('d', strtotime('-7 days')) }}-{{ date('d', strtotime('-1 days')) }} {{ date('M') }}</option>
+        <option value="current">Week: {{ date('d') }}–{{ date('d', strtotime('+6 days')) }} {{ date('M') }}</option>
+        <option value="next">Next week</option>
+        <option value="prev">Previous week</option>
     </select>
-    <button id="new-shift-btn" class="btn-primary-sm" style="background: var(--deep-security-blue); color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer;">+ NEW</button>
+    <button id="new-shift-btn" class="btn-primary-sm" style="background:var(--deep-security-blue);color:white;border:none;padding:6px 12px;border-radius:4px;font-size:11px;font-weight:bold;cursor:pointer;">+ New Shift</button>
 @endsection
 
 @section('styles')
 <style>
-    .calendar-container {
+    /* ── Layout ─────────────────────────────────────── */
+    .shifts-main {
+        position: relative;
+        min-height: calc(100vh - 64px);
+        margin-right: 0;
+        transition: margin-right 0.3s ease;
+    }
+
+    .shifts-main.drawer-open {
+        margin-right: 262px; /* matches drawer width + border */
+    }
+
+    /* ── Calendar table (.cal) ───────────────────────── */
+    .cal-container {
         background: var(--surface-dark);
         border: 1.5px solid var(--border-dark);
         border-radius: 4px;
         overflow: hidden;
-        margin-bottom: 24px;
+        margin-bottom: 12px;
     }
 
-    .calendar-grid {
-        display: grid;
-        grid-template-columns: 120px repeat(7, 1fr);
-        gap: 0;
+    .cal {
+        width: 100%;
+        border-collapse: collapse;
         font-size: 11px;
     }
 
-    .calendar-header {
+    .cal thead th {
         background: var(--border-dark);
-        padding: 8px;
-        font-weight: bold;
+        padding: 8px 6px;
         text-align: center;
+        font-size: 10px;
+        font-weight: bold;
         color: var(--text-secondary);
-        border-bottom: 1px solid var(--border-dark);
+        border: 1px solid var(--border-dark);
+        white-space: nowrap;
     }
 
-    .calendar-header:first-child {
+    .cal thead th:first-child {
         text-align: left;
         font-size: 9px;
         text-transform: uppercase;
         letter-spacing: 0.06em;
+        padding-left: 10px;
     }
 
-    .guard-row {
-        display: contents;
-    }
-
-    .guard-name {
+    .cal tbody td {
         background: var(--surface-dark);
-        padding: 12px 8px;
-        border-right: 1px solid var(--border-dark);
-        border-bottom: 1px solid var(--border-dark);
+        border: 1px solid var(--border-dark);
+        padding: 5px 4px;
+        text-align: center;
+        vertical-align: middle;
+        min-height: 42px;
+        height: 42px;
+    }
+
+    .cal tbody td.guard-col {
+        text-align: left;
         font-weight: bold;
         font-size: 10px;
-        display: flex;
-        align-items: center;
         color: var(--text-primary);
+        padding-left: 10px;
+        width: 90px;
+        min-width: 90px;
+        white-space: nowrap;
     }
 
-    .day-cell {
-        background: var(--surface-dark);
-        border-right: 1px solid var(--border-dark);
-        border-bottom: 1px solid var(--border-dark);
-        padding: 4px;
-        min-height: 45px;
-        position: relative;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+    .cal tbody td.day-cell {
         cursor: pointer;
-        transition: background-color 0.2s ease;
+        transition: background 0.15s;
     }
 
-    .day-cell:hover {
+    .cal tbody td.day-cell:hover {
         background: var(--border-dark);
     }
 
-    .shift-block {
-        width: 100%;
-        height: 32px;
-        background: var(--deep-security-blue);
-        border-radius: 2px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: white;
-        font-size: 8px;
-        font-weight: bold;
-        cursor: pointer;
+    /* Whole occupied cell is clickable to edit, not just the chip. */
+    .cal tbody td.shift-cell { cursor: pointer; }
+
+    /* Merged overnight shift cells */
+    .cal tbody td.overnight-merged {
+        text-align: center;
+        background: var(--surface-dark);
+        border: 1px solid var(--border-dark);
         position: relative;
     }
 
-    .shift-block.scheduled {
+    .cal tbody td.overnight-merged::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 25%;
+        right: 25%;
+        height: 1px;
+        background: var(--border-dark);
+        z-index: 1;
+    }
+
+    .cal tbody td.overnight-merged .shift-blk {
+        position: relative;
+        z-index: 2;
         background: var(--deep-security-blue);
+        border-radius: 8px;
+        padding: 4px 12px;
+        margin: 0 auto;
+        display: inline-block;
     }
 
-    .shift-block.active {
-        background: var(--success-green);
-    }
-
-    .shift-block.completed {
-        background: var(--text-muted);
-    }
-
-    .shift-block.warning {
-        background: var(--warning-amber);
-        color: var(--bg-dark);
-    }
-
-    .shift-block.error {
-        background: var(--critical-red);
-    }
-
-    .shift-time {
-        font-size: 7px;
-        opacity: 0.9;
-    }
-
-    .wtr-warnings {
-        margin-top: 16px;
-        padding: 12px;
-        background: var(--surface-dark);
-        border: 1.5px solid var(--border-dark);
-        border-radius: 4px;
-    }
-
-    .wtr-warning-item {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 6px 0;
-        font-size: 11px;
-        border-bottom: 1px solid var(--border-dark);
-    }
-
-    .wtr-warning-item:last-child {
-        border-bottom: none;
-    }
-
-    .wtr-warning-item.warning {
-        color: var(--warning-amber);
-    }
-
-    .wtr-warning-item.error {
-        color: var(--critical-red);
-    }
-
-    .wtr-icon {
+    .shift-blk {
+        display: inline-block;
+        background: var(--deep-security-blue);
+        color: white;
+        font-size: 9px;
         font-weight: bold;
-        font-size: 12px;
-    }
-
-    /* Shift Modal */
-    .modal-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.8);
-        display: none;
-        z-index: 1000;
-        justify-content: center;
-        align-items: center;
-    }
-
-    .modal-overlay.show {
-        display: flex;
-    }
-
-    .shift-modal {
-        background: var(--surface-dark);
-        border: 1.5px solid var(--border-dark);
-        border-radius: 4px;
-        width: 400px;
-        max-width: 90vw;
-        max-height: 90vh;
-        overflow-y: auto;
-        padding: 0;
-    }
-
-    .modal-header {
-        padding: 16px;
-        border-bottom: 1.5px solid var(--border-dark);
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-
-    .modal-title {
-        font-weight: bold;
-        font-size: 13px;
-    }
-
-    .modal-close {
-        background: transparent;
-        border: none;
-        color: var(--text-muted);
-        font-size: 16px;
+        padding: 3px 7px;
+        border-radius: 2px;
+        border: 1.5px solid var(--deep-security-blue);
         cursor: pointer;
-        padding: 0;
-        width: 24px;
-        height: 24px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        white-space: nowrap;
+        transition: opacity 0.15s;
     }
 
-    .modal-close:hover {
-        color: var(--text-primary);
+    .shift-blk:hover { opacity: 0.85; }
+
+    .shift-blk.active    { background: var(--success-green); border-color: var(--success-green); }
+    .shift-blk.completed { background: var(--text-muted); border-color: var(--text-muted); }
+    .shift-blk.cancelled { background: transparent; border-color: var(--text-muted); color: var(--text-muted); border-style: dashed; }
+    .shift-blk.wtr-warn-block { border-style: dashed; }
+    /* overnight continuation shown in the next day's column */
+    .shift-blk.shift-cont {
+        background: transparent;
+        border: 1.5px dashed var(--deep-security-blue);
+        color: var(--text-secondary);
+        font-size: 8px;
+    }
+    .shift-blk.shift-cont:hover { opacity: 0.8; }
+
+    /* ── WTR warning rows below calendar ─────────────── */
+    .wtr-warn {
+        padding: 7px 12px;
+        border: 1px solid var(--warning-amber);
+        border-radius: 3px;
+        font-size: 10px;
+        color: var(--text-secondary);
+        margin-bottom: 5px;
+        background: rgba(255,193,7,0.04);
     }
 
-    .modal-body {
-        padding: 16px;
+    .wtr-warn.error {
+        border-color: var(--critical-red);
+        background: rgba(220,53,69,0.04);
+        color: var(--text-secondary);
     }
 
-    .form-group {
-        margin-bottom: 16px;
-    }
+    .wtr-warn.dashed { border-style: dashed; }
 
-    .form-label {
-        display: block;
+    /* ── Weekly hours section ─────────────────────────── */
+    .section-header {
         font-size: 10px;
         font-weight: bold;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         color: var(--text-muted);
-        margin-bottom: 4px;
+        margin: 16px 0 6px;
     }
 
-    .form-input {
-        width: 100%;
-        padding: 8px;
-        background: var(--bg-dark);
-        border: 1.5px solid var(--border-dark);
-        border-radius: 4px;
-        color: var(--text-primary);
-        font-size: 11px;
-    }
-
-    .form-input:focus {
-        outline: none;
-        border-color: var(--premium-gold);
-    }
-
-    .form-select {
-        width: 100%;
-        padding: 8px;
-        background: var(--bg-dark);
-        border: 1.5px solid var(--border-dark);
-        border-radius: 4px;
-        color: var(--text-primary);
-        font-size: 11px;
-        cursor: pointer;
-    }
-
-    .form-select:focus {
-        outline: none;
-        border-color: var(--premium-gold);
-    }
-
-    .form-row {
-        display: flex;
-        gap: 12px;
-    }
-
-    .form-row .form-group {
-        flex: 1;
-    }
-
-    .wtr-check {
-        padding: 12px;
-        background: var(--bg-dark);
-        border: 1.5px solid var(--border-dark);
-        border-radius: 4px;
-        margin-bottom: 16px;
-        font-size: 11px;
-    }
-
-    .wtr-check.ok {
-        border-color: var(--success-green);
-        color: var(--success-green);
-    }
-
-    .wtr-check.warning {
-        border-color: var(--warning-amber);
-        color: var(--warning-amber);
-    }
-
-    .wtr-check.error {
-        border-color: var(--critical-red);
-        color: var(--critical-red);
-    }
-
-    /* Enhanced WTR Compliance Check */
-    .wtr-compliance-check {
-        padding: 14px;
-        background: var(--bg-dark);
-        border: 1.5px solid var(--border-dark);
-        border-radius: 6px;
-        margin-bottom: 16px;
-        font-size: 11px;
-    }
-
-    .wtr-compliance-check.ok {
-        border-color: var(--success-green);
-        background: rgba(103, 194, 58, 0.05);
-    }
-
-    .wtr-compliance-check.warning {
-        border-color: var(--warning-amber);
-        background: rgba(255, 193, 7, 0.05);
-    }
-
-    .wtr-compliance-check.error {
-        border-color: var(--critical-red);
-        background: rgba(220, 53, 69, 0.05);
-    }
-
-    .wtr-status-header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-weight: 600;
-        margin-bottom: 8px;
-    }
-
-    .wtr-status-header .wtr-icon {
-        font-size: 14px;
-        font-weight: bold;
-    }
-
-    .wtr-violations {
-        margin-top: 8px;
-        padding-left: 20px;
-    }
-
-    .wtr-violations div {
-        margin-bottom: 4px;
-        color: var(--text-secondary);
-        line-height: 1.4;
-    }
-
-    /* WTR Override Section */
-    .wtr-override-section {
+    .wtr-hours-container {
         background: var(--surface-dark);
-        border: 1.5px solid var(--warning-amber);
-        border-radius: 6px;
-        margin-bottom: 16px;
+        border: 1.5px solid var(--border-dark);
+        border-radius: 4px;
         overflow: hidden;
+        margin-bottom: 10px;
     }
 
-    .override-header {
-        background: rgba(255, 193, 7, 0.1);
-        padding: 12px 16px;
-        border-bottom: 1px solid var(--border-dark);
-        display: flex;
-        align-items: center;
-        gap: 10px;
-    }
-
-    .override-header i {
-        color: var(--warning-amber);
-        font-size: 14px;
-    }
-
-    .override-header h4 {
-        margin: 0;
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--text-primary);
-    }
-
-    .override-subtitle {
+    .wtr-hours-table {
+        width: 100%;
+        border-collapse: collapse;
         font-size: 10px;
-        color: var(--text-muted);
-        margin-left: auto;
     }
 
-    .override-content {
-        padding: 16px;
-    }
-
-    .override-justification {
-        resize: vertical;
-        min-height: 70px;
-        font-size: 11px;
-        line-height: 1.4;
-    }
-
-    .field-hint {
-        font-size: 10px;
-        color: var(--text-muted);
-        margin-top: 4px;
-        font-style: italic;
-    }
-
-    .required-asterisk {
-        color: var(--critical-red);
-        font-weight: bold;
-    }
-
-    .override-options {
-        margin: 16px 0;
+    .wtr-hours-table th,
+    .wtr-hours-table td {
         border: 1px solid var(--border-dark);
-        border-radius: 4px;
-        background: var(--bg-dark);
+        padding: 6px 10px;
     }
 
-    .override-option {
+    .wtr-hours-table th {
+        background: var(--border-dark);
+        color: var(--text-secondary);
+        font-weight: bold;
+        text-align: left;
+    }
+
+    .wtr-hours-table td {
+        background: var(--surface-dark);
+        color: var(--text-primary);
+    }
+
+    .wtr-status-chip {
+        display: inline-block;
+        padding: 2px 7px;
+        border-radius: 10px;
+        font-size: 9px;
+        font-weight: bold;
+        border: 1px solid;
+    }
+
+    .wtr-status-chip.ok   { color: var(--success-green); border-color: var(--success-green); }
+    .wtr-status-chip.warn { color: var(--warning-amber); border-color: var(--warning-amber); }
+    .wtr-status-chip.over { color: var(--critical-red);  border-color: var(--critical-red); }
+
+    /* ── Right Drawer ─────────────────────────────────── */
+    .shift-drawer {
+        width: 260px;
+        background: var(--surface-dark);
+        border-left: 1.5px solid var(--border-dark);
+        padding: 16px;
+        position: fixed;
+        right: 0;
+        top: 48px;
+        bottom: 0;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+        z-index: 1000;
+        overflow-y: auto;
+    }
+
+    .shift-drawer.open { transform: translateX(0); }
+
+    .drawer-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+        padding-bottom: 10px;
         border-bottom: 1px solid var(--border-dark);
     }
 
-    .override-option:last-child {
-        border-bottom: none;
-    }
-
-    .checkbox-label {
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-        padding: 12px;
-        cursor: pointer;
-        transition: background-color 0.2s ease;
-        margin: 0;
-    }
-
-    .checkbox-label:hover {
-        background: rgba(255, 255, 255, 0.02);
-    }
-
-    .override-checkbox {
-        display: none;
-    }
-
-    .checkbox-custom {
-        width: 16px;
-        height: 16px;
-        border: 2px solid var(--border-dark);
-        border-radius: 3px;
-        position: relative;
-        transition: all 0.2s ease;
-        flex-shrink: 0;
-        margin-top: 2px;
-    }
-
-    .override-checkbox:checked + .checkbox-custom {
-        background: var(--warning-amber);
-        border-color: var(--warning-amber);
-    }
-
-    .override-checkbox:checked + .checkbox-custom::after {
-        content: "✓";
-        position: absolute;
-        top: -1px;
-        left: 2px;
-        color: var(--bg-dark);
+    .drawer-title-text {
         font-size: 12px;
         font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--premium-gold);
     }
 
-    .option-content {
-        flex: 1;
-    }
-
-    .option-content strong {
-        display: block;
-        font-size: 11px;
-        color: var(--text-primary);
-        margin-bottom: 2px;
-    }
-
-    .option-content small {
-        display: block;
-        font-size: 10px;
-        color: var(--text-secondary);
-        line-height: 1.3;
-    }
-
-    .override-warning {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px;
-        background: rgba(255, 193, 7, 0.05);
-        border: 1px solid var(--warning-amber);
-        border-radius: 4px;
-        font-size: 10px;
+    .drawer-close {
+        background: transparent;
+        border: none;
         color: var(--text-muted);
+        font-size: 18px;
+        cursor: pointer;
+        line-height: 1;
+        padding: 0;
+    }
+
+    .drawer-close:hover { color: var(--text-primary); }
+
+    .drawer-label {
+        display: block;
+        font-size: 10px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
         margin-top: 12px;
     }
 
-    .override-warning i {
-        color: var(--warning-amber);
-        font-size: 12px;
+    .drawer-input,
+    .drawer-select {
+        width: 100%;
+        padding: 7px 8px;
+        background: var(--bg-dark);
+        border: 1.5px solid var(--border-dark);
+        border-radius: 4px;
+        color: var(--text-primary);
+        font-size: 11px;
+        box-sizing: border-box;
     }
 
-    .modal-actions {
-        padding: 16px;
-        border-top: 1.5px solid var(--border-dark);
+    .drawer-input:focus,
+    .drawer-select:focus {
+        outline: none;
+        border-color: var(--premium-gold);
+    }
+
+    .drawer-select { cursor: pointer; }
+
+    .time-row {
         display: flex;
         gap: 8px;
-        justify-content: flex-end;
     }
 
-    .btn-modal {
-        padding: 8px 16px;
+    .time-row > div { flex: 1; }
+
+    /* ── WTR inline check inside drawer ──────────────── */
+    .wtr-inline {
+        padding: 8px 10px;
+        border-radius: 4px;
+        font-size: 10px;
+        border: 1px solid var(--border-dark);
+        margin-top: 10px;
+        background: var(--bg-dark);
+        line-height: 1.4;
+    }
+
+    .wtr-inline.ok      { border-color: var(--success-green); color: var(--success-green); }
+    .wtr-inline.warning { border-color: var(--warning-amber); color: var(--warning-amber); }
+    .wtr-inline.error   { border-color: var(--critical-red);  color: var(--critical-red); }
+
+    #wtr-violations-list div {
+        margin-top: 4px;
+        font-size: 10px;
+        color: var(--text-secondary);
+    }
+
+    /* ── Override section inside drawer ──────────────── */
+    .drawer-override {
+        margin-top: 10px;
+        border: 1px solid var(--warning-amber);
+        border-radius: 4px;
+        background: rgba(255,193,7,0.03);
+        overflow: hidden;
+    }
+
+    .drawer-override-header {
+        padding: 7px 10px;
+        font-size: 10px;
+        font-weight: bold;
+        color: var(--warning-amber);
+        background: rgba(255,193,7,0.07);
+        border-bottom: 1px solid var(--border-dark);
+    }
+
+    .drawer-override-body { padding: 10px; }
+
+    .drawer-textarea {
+        width: 100%;
+        padding: 7px 8px;
+        background: var(--bg-dark);
+        border: 1.5px solid var(--border-dark);
+        border-radius: 4px;
+        color: var(--text-primary);
+        font-size: 10px;
+        resize: vertical;
+        min-height: 56px;
+        box-sizing: border-box;
+        line-height: 1.4;
+    }
+
+    .drawer-textarea:focus {
+        outline: none;
+        border-color: var(--premium-gold);
+    }
+
+    .override-cb-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border-dark);
+        font-size: 10px;
+    }
+
+    .override-cb-row:last-of-type { border-bottom: none; }
+    .override-cb-row input[type="checkbox"] { margin-top: 2px; flex-shrink: 0; }
+
+    .override-cb-label { color: var(--text-secondary); line-height: 1.3; }
+    .override-cb-label strong { display: block; color: var(--text-primary); font-size: 10px; }
+
+    /* ── Inline error inside drawer ──────────────────── */
+    #shift-drawer-error {
+        display: none;
+        margin-top: 10px;
+        padding: 8px 10px;
+        background: rgba(220,53,69,0.08);
+        border: 1px solid var(--critical-red);
+        border-radius: 4px;
+        font-size: 10px;
+        color: var(--critical-red);
+        white-space: pre-line;
+        line-height: 1.4;
+    }
+
+    /* ── Drawer action buttons ───────────────────────── */
+    .drawer-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border-dark);
+    }
+
+    .drawer-btn {
+        flex: 1;
+        padding: 8px;
         font-size: 11px;
         font-weight: bold;
         border-radius: 4px;
         cursor: pointer;
-        transition: all 0.2s ease;
+        text-align: center;
+        border: 1px solid;
+        transition: all 0.2s;
     }
 
-    .btn-modal-primary {
+    .drawer-btn-primary {
         background: var(--deep-security-blue);
         color: white;
-        border: 1px solid var(--deep-security-blue);
+        border-color: var(--deep-security-blue);
     }
 
-    .btn-modal-primary:hover:not(:disabled) {
+    .drawer-btn-primary:hover:not(:disabled) {
         background: transparent;
         color: var(--deep-security-blue);
     }
 
-    .btn-modal-primary:disabled {
+    .drawer-btn-primary:disabled {
         opacity: 0.5;
         cursor: not-allowed;
     }
 
-    .btn-modal-secondary {
+    .drawer-btn-secondary {
         background: transparent;
         color: var(--text-secondary);
-        border: 1px solid var(--border-dark);
+        border-color: var(--border-dark);
     }
 
-    .btn-modal-secondary:hover {
+    .drawer-btn-secondary:hover {
         border-color: var(--premium-gold);
         color: var(--premium-gold);
     }
 
-    .empty-state {
-        text-align: center;
-        padding: 32px;
-        color: var(--text-muted);
-        font-size: 11px;
-    }
-
+    /* ── Spinner ─────────────────────────────────────── */
     .loading-spinner {
         display: inline-block;
-        width: 16px;
-        height: 16px;
-        border: 2px solid var(--border-dark);
+        width: 11px;
+        height: 11px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: white;
         border-radius: 50%;
-        border-top-color: var(--premium-gold);
-        animation: spin 1s ease-in-out infinite;
+        animation: spin 0.8s linear infinite;
+        vertical-align: middle;
+        margin-right: 3px;
     }
 
-    @keyframes spin {
-        to { transform: rotate(360deg); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Override log ────────────────────────────────── */
+    .override-log {
+        border-style: dashed;
+        font-size: 10px;
+        color: var(--text-muted);
+        line-height: 1.6;
     }
+
+    .override-log a { color: var(--premium-gold); text-decoration: none; }
+    .override-log a:hover { text-decoration: underline; }
+
+    .override-entry {
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border-dark);
+        font-size: 10px;
+        line-height: 1.5;
+    }
+
+    .override-entry:last-child { border-bottom: none; }
 </style>
 @endsection
 
 @section('content')
-<div class="shifts-container">
-    <!-- Calendar Grid -->
-    <div class="calendar-container">
-        <div class="calendar-grid" id="calendar-grid">
-            <div class="calendar-header">Guard</div>
-            <div class="calendar-header">Mon</div>
-            <div class="calendar-header">Tue</div>
-            <div class="calendar-header">Wed</div>
-            <div class="calendar-header">Thu</div>
-            <div class="calendar-header">Fri</div>
-            <div class="calendar-header">Sat</div>
-            <div class="calendar-header">Sun</div>
+<div class="shifts-main">
 
-            <!-- Guard rows will be populated by JavaScript -->
-        </div>
+    <!-- ① Calendar table (thead + tbody populated by JS) -->
+    <div class="cal-container">
+        <table class="cal" id="calendar-table"></table>
     </div>
 
-    <!-- WTR Warnings -->
-    <div id="wtr-warnings" class="wtr-warnings" style="display: none;">
-        <div class="section-title">Working Time Regulations Warnings</div>
-        <div id="wtr-warnings-list"></div>
+    <!-- ② WTR warning rows below calendar (populated by JS) -->
+    <div id="wtr-warnings-section"></div>
+
+    <!-- ③ Weekly Hours Tracking -->
+    <div class="section-header">Weekly Hours Tracking — WTR 1998 · 48h avg over 17-week reference period (REP-005)</div>
+    <div class="wtr-hours-container">
+        <table class="wtr-hours-table" id="weekly-hours-table">
+            <thead>
+                <tr>
+                    <th>Guard</th>
+                    <th>This week (scheduled)</th>
+                    <th>17-week avg</th>
+                    <th>48h status</th>
+                </tr>
+            </thead>
+            <tbody id="weekly-hours-tbody"></tbody>
+        </table>
     </div>
+
+    <!-- ④ Override log -->
+    <div class="wtr-warn override-log" id="override-log-section">
+        <strong>Override log (ADM-006 / ADM-007):</strong> Any WTR limit manually bypassed is recorded here with admin identity + timestamp.<br>
+        <span id="override-log-summary">[ No overrides this week ]</span><span id="override-log-toggle" style="display:none;">&nbsp;·&nbsp; <a href="#" id="override-history-btn">View override history ↓</a></span>
+        <div id="override-history-entries" style="display:none; margin-top:8px; border-top:1px solid var(--border-dark); padding-top:8px;"></div>
+    </div>
+
 </div>
 
-<!-- Shift Modal -->
-<div id="shift-modal" class="modal-overlay">
-    <div class="shift-modal">
-        <div class="modal-header">
-            <div class="modal-title">New Shift</div>
-            <button class="modal-close" onclick="closeShiftModal()">&times;</button>
-        </div>
-        <form id="shift-form">
-            <div class="modal-body">
-                <div class="form-group">
-                    <label class="form-label">Guard</label>
-                    <select id="guard-select" class="form-select" required>
-                        <option value="">Select Guard</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Site</label>
-                    <select id="site-select" class="form-select" required>
-                        <option value="">Select Site</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">Date</label>
-                    <input type="date" id="shift-date" class="form-input" required>
-                </div>
-
-                <div class="form-row">
-                    <div class="form-group">
-                        <label class="form-label">Start Time</label>
-                        <input type="time" id="shift-start" class="form-input" required>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">End Time</label>
-                        <input type="time" id="shift-end" class="form-input" required>
-                    </div>
-                </div>
-
-                <!-- WTR Compliance Check -->
-                <div id="wtr-check" class="wtr-compliance-check" style="display: none;">
-                    <div class="wtr-status-header">
-                        <i class="wtr-icon"></i>
-                        <span id="wtr-check-text"></span>
-                    </div>
-                    <div id="wtr-violations-list" class="wtr-violations"></div>
-                </div>
-
-                <!-- WTR Override Section -->
-                <div id="override-section" class="wtr-override-section" style="display: none;">
-                    <div class="override-header">
-                        <i class="icon-shield-alert"></i>
-                        <h4>Working Time Regulations Override</h4>
-                        <span class="override-subtitle">Administrative override requires documented justification</span>
-                    </div>
-
-                    <div class="override-content">
-                        <div class="form-group">
-                            <label class="form-label required">Justification <span class="required-asterisk">*</span></label>
-                            <textarea id="override-justification" class="form-input override-justification" rows="3"
-                                placeholder="Provide detailed justification for this WTR override (e.g., operational emergency, critical security requirements, etc.)..."></textarea>
-                            <div class="field-hint">This override will be logged and may be subject to compliance audit.</div>
-                        </div>
-
-                        <div class="override-options">
-                            <div class="override-option">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="override-12hr-warning" class="override-checkbox">
-                                    <span class="checkbox-custom"></span>
-                                    <div class="option-content">
-                                        <strong>Override 12-hour Duration Warning</strong>
-                                        <small>Acknowledges shift exceeds recommended 12-hour limit</small>
-                                    </div>
-                                </label>
-                            </div>
-
-                            <div class="override-option">
-                                <label class="checkbox-label">
-                                    <input type="checkbox" id="override-11hr-rest" class="override-checkbox">
-                                    <span class="checkbox-custom"></span>
-                                    <div class="option-content">
-                                        <strong>Override 11-hour Rest Period</strong>
-                                        <small>Acknowledges insufficient rest time between shifts</small>
-                                    </div>
-                                </label>
-                            </div>
-                        </div>
-
-                        <div class="override-warning">
-                            <i class="icon-alert-triangle"></i>
-                            <span>This override will be recorded for compliance monitoring and audit purposes.</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-actions">
-                <button type="button" class="btn-modal btn-modal-secondary" onclick="closeShiftModal()">Cancel</button>
-                <button type="submit" class="btn-modal btn-modal-primary" id="save-shift-btn">Save Shift</button>
-            </div>
-        </form>
+<!-- ── Right Drawer ────────────────────────────────── -->
+<div id="shift-drawer" class="shift-drawer">
+    <div class="drawer-header">
+        <span class="drawer-title-text" id="drawer-title-text">New Shift</span>
+        <button class="drawer-close" onclick="closeShiftDrawer()" title="Close">&times;</button>
     </div>
+
+    <form id="shift-form">
+        <label class="drawer-label" style="margin-top:0;">Guard</label>
+        <select id="guard-select" class="drawer-select" required>
+            <option value="">Select Guard</option>
+        </select>
+
+        <label class="drawer-label">Site</label>
+        <select id="site-select" class="drawer-select" required>
+            <option value="">Select Site</option>
+        </select>
+
+        <label class="drawer-label">Date</label>
+        <input type="date" id="shift-date" class="drawer-input" required>
+
+        <div class="time-row">
+            <div>
+                <label class="drawer-label">Start</label>
+                <input type="time" id="shift-start" class="drawer-input" required>
+            </div>
+            <div>
+                <label class="drawer-label">Duration (hrs)</label>
+                <input type="number" id="shift-duration" class="drawer-input"
+                       min="0.5" max="16" step="0.5" placeholder="8" required>
+            </div>
+        </div>
+        <div id="computed-end-time" style="display:none; font-size:10px; color:var(--text-secondary); margin-top:4px; padding:4px 0;">
+            Ends: <strong id="computed-end-display" style="color:var(--text-primary);"></strong>
+        </div>
+
+        <!-- WTR live check -->
+        <div id="wtr-check" class="wtr-inline" style="display:none;">
+            <span id="wtr-check-text"></span>
+            <div id="wtr-violations-list"></div>
+        </div>
+
+        <!-- Override section (warnings only, not blockers) -->
+        <div id="override-section" class="drawer-override" style="display:none;">
+            <div class="drawer-override-header">⚠ WTR Override — Justification Required</div>
+            <div class="drawer-override-body">
+                <label class="drawer-label" style="margin-top:0;">Justification *</label>
+                <textarea id="override-justification" class="drawer-textarea" rows="3"
+                    placeholder="Document reason for this WTR override (operational necessity, emergency cover, etc.)…"></textarea>
+
+                <div class="override-cb-row" id="override-row-12hr" style="display:none;">
+                    <input type="checkbox" id="override-12hr-warning">
+                    <div class="override-cb-label">
+                        <strong>Override 12h Duration Warning</strong>
+                        Acknowledge shift exceeds recommended 12h limit
+                    </div>
+                </div>
+                <div class="override-cb-row" id="override-row-11hr" style="display:none;">
+                    <input type="checkbox" id="override-11hr-rest">
+                    <div class="override-cb-label">
+                        <strong>Override 11h Rest Warning</strong>
+                        Acknowledge insufficient rest between shifts
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Inline error -->
+        <div id="shift-drawer-error"></div>
+
+        <!-- Actions -->
+        <div class="drawer-actions">
+            <button type="submit" class="drawer-btn drawer-btn-primary" id="save-shift-btn">Save</button>
+            <button type="button" class="drawer-btn drawer-btn-secondary" onclick="closeShiftDrawer()">Cancel</button>
+        </div>
+    </form>
 </div>
 @endsection
 
 @section('scripts')
+{{-- shifts.js self-initialises on load (see bottom of the file). Do NOT call
+     ShiftCalendar.init() again here — a second init binds a duplicate form
+     submit handler, which fires saveShift() twice (one PUT + one stray POST
+     that then "conflicts" with the shift just saved). --}}
 <script src="{{ asset('js/admin/shifts.js') }}"></script>
-<script>
-    document.addEventListener('DOMContentLoaded', function() {
-        ShiftCalendar.init();
-    });
-</script>
 @endsection

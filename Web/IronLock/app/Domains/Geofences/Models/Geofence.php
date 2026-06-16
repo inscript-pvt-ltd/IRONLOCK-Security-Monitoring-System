@@ -3,10 +3,12 @@
 namespace App\Domains\Geofences\Models;
 
 use App\Domains\Admins\Models\Admin;
+use App\Domains\Shifts\Models\Shift;
 use App\Domains\Sites\Models\Site;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -48,6 +50,8 @@ class Geofence extends Model
     protected $fillable = [
         'site_id',
         'name',
+        'shape_type',
+        'radius',
         'polygon',
         'version',
         'is_active',
@@ -73,6 +77,7 @@ class Geofence extends Model
     {
         return [
             'version' => 'integer',
+            'radius' => 'integer',
             'is_active' => 'boolean',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
@@ -96,6 +101,14 @@ class Geofence extends Model
     }
 
     /**
+     * Get the shifts assigned to this geofence.
+     */
+    public function shifts(): HasMany
+    {
+        return $this->hasMany(Shift::class, 'geofence_id');
+    }
+
+    /**
      * Scope for active geofences only.
      */
     public function scopeActive($query)
@@ -113,11 +126,19 @@ class Geofence extends Model
      */
     public function containsPoint(float $latitude, float $longitude): bool
     {
-        // Use MySQL spatial ST_CONTAINS for point-in-polygon validation
-        // ST_CONTAINS(polygon, POINT(longitude, latitude)) - Note: longitude first in MySQL
+        // Point-in-polygon validation via spatial ST_CONTAINS.
+        //
+        // The test point is built with ST_GeomFromText(wkt, 4326) so it carries
+        // the same SRID (4326) as the stored polygon — MySQL 8 enforces matching
+        // SRIDs and would otherwise raise a "different SRIDs" error. This form is
+        // portable across MariaDB 10.4 and MySQL 8 (the 2-arg ST_SRID() variant
+        // is not supported by MariaDB). The WKT is assembled in PHP with a
+        // locale-independent format; note MySQL expects "longitude latitude".
+        $point = sprintf('POINT(%F %F)', $longitude, $latitude);
+
         $result = DB::selectOne(
-            "SELECT ST_CONTAINS(polygon, POINT(?, ?)) as contains FROM geofences WHERE id = ?",
-            [$longitude, $latitude, $this->id]
+            "SELECT ST_CONTAINS(polygon, ST_GeomFromText(?, 4326)) as contains FROM geofences WHERE id = ?",
+            [$point, $this->id]
         );
 
         return (bool) $result->contains;

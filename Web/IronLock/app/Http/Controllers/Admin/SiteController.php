@@ -6,8 +6,9 @@ use App\Domains\Sites\Models\Site;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 /**
@@ -39,11 +40,12 @@ class SiteController extends Controller
         ->orderBy('created_at', 'desc')
         ->paginate(15);
 
-        // Load coordinates for each geofence
+        // Load coordinates for each geofence. The geometry is always a polygon, but
+        // expose the original shape so circles reload as circles (and keep their radius).
         foreach ($sites as $site) {
             foreach ($site->geofences as $geofence) {
                 $geofence->coordinates = $geofence->getPolygonCoordinates();
-                $geofence->type = 'polygon'; // Default type since we're storing everything as polygons
+                $geofence->type = $geofence->shape_type ?? 'polygon';
             }
         }
 
@@ -85,7 +87,7 @@ class SiteController extends Controller
                 'contact_phone' => $request->contact_phone,
                 'instructions' => $request->instructions,
                 'status' => $request->input('status', 'active'),
-                'created_by' => Auth::guard('admin')->user()?->id ?? session('admin_id'),
+                'created_by' => $this->currentAdminId(),
             ]);
 
             return response()->json([
@@ -94,9 +96,10 @@ class SiteController extends Controller
                 'site' => $site->load('creator')
             ]);
         } catch (\Exception $e) {
+            Log::error('Error creating site', ['exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error creating site: ' . $e->getMessage()
+                'error' => 'Unable to create site. Please try again.'
             ], 500);
         }
     }
@@ -175,9 +178,10 @@ class SiteController extends Controller
                 'site' => $site->load('creator')
             ]);
         } catch (\Exception $e) {
+            Log::error('Error updating site', ['site_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error updating site: ' . $e->getMessage()
+                'error' => 'Unable to update site. Please try again.'
             ], 500);
         }
     }
@@ -191,37 +195,40 @@ class SiteController extends Controller
         try {
             $site = Site::findOrFail($id);
 
-            // Business rule validation: Cannot delete sites with active shifts
-            $activeShifts = $site->shifts()
-                ->whereIn('status', ['scheduled', 'active'])
-                ->count();
+            return DB::transaction(function () use ($site) {
+                // Business rule validation: Cannot delete sites with active shifts
+                $activeShifts = $site->shifts()
+                    ->whereIn('status', ['scheduled', 'active'])
+                    ->count();
 
-            if ($activeShifts > 0) {
+                if ($activeShifts > 0) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => "Cannot delete site with {$activeShifts} active or scheduled shifts. Please complete or cancel all shifts first."
+                    ], 422);
+                }
+
+                // Check for active geofences
+                $activeGeofences = $site->geofences()->where('is_active', true)->count();
+                if ($activeGeofences > 0) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => "Cannot delete site with active geofences. Please deactivate all geofences first."
+                    ], 422);
+                }
+
+                $site->delete();
+
                 return response()->json([
-                    'success' => false,
-                    'error' => "Cannot delete site with {$activeShifts} active or scheduled shifts. Please complete or cancel all shifts first."
-                ], 422);
-            }
-
-            // Check for active geofences
-            $activeGeofences = $site->geofences()->where('is_active', true)->count();
-            if ($activeGeofences > 0) {
-                return response()->json([
-                    'success' => false,
-                    'error' => "Cannot delete site with active geofences. Please deactivate all geofences first."
-                ], 422);
-            }
-
-            $site->delete();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Site deleted successfully'
-            ]);
+                    'success' => true,
+                    'message' => 'Site deleted successfully'
+                ]);
+            });
         } catch (\Exception $e) {
+            Log::error('Error deleting site', ['site_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error deleting site: ' . $e->getMessage()
+                'error' => 'Unable to delete site. Please try again.'
             ], 500);
         }
     }
@@ -246,9 +253,10 @@ class SiteController extends Controller
                 'site' => $site
             ]);
         } catch (\Exception $e) {
+            Log::error('Error updating site status', ['site_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error updating site status: ' . $e->getMessage()
+                'error' => 'Unable to update site status. Please try again.'
             ], 500);
         }
     }
@@ -277,9 +285,10 @@ class SiteController extends Controller
                 'sites' => $sites
             ]);
         } catch (\Exception $e) {
+            Log::error('Error loading sites', ['exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Error loading sites: ' . $e->getMessage()
+                'error' => 'Unable to load sites. Please try again.'
             ], 500);
         }
     }

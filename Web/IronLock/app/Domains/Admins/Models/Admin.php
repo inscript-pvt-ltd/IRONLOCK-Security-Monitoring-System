@@ -2,8 +2,13 @@
 
 namespace App\Domains\Admins\Models;
 
-use Illuminate\Database\Eloquent\Model;
+use App\Domains\Guards\Models\Guard;
+use App\Domains\Sites\Models\Site;
+use App\Domains\Geofences\Models\Geofence;
+use App\Domains\Shifts\Models\Shift;
+use App\Domains\Shifts\Models\WorkingTimeOverride;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 
 class Admin extends Authenticatable
@@ -60,5 +65,45 @@ class Admin extends Authenticatable
             'last_login_at' => 'datetime',
             'password' => 'hashed',
         ];
+    }
+
+    /**
+     * Guards created by this admin.
+     */
+    public function guards(): HasMany
+    {
+        return $this->hasMany(Guard::class, 'created_by');
+    }
+
+    /**
+     * Sites created by this admin.
+     */
+    public function sites(): HasMany
+    {
+        return $this->hasMany(Site::class, 'created_by');
+    }
+
+    /**
+     * Geofences created by this admin.
+     */
+    public function geofences(): HasMany
+    {
+        return $this->hasMany(Geofence::class, 'created_by');
+    }
+
+    /**
+     * Shifts created by this admin.
+     */
+    public function shifts(): HasMany
+    {
+        return $this->hasMany(Shift::class, 'created_by');
+    }
+
+    /**
+     * Working time regulation overrides approved by this admin.
+     */
+    public function workingTimeOverrides(): HasMany
+    {
+        return $this->hasMany(WorkingTimeOverride::class, 'approved_by');
     }
 }

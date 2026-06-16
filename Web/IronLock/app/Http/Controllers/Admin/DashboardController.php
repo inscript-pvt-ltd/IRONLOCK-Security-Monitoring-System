@@ -15,8 +15,16 @@ class DashboardController extends Controller
      */
     public function index()
     {
-        // Get current admin
-        $admin = Admin::find(session('admin_id'));
+        // Get current admin — if the session references a missing/stale admin,
+        // bounce to login rather than passing null into the view.
+        $admin = Admin::find($this->currentAdminId());
+
+        if (!$admin) {
+            session()->flush();
+            return redirect()
+                ->route('admin.login')
+                ->with('error', 'Your session has expired. Please log in again.');
+        }
 
         // Get dashboard statistics
         $stats = $this->getDashboardStats();

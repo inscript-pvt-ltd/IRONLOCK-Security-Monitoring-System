@@ -7,6 +7,8 @@ use App\Domains\Guards\Models\Guard;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 class GuardController extends Controller
@@ -91,26 +93,46 @@ class GuardController extends Controller
                 ->withInput();
         }
 
-        // Create guard
-        $guard = Guard::create([
-            'employee_code' => $this->generateEmployeeCode(),
-            'first_name' => $request->first_name,
-            'last_name' => $request->last_name,
-            'username' => $request->username,
-            'email' => $request->email,
-            'password' => Hash::make($request->password),
-            'phone' => $request->phone,
-            'sia_licence_number' => $request->sia_licence_number,
-            'sia_licence_expiry' => $request->sia_licence_expiry,
-            'sia_licence_type' => $request->sia_licence_type,
-            'hire_date' => $request->hire_date,
-            'employment_status' => $request->employment_status ?? 'active',
-            'status' => 'active',
-            'created_by' => session('admin_id'),
-        ]);
+        // Create guard (employee-code generation + insert + audit log are
+        // wrapped in a transaction so a failure cannot leave a partial record).
+        try {
+            $guard = DB::transaction(function () use ($request) {
+                $guard = Guard::create([
+                    'employee_code' => $this->generateEmployeeCode(),
+                    'first_name' => $request->first_name,
+                    'last_name' => $request->last_name,
+                    'username' => $request->username,
+                    'email' => $request->email,
+                    'password' => Hash::make($request->password),
+                    'phone' => $request->phone,
+                    'sia_licence_number' => $request->sia_licence_number,
+                    'sia_licence_expiry' => $request->sia_licence_expiry,
+                    'sia_licence_type' => $request->sia_licence_type,
+                    'hire_date' => $request->hire_date,
+                    'employment_status' => $request->employment_status ?? 'active',
+                    'status' => 'active',
+                    'created_by' => $this->currentAdminId(),
+                ]);
 
-        // Log audit trail
-        $this->logGuardAction('created', $guard, $request->all());
+                // Log audit trail
+                $this->logGuardAction('created', $guard, $request->all());
+
+                return $guard;
+            });
+        } catch (\Exception $e) {
+            Log::error('Guard creation failed', ['exception' => $e]);
+
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unable to create guard. Please try again.'
+                ], 500);
+            }
+
+            return back()
+                ->with('error', 'Unable to create guard. Please try again.')
+                ->withInput();
+        }
 
         if ($request->expectsJson()) {
             return response()->json([
@@ -304,9 +326,18 @@ class GuardController extends Controller
         ]);
 
         try {
-            // GDPR-compliant deletion: Remove personal data but preserve audit trails
-            // Note: Foreign key constraints with CASCADE will handle related data appropriately
-            $guard->delete();
+            // GDPR-compliant deletion: Remove personal data but preserve audit trails.
+            // Re-check for active shifts inside the transaction to avoid a race
+            // where a shift becomes active between the initial check and delete.
+            DB::transaction(function () use ($guard) {
+                $activeShifts = $guard->shifts()->where('status', 'active')->lockForUpdate()->count();
+                if ($activeShifts > 0) {
+                    throw new \RuntimeException('Guard has active shifts');
+                }
+
+                // Foreign key constraints with CASCADE handle related data appropriately.
+                $guard->delete();
+            });
 
             if ($request->expectsJson()) {
                 return response()->json([
