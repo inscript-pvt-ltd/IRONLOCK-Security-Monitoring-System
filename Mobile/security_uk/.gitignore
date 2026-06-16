@@ -1,0 +1,9 @@
+# Repo scope: only track app code, not specs/docs/assets/backups at the workspace root
+/*
+!/guardmonitor/
+!/mock-backend/
+!/.gitignore
+
+# Belt-and-braces: never track these even if they end up under a tracked folder
+*.zip
+.DS_Store
