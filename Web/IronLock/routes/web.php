@@ -24,6 +24,7 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('guards', [App\Http\Controllers\Admin\GuardController::class, 'index'])->name('guards.index');
         Route::get('guards/list', [App\Http\Controllers\Admin\GuardController::class, 'list'])->name('guards.list'); // Must be before parameterized routes
         Route::post('guards', [App\Http\Controllers\Admin\GuardController::class, 'store'])->name('guards.store');
+        Route::get('guards/{guard}/shifts', [App\Http\Controllers\Admin\GuardController::class, 'recentShifts'])->name('guards.shifts'); // AJAX: completed shifts for drawer
         Route::get('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'show'])->name('guards.show'); // AJAX endpoint
         Route::put('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'update'])->name('guards.update');
         Route::patch('guards/{guard}/toggle-status', [App\Http\Controllers\Admin\GuardController::class, 'toggleStatus'])->name('guards.toggle-status');
@@ -56,9 +57,11 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('shifts', [App\Http\Controllers\Admin\ShiftController::class, 'index'])->name('shifts.index');
         Route::post('shifts', [App\Http\Controllers\Admin\ShiftController::class, 'store'])->name('shifts.store');
         Route::post('shifts/check-wtr', [App\Http\Controllers\Admin\ShiftController::class, 'checkWTRCompliance'])->name('shifts.check-wtr');
+        Route::get('shifts/{shift}/timeline', [App\Http\Controllers\Admin\ShiftController::class, 'timeline'])->name('shifts.timeline');
         Route::get('shifts/{shift}', [App\Http\Controllers\Admin\ShiftController::class, 'show'])->name('shifts.show');
         Route::put('shifts/{shift}', [App\Http\Controllers\Admin\ShiftController::class, 'update'])->name('shifts.update');
         Route::patch('shifts/{shift}/cancel', [App\Http\Controllers\Admin\ShiftController::class, 'cancel'])->name('shifts.cancel');
+        Route::patch('shifts/{shift}/resolve', [App\Http\Controllers\Admin\ShiftController::class, 'resolve'])->name('shifts.resolve');
 
         // API status endpoint
         Route::get('status', function () {

@@ -178,6 +178,42 @@ class GuardController extends Controller
     }
 
     /**
+     * Return a guard's completed shifts for the "Recent Shifts" drawer (AJAX).
+     *
+     * Once a shift is completed it leaves the Active Shifts table on the shifts
+     * page and surfaces here instead. Most recent first; the display-only
+     * `reference` is shown while the UUID `id` drives the timeline link.
+     */
+    public function recentShifts(Guard $guard): \Illuminate\Http\JsonResponse
+    {
+        $shifts = $guard->shifts()
+            ->where('status', 'completed')
+            ->with('site:id,name')
+            ->orderByDesc('scheduled_start')
+            ->limit(50)
+            ->get()
+            ->map(function (\App\Domains\Shifts\Models\Shift $shift) {
+                return [
+                    'id' => $shift->id,
+                    'reference' => $shift->reference,
+                    'scheduled_start' => optional($shift->scheduled_start)->toISOString(),
+                    'scheduled_end' => optional($shift->scheduled_end)->toISOString(),
+                    'site_name' => $shift->site->name ?? null,
+                    'timeline_url' => route('admin.shifts.timeline', $shift->id),
+                ];
+            });
+
+        return response()->json([
+            'success' => true,
+            'guard' => [
+                'id' => $guard->id,
+                'name' => trim("{$guard->first_name} {$guard->last_name}"),
+            ],
+            'shifts' => $shifts,
+        ]);
+    }
+
+    /**
      * Toggle guard status (activate/deactivate).
      */
     public function toggleStatus(Request $request, Guard $guard)

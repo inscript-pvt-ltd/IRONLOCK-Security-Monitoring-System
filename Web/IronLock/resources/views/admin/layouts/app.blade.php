@@ -55,10 +55,11 @@
             margin-bottom: 8px;
         }
 
-        .logo {
-            font-size: 12px;
-            font-weight: bold;
-            color: var(--premium-gold);
+        .logo img {
+            width: 70%;
+            height: auto;
+            display: block;
+            margin-inline: auto;
         }
 
         .nav-item {
@@ -415,7 +416,9 @@
     <!-- Sidebar Navigation -->
     <nav class="sidebar">
         <div class="sidebar-logo">
-            <div class="logo">SGM</div>
+            <div class="logo">
+                <img src="{{ asset('Images/logo/logo.png') }}" alt="IronLock">
+            </div>
         </div>
 
         <a href="{{ route('admin.dashboard') }}" class="nav-item {{ request()->routeIs('admin.dashboard') ? 'active' : '' }}">

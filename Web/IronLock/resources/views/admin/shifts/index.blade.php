@@ -139,9 +139,141 @@
     .shift-blk:hover { opacity: 0.85; }
 
     .shift-blk.active    { background: var(--success-green); border-color: var(--success-green); }
+    .shift-blk.checked-in { background: var(--warning-amber); border-color: var(--warning-amber); }
     .shift-blk.completed { background: var(--text-muted); border-color: var(--text-muted); }
+
+    .shift-blk.completed::after {
+        content: '✓';
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 13px;
+        height: 13px;
+        background: var(--success-green);
+        color: white;
+        border-radius: 50%;
+        font-size: 8px;
+        font-weight: bold;
+        margin-left: 5px;
+        vertical-align: middle;
+        line-height: 1;
+    }
     .shift-blk.cancelled { background: transparent; border-color: var(--text-muted); color: var(--text-muted); border-style: dashed; }
+    .shift-blk.missed    { background: var(--error-red); border-color: var(--error-red); }
     .shift-blk.wtr-warn-block { border-style: dashed; }
+
+    /* ── Active Shifts table ─────────────────────────── */
+    .active-container {
+        background: var(--surface-dark);
+        border: 1.5px solid var(--border-dark);
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 12px;
+    }
+
+    .active-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+    }
+
+    .active-table th {
+        background: var(--border-dark);
+        padding: 8px 12px;
+        text-align: left;
+        font-size: 9px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+
+    .active-table td {
+        background: var(--surface-dark);
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border-dark);
+        color: var(--text-primary);
+        vertical-align: middle;
+    }
+
+    .active-table tr:last-child td { border-bottom: none; }
+
+    .active-ref {
+        font-weight: bold;
+        color: var(--premium-gold);
+        white-space: nowrap;
+    }
+
+    .active-guard { font-weight: bold; }
+
+    .active-timeline { color: var(--text-secondary); white-space: nowrap; }
+    .active-timeline .started { color: var(--success-green); }
+
+    .active-empty {
+        text-align: center;
+        padding: 22px;
+        color: var(--text-muted);
+        font-size: 11px;
+    }
+
+    .active-view-btn {
+        display: inline-block;
+        padding: 4px 12px;
+        font-size: 10px;
+        font-weight: bold;
+        border-radius: 4px;
+        text-decoration: none;
+        background: var(--deep-security-blue);
+        color: #fff;
+        border: 1px solid var(--deep-security-blue);
+        transition: all 0.2s;
+        white-space: nowrap;
+    }
+
+    .active-view-btn:hover {
+        background: transparent;
+        color: var(--text-primary);
+        border-color: var(--premium-gold);
+    }
+
+    /* ── Needs-resolution flag (missed / ended-early) ── */
+    /* A shift awaiting supervisor resolution turns solid red and carries a
+       ⚠ triangle marker, regardless of its underlying status. */
+    .shift-blk.needs-resolve {
+        background: var(--error-red);
+        border-color: var(--error-red);
+        color: #fff;
+    }
+    .shift-blk.needs-resolve .resolve-flag { margin-right: 4px; font-weight: bold; }
+
+    /* ── In-drawer resolve (supervisor recovery) ─────── */
+    /* Info banner shown on the edit form when the opened shift needs resolving. */
+    .resolve-banner {
+        margin-top: 4px;
+        padding: 9px 10px;
+        border-radius: 4px;
+        font-size: 10px;
+        line-height: 1.45;
+        border: 1px solid var(--error-red);
+        background: rgba(220,53,69,0.07);
+        color: var(--text-secondary);
+    }
+    .resolve-banner strong { display: block; color: var(--error-red); margin-bottom: 2px; }
+
+    /* Inline error inside the resolve view. */
+    .resolve-view-error {
+        display: none;
+        margin-top: 10px;
+        padding: 8px 10px;
+        background: rgba(220,53,69,0.08);
+        border: 1px solid var(--critical-red);
+        border-radius: 4px;
+        font-size: 10px;
+        color: var(--critical-red);
+        white-space: pre-line;
+        line-height: 1.4;
+    }
     /* overnight continuation shown in the next day's column */
     .shift-blk.shift-cont {
         background: transparent;
@@ -447,6 +579,17 @@
         color: var(--premium-gold);
     }
 
+    .drawer-btn-danger {
+        background: transparent;
+        color: var(--error-red);
+        border-color: var(--error-red);
+    }
+
+    .drawer-btn-danger:hover {
+        background: var(--error-red);
+        color: #fff;
+    }
+
     /* ── Spinner ─────────────────────────────────────── */
     .loading-spinner {
         display: inline-block;
@@ -492,6 +635,25 @@
         <table class="cal" id="calendar-table"></table>
     </div>
 
+    <!-- ①b Active Shifts — only shifts currently in progress (populated by JS) -->
+    <div class="section-header">Active Shifts — currently in progress</div>
+    <div class="active-container">
+        <table class="active-table" id="active-shifts-table">
+            <thead>
+                <tr>
+                    <th>Shift ID</th>
+                    <th>Site</th>
+                    <th>Guard</th>
+                    <th>Timeline</th>
+                    <th style="text-align:right;">Action</th>
+                </tr>
+            </thead>
+            <tbody id="active-shifts-tbody">
+                <tr><td colspan="5" class="active-empty">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+
     <!-- ② WTR warning rows below calendar (populated by JS) -->
     <div id="wtr-warnings-section"></div>
 
@@ -528,6 +690,9 @@
     </div>
 
     <form id="shift-form">
+        <!-- Shown only when the opened shift needs supervisor resolution -->
+        <div id="resolve-banner" class="resolve-banner" style="display:none;"></div>
+
         <label class="drawer-label" style="margin-top:0;">Guard</label>
         <select id="guard-select" class="drawer-select" required>
             <option value="">Select Guard</option>
@@ -593,9 +758,78 @@
         <!-- Actions -->
         <div class="drawer-actions">
             <button type="submit" class="drawer-btn drawer-btn-primary" id="save-shift-btn">Save</button>
-            <button type="button" class="drawer-btn drawer-btn-secondary" onclick="closeShiftDrawer()">Cancel</button>
+            <!-- Replaces Save when the shift needs resolution -->
+            <button type="button" class="drawer-btn drawer-btn-primary" id="resolve-open-btn" style="display:none;">Resolve</button>
+            <button type="button" class="drawer-btn drawer-btn-secondary" onclick="closeShiftDrawer()">Close</button>
+        </div>
+        <!-- Cancel-shift action — only for a shift that hasn't started yet -->
+        <div class="drawer-actions" id="cancel-shift-row" style="display:none; margin-top:8px;">
+            <button type="button" class="drawer-btn drawer-btn-danger" id="cancel-shift-btn">Cancel Shift</button>
         </div>
     </form>
+
+    <!-- Resolve view — swaps in over the edit form (Back returns to it) -->
+    <div id="resolve-view" style="display:none;">
+        <div id="resolve-view-info" class="resolve-banner"></div>
+
+        <label class="drawer-label">Outcome</label>
+        <select id="resolve-outcome" class="drawer-select"></select>
+
+        <div id="resolve-guard-row" style="display:none;">
+            <label class="drawer-label">Reassign to</label>
+            <select id="resolve-guard" class="drawer-select">
+                <option value="">Select guard</option>
+            </select>
+        </div>
+
+        <label class="drawer-label">Reason</label>
+        <select id="resolve-reason" class="drawer-select">
+            <option value="emergency">Emergency (medical/family)</option>
+            <option value="transport">Transport / Traffic</option>
+            <option value="illness">Illness</option>
+            <option value="personal">Personal</option>
+            <option value="operational">Operational</option>
+            <option value="other">Other</option>
+        </select>
+
+        <label class="drawer-label">Note (optional)</label>
+        <textarea id="resolve-note" class="drawer-textarea" maxlength="500"
+                  placeholder="Add any context for the audit trail…"></textarea>
+
+        <div id="resolve-view-error" class="resolve-view-error"></div>
+
+        <div class="drawer-actions">
+            <button type="button" class="drawer-btn drawer-btn-primary" id="resolve-confirm-btn">Resolve</button>
+            <button type="button" class="drawer-btn drawer-btn-secondary" id="resolve-back-btn">← Back</button>
+        </div>
+    </div>
+
+    <!-- Cancel view — swaps in over the edit form (Back returns to it) -->
+    <div id="cancel-view" style="display:none;">
+        <div class="resolve-banner">
+            <strong>Cancel this shift?</strong>This calls the shift off before the guard goes on duty.
+            Pick a reason for the audit trail. To create the correct shift afterwards, add a new one.
+        </div>
+
+        <label class="drawer-label">Reason</label>
+        <select id="cancel-reason" class="drawer-select">
+            <option value="scheduling_error">Scheduling error (wrong day/guard/site)</option>
+            <option value="emergency">Emergency / operational</option>
+            <option value="client_request">Client cancelled / site closed</option>
+            <option value="other">Other</option>
+        </select>
+
+        <label class="drawer-label">Note (optional)</label>
+        <textarea id="cancel-note" class="drawer-textarea" maxlength="500"
+                  placeholder="Add any context for the audit trail…"></textarea>
+
+        <div id="cancel-view-error" class="resolve-view-error"></div>
+
+        <div class="drawer-actions">
+            <button type="button" class="drawer-btn drawer-btn-danger" id="cancel-confirm-btn">Cancel Shift</button>
+            <button type="button" class="drawer-btn drawer-btn-secondary" id="cancel-back-btn">← Back</button>
+        </div>
+    </div>
 </div>
 @endsection
 

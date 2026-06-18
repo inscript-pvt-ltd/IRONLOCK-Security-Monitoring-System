@@ -422,6 +422,64 @@
     .btn-copy-sm.copied .copied-text {
         display: inline !important;
     }
+
+    /* Recent Shifts drawer view */
+    .shifts-drawer-sub {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-bottom: 14px;
+        line-height: 1.4;
+    }
+
+    .shift-list-item {
+        border: 1px solid var(--border-dark);
+        border-radius: 4px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        background: var(--bg-dark);
+    }
+
+    .shift-list-ref {
+        font-weight: bold;
+        color: var(--premium-gold);
+        font-size: 11px;
+        letter-spacing: 0.02em;
+    }
+
+    .shift-list-meta {
+        font-size: 10px;
+        color: var(--text-secondary);
+        margin-top: 4px;
+        line-height: 1.6;
+    }
+
+    .shift-list-view {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 10px;
+        font-size: 10px;
+        font-weight: bold;
+        border-radius: 3px;
+        text-decoration: none;
+        background: var(--deep-security-blue);
+        color: #fff;
+        border: 1px solid var(--deep-security-blue);
+        transition: all 0.2s ease;
+    }
+
+    .shift-list-view:hover {
+        background: var(--premium-gold);
+        color: var(--bg-dark);
+        border-color: var(--premium-gold);
+    }
+
+    .shifts-empty,
+    .shifts-loading {
+        text-align: center;
+        padding: 30px 10px;
+        color: var(--text-muted);
+        font-size: 11px;
+    }
 </style>
 @endsection
 
@@ -463,6 +521,7 @@
                             <th>Site(s)</th>
                             <th>Status</th>
                             <th>Actions</th>
+                            <th>Recent Shifts</th>
                             <th>Credentials</th>
                         </tr>
                     </thead>
@@ -504,6 +563,9 @@
                                         @endif
                                         <button class="btn-sm btn-danger-sm" onclick="deleteGuard('{{ $guard->id }}', '{{ $guard->first_name }} {{ $guard->last_name }}')">Delete</button>
                                     </div>
+                                </td>
+                                <td>
+                                    <button class="btn-sm btn-secondary-sm" onclick="showGuardShifts('{{ $guard->id }}')">View</button>
                                 </td>
                                 <td>
                                     <button class="btn-sm btn-copy-sm" onclick="copyCredentials('{{ $guard->username }}', '{{ $guard->first_name }}', '{{ $guard->last_name }}')">
@@ -697,6 +759,17 @@
             <button type="button" class="drawer-btn outline" onclick="closeGuardDrawer()">CLOSE</button>
         </div>
     </div>
+
+    <!-- Recent Shifts View (shown when viewing completed shifts) -->
+    <div id="guardShiftsView" style="display: none;">
+        <div class="shifts-drawer-sub" id="shiftsGuardName">Completed shifts</div>
+        <div id="guardShiftsList">
+            <div class="shifts-loading">Loading…</div>
+        </div>
+        <div class="drawer-actions">
+            <button type="button" class="drawer-btn outline" onclick="closeGuardDrawer()">CLOSE</button>
+        </div>
+    </div>
 </div>
 
 <!-- Delete Confirmation Modal -->
@@ -815,11 +888,13 @@
         const title = document.getElementById('drawerTitle');
         const form = document.getElementById('guardForm');
         const infoView = document.getElementById('guardInfoView');
+        const shiftsView = document.getElementById('guardShiftsView');
 
         // Reset drawer state
         drawer.classList.remove('info-mode');
         form.style.display = 'none';
         infoView.style.display = 'none';
+        shiftsView.style.display = 'none';
 
         // Clear all errors
         clearAllErrors();
@@ -853,6 +928,10 @@
             currentGuardId = guardId;
             drawer.classList.add('info-mode');
             infoView.style.display = 'block';
+        } else if (mode === 'shifts') {
+            title.textContent = 'Recent Shifts';
+            currentGuardId = guardId;
+            shiftsView.style.display = 'block';
         }
 
         drawer.classList.add('open');
@@ -907,6 +986,86 @@
             console.error('Error:', error);
             alert('Error loading guard information');
         });
+    }
+
+    // Escape user-supplied values before injecting into innerHTML (site name,
+    // reference). Route-generated URLs are safe and not passed through here.
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, function(ch) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+        });
+    }
+
+    // Open the drawer in "shifts" mode and load the guard's completed shifts.
+    function showGuardShifts(guardId) {
+        openGuardDrawer('shifts', guardId);
+
+        const list = document.getElementById('guardShiftsList');
+        const nameEl = document.getElementById('shiftsGuardName');
+        list.innerHTML = '<div class="shifts-loading">Loading…</div>';
+        nameEl.textContent = 'Completed shifts';
+
+        fetch(`/admin/guards/${guardId}/shifts`, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) {
+                list.innerHTML = '<div class="shifts-empty">Unable to load shifts.</div>';
+                return;
+            }
+
+            if (data.guard && data.guard.name) {
+                nameEl.textContent = `Completed shifts — ${data.guard.name}`;
+            }
+
+            renderGuardShifts(data.shifts || []);
+        })
+        .catch(error => {
+            console.error('Error loading guard shifts:', error);
+            list.innerHTML = '<div class="shifts-empty">Error loading shifts.</div>';
+        });
+    }
+
+    function renderGuardShifts(shifts) {
+        const list = document.getElementById('guardShiftsList');
+
+        if (!shifts.length) {
+            list.innerHTML = '<div class="shifts-empty">No completed shifts yet.</div>';
+            return;
+        }
+
+        // Timestamps arrive as UTC ISO strings; render in the admin's local time.
+        list.innerHTML = shifts.map(shift => {
+            const start = shift.scheduled_start ? new Date(shift.scheduled_start) : null;
+            const end = shift.scheduled_end ? new Date(shift.scheduled_end) : null;
+            const dateLabel = start
+                ? start.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+                : '—';
+            const startTime = start
+                ? start.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+                : '—';
+            const endTime = end
+                ? end.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+                : '—';
+            const site = escapeHtml(shift.site_name || 'No site');
+            const ref = escapeHtml(shift.reference || '—');
+
+            return `
+                <div class="shift-list-item">
+                    <div class="shift-list-ref">#${ref}</div>
+                    <div class="shift-list-meta">
+                        ${escapeHtml(dateLabel)} · ${escapeHtml(startTime)}–${escapeHtml(endTime)}<br>
+                        ${site}
+                    </div>
+                    <a href="${shift.timeline_url}" class="shift-list-view">View timeline →</a>
+                </div>
+            `;
+        }).join('');
     }
 
     function editCurrentGuard() {

@@ -128,8 +128,204 @@
         min-height: 400px;
         width: 100%;
         height: 100%;
-        background: #f4f6f8;
     }
+
+    /* ── MapLibre popup ─────────────────────────────────────────────────── */
+    /* !important required — MapLibre injects its own stylesheet at high specificity */
+    .maplibregl-popup-content {
+        background: #0f1929 !important;
+        border: none !important;
+        border-radius: 10px !important;
+        box-shadow: 0 16px 48px rgba(0,0,0,.85), 0 0 0 1px rgba(212,175,55,0.18) !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        min-width: 200px !important;
+        font-family: inherit !important;
+    }
+    /* tip arrow — CSS triangles need 3 transparent borders and 1 coloured one.
+       Target each anchor position so only the correct border gets the colour. */
+    .maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+    .maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+    .maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip {
+        border-top-color: #0f1929 !important;
+        border-bottom-color: transparent !important;
+        border-left-color:   transparent !important;
+        border-right-color:  transparent !important;
+    }
+    .maplibregl-popup-anchor-top .maplibregl-popup-tip,
+    .maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+    .maplibregl-popup-anchor-top-right .maplibregl-popup-tip {
+        border-top-color:    transparent !important;
+        border-bottom-color: #162040 !important;
+        border-left-color:   transparent !important;
+        border-right-color:  transparent !important;
+    }
+    .maplibregl-popup-anchor-left .maplibregl-popup-tip {
+        border-top-color:    transparent !important;
+        border-bottom-color: transparent !important;
+        border-left-color:   transparent !important;
+        border-right-color:  #162040 !important;
+    }
+    .maplibregl-popup-anchor-right .maplibregl-popup-tip {
+        border-top-color:    transparent !important;
+        border-bottom-color: transparent !important;
+        border-left-color:   #162040 !important;
+        border-right-color:  transparent !important;
+    }
+    /* card layout */
+    .site-popup-header {
+        background: linear-gradient(135deg, #162040 0%, #0f1929 100%);
+        border-bottom: 2px solid #D4AF37;
+        padding: 10px 14px 9px;
+    }
+    .site-popup-name {
+        font-size: 13px; font-weight: 700; color: #D4AF37;
+        letter-spacing: 0.3px; line-height: 1.2;
+    }
+    .site-popup-body   { padding: 10px 14px 12px; }
+    .site-popup-address {
+        font-size: 10px; color: #94a3b8; line-height: 1.5; margin-bottom: 9px;
+    }
+    .site-popup-footer { display: flex; align-items: center; }
+    .site-popup-badge  {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 3px 9px;
+        background: rgba(212,175,55,0.1); border: 1px solid rgba(212,175,55,0.3);
+        border-radius: 20px; font-size: 9px; font-weight: 600;
+        color: #D4AF37; letter-spacing: 0.4px;
+    }
+    /* ── Pick-from-map button (in form) ────────────────────────────────── */
+    .btn-pick-map {
+        width: 100%;
+        margin-top: 8px;
+        padding: 9px 12px;
+        background: transparent;
+        border: 1.5px dashed rgba(212, 175, 55, 0.35);
+        border-radius: 6px;
+        color: var(--text-muted);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.4px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        transition: all 0.2s ease;
+    }
+    .btn-pick-map:hover {
+        border-color: #D4AF37;
+        border-style: solid;
+        color: #D4AF37;
+        background: rgba(212, 175, 55, 0.06);
+    }
+    .btn-pick-map.active {
+        border-color: #D4AF37;
+        border-style: solid;
+        color: #D4AF37;
+        background: rgba(212, 175, 55, 0.08);
+    }
+
+    /* ── Map pick-mode banner (overlaid on the map, contains geocoder) ─── */
+    #mapPickBanner {
+        display: none;
+        position: absolute;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 1001;
+        background: rgba(11, 18, 32, 0.96);
+        border: 1px solid rgba(212, 175, 55, 0.38);
+        border-radius: 10px;
+        width: 360px;
+        box-shadow: 0 10px 32px rgba(0,0,0,.6);
+        flex-direction: column;
+        cursor: default;
+        overflow: visible; /* dropdown escapes the banner */
+    }
+    #mapPickBanner.visible { display: flex; }
+
+    .pick-banner-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 14px 8px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .pick-banner-dot {
+        width: 9px; height: 9px; flex-shrink: 0;
+        background: #D4AF37; border-radius: 50%;
+        box-shadow: 0 0 0 3px rgba(212,175,55,0.22);
+        animation: pickPulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pickPulse {
+        0%, 100% { box-shadow: 0 0 0 3px rgba(212,175,55,0.22); }
+        50%       { box-shadow: 0 0 0 7px rgba(212,175,55,0.07); }
+    }
+    .pick-banner-label {
+        flex: 1; font-size: 10px; font-weight: 500;
+        color: var(--text-secondary); letter-spacing: 0.2px;
+    }
+    .pick-banner-cancel {
+        padding: 3px 9px;
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 4px;
+        color: var(--text-muted);
+        font-size: 10px; cursor: pointer;
+        transition: all 0.15s ease; white-space: nowrap;
+    }
+    .pick-banner-cancel:hover { background: rgba(255,255,255,0.1); color: var(--text-primary); }
+
+    /* geocoder search inside the banner */
+    .pick-search-wrap  { padding: 10px 12px; }
+    .pick-search-field { position: relative; } /* icon anchors to this, not the whole wrap */
+    .pick-search-input {
+        width: 100%; box-sizing: border-box;
+        padding: 8px 10px 8px 32px;
+        background: rgba(255,255,255,0.06);
+        border: 1px solid rgba(212,175,55,0.22);
+        border-radius: 6px;
+        color: var(--text-primary);
+        font-size: 11px; outline: none;
+        transition: border-color 0.2s;
+    }
+    .pick-search-input:focus { border-color: rgba(212,175,55,0.55); }
+    .pick-search-input::placeholder { color: rgba(255,255,255,0.28); }
+    .pick-search-icon {
+        position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+        width: 14px; height: 14px; color: rgba(212,175,55,0.55);
+        pointer-events: none;
+    }
+    .pick-search-results {
+        background: #0d1929;
+        border: 1px solid rgba(212,175,55,0.25);
+        border-top: none;
+        border-radius: 0 0 8px 8px;
+        z-index: 1002;
+        max-height: 210px; overflow-y: auto;
+        box-shadow: 0 8px 20px rgba(0,0,0,.5);
+    }
+    .pick-search-results:empty { display: none; }
+    .pick-result-item {
+        padding: 8px 12px; cursor: pointer;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+        transition: background 0.15s;
+    }
+    .pick-result-item:last-child { border-bottom: none; }
+    .pick-result-item:hover { background: rgba(212,175,55,0.08); }
+    .pick-result-name {
+        display: block; font-size: 11px; font-weight: 500;
+        color: var(--text-primary); margin-bottom: 2px;
+    }
+    .pick-result-detail { display: block; font-size: 9px; color: var(--text-muted); }
+    .pick-result-empty  {
+        padding: 10px 12px; font-size: 10px;
+        color: var(--text-muted); text-align: center; cursor: default;
+    }
+
+    /* attribution */
+    .maplibregl-ctrl-attrib { font-size: 9px; }
 
     .map-preview-content {
         flex: 1;
@@ -443,10 +639,8 @@
     }
 </style>
 
-<!-- Leaflet CSS for mapping -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<!-- Leaflet Draw plugin -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+<!-- MapLibre GL JS -->
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
 @endsection
 
 @section('content')
@@ -492,6 +686,27 @@
 
         <div class="map-preview-content" id="mapContentWrap">
             <div id="siteMap"></div>
+
+            <!-- Pick-from-map banner with geocoder search -->
+            <div id="mapPickBanner">
+                <div class="pick-banner-row">
+                    <span class="pick-banner-dot"></span>
+                    <span class="pick-banner-label">Search a location or click the map to pin it</span>
+                    <button type="button" class="pick-banner-cancel" onclick="cancelMapPick()">✕ Cancel</button>
+                </div>
+                <div class="pick-search-wrap">
+                    <div class="pick-search-field">
+                        <svg class="pick-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                        </svg>
+                        <input type="text" id="pickSearchInput" class="pick-search-input"
+                               placeholder="Search address, city, postcode…"
+                               autocomplete="off" spellcheck="false"
+                               oninput="handlePickSearch(this.value)">
+                    </div>
+                    <div id="pickSearchResults"></div>
+                </div>
+            </div>
 
             <!-- Geofence Drawing Tools -->
             <div class="geofence-tools" id="geofenceTools">
@@ -557,8 +772,15 @@
                     <input type="text" inputmode="decimal" class="drawer-input" id="longitude" name="longitude" placeholder="Longitude" oninput="handleCoordInput(this)">
                 </div>
             </div>
-            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">
-                Click the map to set, or paste "lat, lng" into either field
+            <!-- Pick from map -->
+            <button type="button" class="btn-pick-map" id="pickMapBtn" onclick="startMapPick()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="10" r="3"/><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
+                </svg>
+                Pick Location on Map
+            </button>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 5px; text-align:center;">
+                or paste "lat, lng" into either field above
             </div>
         </div>
 
@@ -600,308 +822,456 @@
 @endsection
 
 @section('scripts')
-<!-- Leaflet JS for interactive mapping -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<!-- Leaflet Draw plugin -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<!-- MapLibre GL JS -->
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 
 <script>
-    // Global variables
-    let map, sites = @json($sites->items());
+    // ── Globals ────────────────────────────────────────────────────────────────
+    let map;
+    let sites = @json($sites->items());
     let currentSiteId = null;
-    let currentMode = 'add'; // 'add', 'edit', 'view'
-    let siteMarkers = {};
-    let currentGeofence = null;
-    let drawingTool = 'circle';
-    let isDrawingMode = false;
-    // When the current geofence is a circle we remember its centre + radius so the
-    // radius box can resize it, even after it is re-fetched from the server (where
-    // circles are stored as polygons and would otherwise lose their "circle" type).
-    let currentCircle = null; // { center: [lat, lng], radius: <metres> }
+    let currentMode   = 'add';
+    let siteMarkers   = {};   // id -> maplibregl.Marker
+    let currentCircle = null; // { center:[lat,lng], radius }
+    let drawingTool   = 'circle';
+    let isDrawingMode   = false;
+    let radiusSaveTimer = null;
+    let pickingLocation = false; // true while user is in pick-from-map mode
+    let pickMarker      = null;  // draggable gold dot placed after picking
+    let searchTimer     = null;  // debounce handle for Nominatim geocoder
+    let highlightTimer  = null;  // auto-clear handle for bbox highlight
 
-    // Shared geofence visual style
-    const GEO_STYLE = { color: '#D4AF37', fillColor: '#D4AF37', fillOpacity: 0.2, weight: 2 };
+    const GEO_COLOR   = '#D4AF37';
     const PIN_DEFAULT = '#12355B';
     const PIN_SELECTED = '#E63946';
 
-    // Build a teardrop pin marker icon in the given colour
-    function createPinIcon(color) {
-        return L.divIcon({
-            className: 'site-pin',
-            html: `<svg width="26" height="38" viewBox="0 0 26 38" xmlns="http://www.w3.org/2000/svg">
-                <path d="M13 0C5.8 0 0 5.8 0 13c0 9.5 13 25 13 25s13-15.5 13-25C26 5.8 20.2 0 13 0z" fill="${color}" stroke="#fff" stroke-width="2"/>
-                <circle cx="13" cy="13" r="4.5" fill="#fff"/>
-            </svg>`,
-            iconSize: [26, 38],
-            iconAnchor: [13, 38],
-            popupAnchor: [0, -34]
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    // Create a teardrop SVG pin as an HTML element (used by maplibregl.Marker)
+    function makePinEl(color) {
+        const el = document.createElement('div');
+        el.style.cssText = 'width:26px;height:38px;overflow:visible;cursor:pointer;';
+        el.innerHTML = `<svg width="26" height="38" viewBox="0 0 26 38" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible;">
+            <path d="M13 0C5.8 0 0 5.8 0 13c0 9.5 13 25 13 25s13-15.5 13-25C26 5.8 20.2 0 13 0z"
+                  fill="${color}" stroke="#fff" stroke-width="2"/>
+            <circle cx="13" cy="13" r="4.5" fill="#fff"/>
+        </svg>`;
+        return el;
+    }
+
+    // Approximate a geographic circle as a GeoJSON polygon ring.
+    // center = [lat, lng] (backend format); returns [[lng,lat], …] (GeoJSON format).
+    function circleRing(center, radiusM, n = 64) {
+        const R  = 6371000;
+        const φ1 = center[0] * Math.PI / 180;
+        const λ1 = center[1] * Math.PI / 180;
+        const d  = radiusM / R;
+        const ring = [];
+        for (let i = 0; i <= n; i++) {
+            const θ = (i * 2 * Math.PI) / n;
+            const φ2 = Math.asin(Math.sin(φ1)*Math.cos(d) + Math.cos(φ1)*Math.sin(d)*Math.cos(θ));
+            const λ2 = λ1 + Math.atan2(Math.sin(θ)*Math.sin(d)*Math.cos(φ1), Math.cos(d)-Math.sin(φ1)*Math.sin(φ2));
+            ring.push([λ2*180/Math.PI, φ2*180/Math.PI]); // [lng, lat]
+        }
+        return ring;
+    }
+
+    function emptyFC() {
+        return { type: 'FeatureCollection', features: [] };
+    }
+
+    // Push data into a named GeoJSON source (no-op if source not ready)
+    function setSource(id, geojson) {
+        const src = map && map.getSource(id);
+        if (src) src.setData(geojson);
+    }
+
+    // ── Map init ───────────────────────────────────────────────────────────────
+
+    function initializeMap() {
+        map = new maplibregl.Map({
+            container: 'siteMap',
+            // CARTO Dark Matter GL vector style — same visual as the raster tiles
+            // but rendered via WebGL so pitch + rotate work natively.
+            style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+            center: [-0.1278, 51.5074], // [lng, lat]
+            zoom: 6,
+            pitchWithRotate: true,
+            dragRotate: true
+        });
+
+        map.on('load', () => {
+            // Saved geofence layer
+            map.addSource('geofence', { type: 'geojson', data: emptyFC() });
+            map.addLayer({ id: 'geofence-fill', type: 'fill', source: 'geofence',
+                paint: { 'fill-color': GEO_COLOR, 'fill-opacity': 0.2 } });
+            map.addLayer({ id: 'geofence-line', type: 'line', source: 'geofence',
+                paint: { 'line-color': GEO_COLOR, 'line-width': 2 } });
+
+            // Live drawing preview layer (dashed outline only)
+            map.addSource('preview', { type: 'geojson', data: emptyFC() });
+            map.addLayer({ id: 'preview-fill', type: 'fill', source: 'preview',
+                paint: { 'fill-color': GEO_COLOR, 'fill-opacity': 0.08 } });
+            map.addLayer({ id: 'preview-line', type: 'line', source: 'preview',
+                paint: { 'line-color': GEO_COLOR, 'line-width': 1.5, 'line-dasharray': [4, 3] } });
+
+            // Geocoder search-result bounding-box highlight (auto-fades)
+            map.addSource('search-highlight', { type: 'geojson', data: emptyFC() });
+            map.addLayer({ id: 'search-highlight-fill', type: 'fill', source: 'search-highlight',
+                paint: { 'fill-color': GEO_COLOR, 'fill-opacity': 0.12 } });
+            map.addLayer({ id: 'search-highlight-line', type: 'line', source: 'search-highlight',
+                paint: { 'line-color': GEO_COLOR, 'line-width': 1.5, 'line-dasharray': [3, 2] } });
+
+            map.on('click', handleMapClick);
+            loadSiteMarkers();
         });
     }
 
-    // Initialize on page load
-    document.addEventListener('DOMContentLoaded', function() {
-        console.log('DOM loaded, initializing...');
+    // ── Markers ────────────────────────────────────────────────────────────────
 
-        // Small delay to ensure DOM is fully ready
-        setTimeout(() => {
-            initializeMap();
-
-            // Force map to invalidate size after a short delay
-            setTimeout(() => {
-                if (map) {
-                    map.invalidateSize();
-                    loadSiteMarkers();
-                }
-            }, 500);
-
-            setupEventListeners();
-        }, 100);
-    });
-
-    // Initialize Leaflet map
-    function initializeMap() {
-        try {
-            // Center map on UK (can be configured per deployment)
-            map = L.map('siteMap').setView([51.5074, -0.1278], 6); // London coordinates
-
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                maxZoom: 19,
-                subdomains: ['a', 'b', 'c']
-            }).addTo(map);
-
-            // Map click handler
-            map.on('click', handleMapClick);
-
-            console.log('Map initialized successfully');
-        } catch (error) {
-            console.error('Error initializing map:', error);
-        }
-    }
-
-    // Load site markers on the map
     function loadSiteMarkers() {
-        console.log('Loading site markers...', sites);
-
-        if (!sites || sites.length === 0) {
-            console.log('No sites to display');
+        if (!sites || !sites.length) {
             updateGeofenceStatus(null, 'No sites available. Add a site to get started.');
             return;
         }
-
-        let markersAdded = 0;
-        let validCoordinates = [];
-
+        const lnglats = [];
         sites.forEach(site => {
-            console.log('Processing site:', site.name, 'Coordinates:', site.latitude, site.longitude);
-
-            if (site.latitude && site.longitude && !isNaN(site.latitude) && !isNaN(site.longitude)) {
+            const lat = parseFloat(site.latitude), lng = parseFloat(site.longitude);
+            if (!isNaN(lat) && !isNaN(lng)) {
                 addSiteMarker(site);
-                markersAdded++;
-                validCoordinates.push([parseFloat(site.latitude), parseFloat(site.longitude)]);
-            } else {
-                console.log('Site has invalid coordinates:', site.name);
+                lnglats.push([lng, lat]);
             }
         });
-
-        console.log(`Added ${markersAdded} site markers`);
-
-        // If we have valid coordinates, fit the map to show all sites
-        if (validCoordinates.length > 0) {
-            if (validCoordinates.length === 1) {
-                map.setView(validCoordinates[0], 15);
-            } else {
-                map.fitBounds(validCoordinates, { padding: [20, 20] });
-            }
+        if (lnglats.length === 1) {
+            map.flyTo({ center: lnglats[0], zoom: 15 });
+        } else if (lnglats.length > 1) {
+            const bounds = lnglats.reduce(
+                (b, c) => b.extend(c),
+                new maplibregl.LngLatBounds(lnglats[0], lnglats[0])
+            );
+            map.fitBounds(bounds, { padding: 40 });
         }
     }
 
-    // Add a site marker to the map
     function addSiteMarker(site) {
-        try {
-            const lat = parseFloat(site.latitude);
-            const lng = parseFloat(site.longitude);
+        const lat = parseFloat(site.latitude), lng = parseFloat(site.longitude);
+        if (isNaN(lat) || isNaN(lng)) return;
 
-            if (isNaN(lat) || isNaN(lng)) {
-                console.error('Invalid coordinates for site:', site.name);
-                return;
-            }
-
-            const marker = L.marker([lat, lng], {
-                title: site.name,
-                icon: createPinIcon(PIN_DEFAULT)
-            }).bindPopup(`
-                <div style="text-align: center; min-width: 150px;">
-                    <strong style="color: #12355B; font-size: 14px;">${site.name}</strong><br>
-                    <div style="color: #6B7280; font-size: 12px; margin: 4px 0;">${site.address}</div>
-                    <div style="color: #D4AF37; font-size: 11px;">Grace: ${site.grace_period_minutes}min</div>
+        const el = makePinEl(PIN_DEFAULT);
+        const popup = new maplibregl.Popup({ offset: 34, closeButton: false, maxWidth: '260px' })
+            .setHTML(`
+                <div class="site-popup-header">
+                    <div class="site-popup-name">${site.name}</div>
+                </div>
+                <div class="site-popup-body">
+                    <div class="site-popup-address">${site.address}</div>
+                    <div class="site-popup-footer">
+                        <span class="site-popup-badge">&#9711; ${site.grace_period_minutes} min grace period</span>
+                    </div>
                 </div>
             `);
 
-            marker.on('click', function() {
-                selectSite(site.id);
-            });
+        const marker = new maplibregl.Marker({ element: el, anchor: 'bottom' })
+            .setLngLat([lng, lat])
+            .setPopup(popup)
+            .addTo(map);
 
-            siteMarkers[site.id] = marker;
-            marker.addTo(map);
-
-            console.log('Added marker for site:', site.name);
-        } catch (error) {
-            console.error('Error adding marker for site:', site.name, error);
-        }
+        el.addEventListener('click', e => { e.stopPropagation(); selectSite(site.id); });
+        siteMarkers[site.id] = marker;
     }
 
-    // Handle map click events
+    // ── Map click (coord capture for drawer) ──────────────────────────────────
+
     function handleMapClick(e) {
         if (isDrawingMode) return;
 
-        // Only capture coordinates while the Add/Edit drawer is open
+        // Pick-from-map mode takes priority
+        if (pickingLocation) {
+            if (e.originalEvent.button !== 0) return;
+            endMapPick(e.lngLat.lat, e.lngLat.lng);
+            return;
+        }
+
+        // Fallback: auto-set coords when the drawer is already open
         const drawerOpen = document.getElementById('siteDrawer').classList.contains('open');
         if (drawerOpen && (currentMode === 'add' || currentMode === 'edit')) {
-            setCoordinates(e.latlng.lat, e.latlng.lng);
+            setCoordinates(e.lngLat.lat, e.lngLat.lng);
             showToast('Coordinates set from map');
         }
     }
 
-    // Set coordinates in the form
     function setCoordinates(lat, lng) {
-        document.getElementById('latitude').value = lat.toFixed(6);
+        document.getElementById('latitude').value  = lat.toFixed(6);
         document.getElementById('longitude').value = lng.toFixed(6);
     }
 
-    // Allow pasting a combined "lat, lng" string into either coordinate field
+    // ── Pick-from-map ─────────────────────────────────────────────────────────
+
+    // Slide the drawer out and enter crosshair pick mode
+    function startMapPick() {
+        if (isDrawingMode) return;
+        pickingLocation = true;
+        document.getElementById('siteDrawer').classList.remove('open');
+        document.querySelector('.drawer-overlay').classList.remove('show');
+        document.getElementById('mapPickBanner').classList.add('visible');
+        map.getCanvas().style.cursor = 'crosshair';
+        updateGeofenceStatus(null, 'Click anywhere on the map to set the site location');
+    }
+
+    // Called on map click while picking — sets coords and reopens drawer
+    function endMapPick(lat, lng) {
+        pickingLocation = false;
+        map.getCanvas().style.cursor = '';
+        document.getElementById('mapPickBanner').classList.remove('visible');
+        clearPickSearch();
+        setCoordinates(lat, lng);
+        placeTempPickMarker(lat, lng);
+        document.getElementById('siteDrawer').classList.add('open');
+        document.querySelector('.drawer-overlay').classList.add('show');
+        // Mark the button as "active" (location set) with an update label
+        const btn = document.getElementById('pickMapBtn');
+        if (btn) {
+            btn.querySelector('svg + text, :last-child') // update just text
+            btn.innerHTML = btn.innerHTML.replace('Pick Location on Map', 'Change Location on Map');
+            btn.classList.add('active');
+        }
+        updateGeofenceStatus(null, 'Location pinned — drag the marker to fine-tune, then save');
+        showToast('Location set from map');
+    }
+
+    // Esc / cancel button — abort without changing coords
+    function cancelMapPick() {
+        pickingLocation = false;
+        map.getCanvas().style.cursor = '';
+        document.getElementById('mapPickBanner').classList.remove('visible');
+        clearPickSearch();
+        document.getElementById('siteDrawer').classList.add('open');
+        document.querySelector('.drawer-overlay').classList.add('show');
+        updateGeofenceStatus(null, 'Pick cancelled — select a site or open the form to continue');
+    }
+
+    // Drop a draggable gold dot at the picked location.
+    // Dragging it live-updates the lat/lng inputs.
+    function placeTempPickMarker(lat, lng) {
+        if (pickMarker) pickMarker.remove();
+        const el = document.createElement('div');
+        el.style.cssText = [
+            'width:18px', 'height:18px',
+            'background:#D4AF37',
+            'border:3px solid #fff',
+            'border-radius:50%',
+            'box-shadow:0 0 0 2px rgba(212,175,55,.35), 0 4px 12px rgba(0,0,0,.55)',
+            'cursor:grab'
+        ].join(';');
+        pickMarker = new maplibregl.Marker({ element: el, anchor: 'center', draggable: true })
+            .setLngLat([lng, lat])
+            .addTo(map);
+        pickMarker.on('dragstart', () => { el.style.cursor = 'grabbing'; });
+        pickMarker.on('drag', () => {
+            const p = pickMarker.getLngLat();
+            setCoordinates(p.lat, p.lng);
+        });
+        pickMarker.on('dragend', () => {
+            el.style.cursor = 'grab';
+            const p = pickMarker.getLngLat();
+            setCoordinates(p.lat, p.lng);
+        });
+    }
+
+    // ── Geocoder (Nominatim) ──────────────────────────────────────────────────
+
+    // Debounced search — fires after the user stops typing for 350 ms
+    function handlePickSearch(query) {
+        clearTimeout(searchTimer);
+        const resultsEl = document.getElementById('pickSearchResults');
+        if (!query || query.length < 3) { resultsEl.innerHTML = ''; return; }
+        resultsEl.innerHTML = '<div class="pick-result-empty">Searching…</div>';
+        searchTimer = setTimeout(() => {
+            fetch(
+                `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=6&addressdetails=0`,
+                { headers: { 'Accept-Language': 'en' } }
+            )
+            .then(r => r.json())
+            .then(results => {
+                window._geoResults = results;
+                if (!results.length) {
+                    resultsEl.innerHTML = '<div class="pick-result-empty">No results found</div>';
+                    return;
+                }
+                resultsEl.innerHTML = results.map((r, i) => {
+                    const parts  = r.display_name.split(',');
+                    const name   = parts.slice(0, 2).join(',').trim();
+                    const detail = parts.slice(2, 5).join(',').trim();
+                    return `<div class="pick-result-item" onclick="selectPickResult(${i})">
+                        <span class="pick-result-name">${name}</span>
+                        <span class="pick-result-detail">${detail}</span>
+                    </div>`;
+                }).join('');
+            })
+            .catch(() => {
+                resultsEl.innerHTML = '<div class="pick-result-empty">Search failed — check your connection</div>';
+            });
+        }, 350);
+    }
+
+    // User clicked a search result — fly to area, highlight bbox, pin centroid
+    function selectPickResult(index) {
+        const result = window._geoResults && window._geoResults[index];
+        if (!result) return;
+
+        const lat = parseFloat(result.lat);
+        const lng = parseFloat(result.lon);
+
+        // Clear dropdown, update input to the selected name
+        document.getElementById('pickSearchResults').innerHTML = '';
+        document.getElementById('pickSearchInput').value =
+            result.display_name.split(',').slice(0, 2).join(',').trim();
+
+        // Fly to bounding box (or centroid for points)
+        if (result.boundingbox) {
+            const [s, n, w, e] = result.boundingbox.map(parseFloat);
+            map.fitBounds([[w, s], [e, n]], { padding: 80, maxZoom: 17, duration: 800 });
+            highlightSearchBBox(s, n, w, e);
+        } else {
+            map.flyTo({ center: [lng, lat], zoom: 16, duration: 800 });
+        }
+
+        // Set coords + drop draggable pin at the centroid
+        setCoordinates(lat, lng);
+        placeTempPickMarker(lat, lng);
+
+        // Close pick mode and reopen drawer
+        pickingLocation = false;
+        map.getCanvas().style.cursor = '';
+        document.getElementById('mapPickBanner').classList.remove('visible');
+        document.getElementById('siteDrawer').classList.add('open');
+        document.querySelector('.drawer-overlay').classList.add('show');
+
+        const btn = document.getElementById('pickMapBtn');
+        if (btn) {
+            btn.innerHTML = btn.innerHTML.replace('Pick Location on Map', 'Change Location on Map');
+            btn.classList.add('active');
+        }
+        showToast('Location set — drag the pin to fine-tune');
+        updateGeofenceStatus(null, 'Location pinned — drag the marker on the map to fine-tune');
+    }
+
+    // Flash the search result bounding box as a gold highlight, then fade it out
+    function highlightSearchBBox(s, n, w, e) {
+        const src = map.getSource('search-highlight');
+        if (!src) return;
+        src.setData({
+            type: 'Feature',
+            geometry: { type: 'Polygon', coordinates: [[[w,s],[e,s],[e,n],[w,n],[w,s]]] }
+        });
+        clearTimeout(highlightTimer);
+        highlightTimer = setTimeout(() => {
+            if (map.getSource('search-highlight')) map.getSource('search-highlight').setData(emptyFC());
+        }, 2500);
+    }
+
+    function clearPickSearch() {
+        clearTimeout(searchTimer);
+        const inp = document.getElementById('pickSearchInput');
+        const res = document.getElementById('pickSearchResults');
+        if (inp) inp.value = '';
+        if (res) res.innerHTML = '';
+        if (map.getSource('search-highlight')) {
+            clearTimeout(highlightTimer);
+            map.getSource('search-highlight').setData(emptyFC());
+        }
+    }
+
     function handleCoordInput(input) {
         const v = input.value;
-        if (v.indexOf(',') !== -1) {
+        if (v.includes(',')) {
             const parts = v.split(',').map(s => s.trim());
-            if (parts.length === 2 && parts[0] !== '' && parts[1] !== '') {
-                document.getElementById('latitude').value = parts[0];
+            if (parts.length === 2 && parts[0] && parts[1]) {
+                document.getElementById('latitude').value  = parts[0];
                 document.getElementById('longitude').value = parts[1];
             }
         }
     }
 
-    // Select a site and show its geofence
+    // ── Site selection ────────────────────────────────────────────────────────
+
     function selectSite(siteId) {
-        console.log('Selecting site:', siteId);
-
-        // Clear previous selection
-        document.querySelectorAll('.site-list-item').forEach(item => {
-            item.classList.remove('selected');
-        });
-
-        // Select current site
-        const siteItem = document.querySelector(`[data-site-id="${siteId}"]`);
-        if (siteItem) {
-            siteItem.classList.add('selected');
-        }
+        document.querySelectorAll('.site-list-item').forEach(el => el.classList.remove('selected'));
+        const listEl = document.querySelector(`[data-site-id="${siteId}"]`);
+        if (listEl) listEl.classList.add('selected');
 
         currentSiteId = siteId;
         const site = sites.find(s => s.id == siteId);
 
-        console.log('Found site:', site);
-
-        // Reset every pin to the default colour, then mark the selected one red
-        Object.keys(siteMarkers).forEach(id => siteMarkers[id].setIcon(createPinIcon(PIN_DEFAULT)));
+        // Recolour all pins; highlight the selected one
+        Object.keys(siteMarkers).forEach(id => {
+            siteMarkers[id].getElement().innerHTML = makePinEl(PIN_DEFAULT).innerHTML;
+        });
         if (siteMarkers[siteId]) {
-            siteMarkers[siteId].setIcon(createPinIcon(PIN_SELECTED));
+            siteMarkers[siteId].getElement().innerHTML = makePinEl(PIN_SELECTED).innerHTML;
         }
 
-        // Show the selected site name on the geofence card
-        if (site) {
-            document.getElementById('geofenceSiteName').textContent = site.name;
+        if (!site) return;
+
+        document.getElementById('geofenceSiteName').textContent = site.name;
+
+        if (site.latitude && site.longitude) {
+            const lat = parseFloat(site.latitude), lng = parseFloat(site.longitude);
+            map.flyTo({ center: [lng, lat], zoom: 17, duration: 800 });
+            map.once('moveend', () => {
+                if (siteMarkers[siteId]) siteMarkers[siteId].togglePopup();
+            });
         }
 
-        if (site) {
-            // Smoothly fly to the site and centre it in the map preview
-            if (site.latitude && site.longitude) {
-                const lat = parseFloat(site.latitude);
-                const lng = parseFloat(site.longitude);
-                console.log('Centering map on:', lat, lng);
-                // Make sure Leaflet knows the current container size before centring,
-                // otherwise the marker can land off-centre on first selection.
-                map.invalidateSize();
-                map.flyTo([lat, lng], 17, { animate: true, duration: 0.8 });
-                // Open the popup once the fly animation settles so it stays centred
-                map.once('moveend', () => {
-                    if (siteMarkers[siteId]) siteMarkers[siteId].openPopup();
-                });
-            } else if (siteMarkers[siteId]) {
-                siteMarkers[siteId].openPopup();
-            }
-
-            // Load site's existing geofence (display only — does not delete anything)
-            loadSiteGeofence(site);
-
-            updateGeofenceStatus(site, `Selected: ${site.name} — pick a tool above to draw its geofence`);
-        } else {
-            console.error('Site not found:', siteId);
-        }
+        loadSiteGeofence(site);
+        updateGeofenceStatus(site, `Selected: ${site.name} — pick a tool above to draw its geofence`);
     }
 
-    // Load geofence for selected site (display only)
+    // ── Geofence display ──────────────────────────────────────────────────────
+
     function loadSiteGeofence(site) {
-        removeGeofenceLayer();
-
-        // Reset the radius box to the default; displayGeofence() overrides it with
-        // the real value when the site has a saved circle.
+        clearGeofenceLayer();
         document.getElementById('radiusInput').value = 200;
-
         if (site.geofences && site.geofences.length > 0) {
-            const activeGeofence = site.geofences.find(g => g.is_active) || site.geofences[0];
-            if (activeGeofence && activeGeofence.coordinates) {
-                displayGeofence(activeGeofence);
-            }
+            const active = site.geofences.find(g => g.is_active) || site.geofences[0];
+            if (active && active.coordinates) displayGeofence(active);
         }
     }
 
-    // Normalise the shape type across the various shapes a geofence object can take:
-    // freshly drawn ones carry `type`, server-loaded ones carry `shape_type`.
-    function geofenceType(g) {
-        return g.type || g.shape_type || 'polygon';
-    }
+    function geofenceType(g) { return g.type || g.shape_type || 'polygon'; }
 
-    // Average a polygon's vertices to recover the centre of a circle that was
-    // stored as a polygon approximation. Ignores the duplicated closing vertex.
-    function polygonCentroid(points) {
-        let pts = points;
+    function polygonCentroid(pts) {
         if (pts.length > 1) {
-            const first = pts[0], last = pts[pts.length - 1];
-            if (first[0] === last[0] && first[1] === last[1]) pts = pts.slice(0, -1);
+            const f = pts[0], l = pts[pts.length-1];
+            if (f[0]===l[0] && f[1]===l[1]) pts = pts.slice(0, -1);
         }
         let lat = 0, lng = 0;
         pts.forEach(p => { lat += p[0]; lng += p[1]; });
-        return [lat / pts.length, lng / pts.length];
+        return [lat/pts.length, lng/pts.length];
     }
 
-    // Display a geofence on the map. coordinates may arrive as an array (from the
-    // server), a {center, radius} object (a freshly-drawn circle) or a JSON string.
+    // coords from server: [lat,lng] arrays. MapLibre/GeoJSON needs [lng,lat].
     function displayGeofence(geofence) {
         try {
             let coords = geofence.coordinates;
-            if (typeof coords === 'string') {
-                coords = JSON.parse(coords);
-            }
+            if (typeof coords === 'string') coords = JSON.parse(coords);
             if (!coords) return;
 
             const radiusInput = document.getElementById('radiusInput');
 
             if (geofenceType(geofence) === 'circle') {
-                // Two circle shapes: a freshly-drawn one ({center, radius}) and a
-                // server-loaded one (polygon array + a separate `radius`). Recover a
-                // real L.Circle from either so the radius box stays accurate and live.
                 let center = null, radius = null;
                 if (!Array.isArray(coords) && coords.center && coords.radius) {
-                    center = coords.center;
-                    radius = coords.radius;
+                    center = coords.center; radius = coords.radius;
                 } else if (Array.isArray(coords) && coords.length > 0) {
-                    center = polygonCentroid(coords);
-                    radius = geofence.radius;
+                    center = polygonCentroid(coords); radius = geofence.radius;
                 }
-
                 if (center && radius) {
-                    currentGeofence = L.circle(center, { radius: radius, ...GEO_STYLE }).addTo(map);
-                    currentCircle = { center: center, radius: radius };
+                    setSource('geofence', {
+                        type: 'Feature',
+                        geometry: { type: 'Polygon', coordinates: [circleRing(center, radius)] }
+                    });
+                    currentCircle = { center, radius };
                     radiusInput.value = radius;
                     drawingTool = 'circle';
                     document.getElementById('radiusGroup').style.display = 'block';
@@ -909,163 +1279,139 @@
                 }
             }
 
-            // Polygon (or a circle we couldn't reconstruct) — draw the raw shape.
+            // Polygon — convert [lat,lng] → [lng,lat] for GeoJSON
             if (Array.isArray(coords) && coords.length > 0) {
-                currentGeofence = L.polygon(coords, GEO_STYLE).addTo(map);
+                const ring = coords.map(p => [p[1], p[0]]);
+                if (ring[0][0] !== ring[ring.length-1][0] || ring[0][1] !== ring[ring.length-1][1]) {
+                    ring.push(ring[0]);
+                }
+                setSource('geofence', {
+                    type: 'Feature',
+                    geometry: { type: 'Polygon', coordinates: [ring] }
+                });
             }
-        } catch (e) {
-            console.error('Error displaying geofence:', e);
-        }
+        } catch (e) { console.error('displayGeofence:', e); }
     }
 
-    // Remove the geofence layer + any drawing state from the map ONLY.
-    // Does NOT touch the server. Used when re-drawing or switching tools.
-    function removeGeofenceLayer() {
-        if (currentGeofence) {
-            map.removeLayer(currentGeofence);
-            currentGeofence = null;
-        }
-        // Forget any tracked circle. Note: updateCircleRadius() deliberately does
-        // NOT call this function, so resizing keeps the tracked circle alive.
+    function clearGeofenceLayer() {
+        setSource('geofence', emptyFC());
+        setSource('preview', emptyFC());
         currentCircle = null;
         isDrawingMode = false;
-        map.off('click');
-        map.doubleClickZoom.enable();
-        map.on('click', handleMapClick);
     }
 
-    // Reset both tool buttons back to their normal colour (drawing finished)
+    // ── Drawing tools ─────────────────────────────────────────────────────────
+
     function resetToolButtons() {
         document.getElementById('polygonTool').classList.remove('drawing');
         document.getElementById('circleTool').classList.remove('drawing');
     }
 
-    // Activate polygon drawing tool
+    function requireSelectedSite() {
+        if (!currentSiteId) { showToast('Select a site first, then draw its geofence', 'error'); return false; }
+        return true;
+    }
+
     function activatePolygonTool() {
         if (!requireSelectedSite()) return;
         drawingTool = 'polygon';
         document.getElementById('radiusGroup').style.display = 'none';
-
-        // Turn this button green while drawing is in progress
         resetToolButtons();
         document.getElementById('polygonTool').classList.add('drawing');
-
-        removeGeofenceLayer();
+        clearGeofenceLayer();
         enablePolygonDrawing();
     }
 
-    // Activate circle drawing tool
     function activateCircleTool() {
         if (!requireSelectedSite()) return;
         drawingTool = 'circle';
         document.getElementById('radiusGroup').style.display = 'block';
-
-        // Turn this button green while drawing is in progress
         resetToolButtons();
         document.getElementById('circleTool').classList.add('drawing');
-
-        removeGeofenceLayer();
+        clearGeofenceLayer();
         enableCircleDrawing();
     }
 
-    // Guard: a geofence always belongs to a site, so one must be selected first.
-    function requireSelectedSite() {
-        if (!currentSiteId) {
-            showToast('Select a site first, then draw its geofence', 'error');
-            return false;
-        }
-        return true;
-    }
-
-    // Enable polygon drawing — click to drop points, click the first (red) point
-    // or double-click to close the shape.
+    // Polygon: click to place points, click first (red) dot or dblclick to close.
     function enablePolygonDrawing() {
         isDrawingMode = true;
-        map.off('click', handleMapClick);
         map.doubleClickZoom.disable();
 
-        let points = [];
-        let tempMarkers = [];
-        let previewLine = null;
+        let points = []; // [lat,lng] — backend format throughout
+        let dotMarkers = [];
 
-        function redraw() {
-            if (previewLine) { map.removeLayer(previewLine); previewLine = null; }
-            if (currentGeofence) { map.removeLayer(currentGeofence); currentGeofence = null; }
-            if (points.length >= 3) {
-                currentGeofence = L.polygon(points, GEO_STYLE).addTo(map);
-            } else if (points.length >= 2) {
-                previewLine = L.polyline(points, { color: '#D4AF37', weight: 2, dashArray: '4' }).addTo(map);
-            }
+        function updatePreview() {
+            if (points.length < 2) { setSource('preview', emptyFC()); return; }
+            const ring = points.map(p => [p[1], p[0]]); // [lng,lat] for GeoJSON
+            setSource('preview', {
+                type: 'Feature',
+                geometry: points.length >= 3
+                    ? { type: 'Polygon',    coordinates: [[...ring, ring[0]]] }
+                    : { type: 'LineString', coordinates: ring }
+            });
         }
 
         function finish() {
-            if (points.length < 3) {
-                showToast('Add at least 3 points to form a shape', 'error');
-                return;
-            }
-            tempMarkers.forEach(m => map.removeLayer(m));
-            if (previewLine) { map.removeLayer(previewLine); previewLine = null; }
+            if (points.length < 3) { showToast('Add at least 3 points to form a shape', 'error'); return; }
+            dotMarkers.forEach(m => m.remove());
+            dotMarkers = [];
+            setSource('preview', emptyFC());
             isDrawingMode = false;
-            map.off('click', onClick);
-            map.off('dblclick', finish);
             map.doubleClickZoom.enable();
-            map.on('click', handleMapClick);
+            map.off('click', onClick);
+            map.off('dblclick', onDblClick);
             resetToolButtons();
             saveGeofence('polygon', points);
         }
 
         function onClick(e) {
-            points.push([e.latlng.lat, e.latlng.lng]);
+            if (e.originalEvent.button !== 0) return; // left-click only
+            const lat = e.lngLat.lat, lng = e.lngLat.lng;
+            points.push([lat, lng]);
             const isFirst = points.length === 1;
-            const size = isFirst ? 14 : 10;
-            const color = isFirst ? PIN_SELECTED : '#D4AF37';
-
-            const marker = L.marker([e.latlng.lat, e.latlng.lng], {
-                icon: L.divIcon({
-                    className: 'polygon-point',
-                    html: `<div style="width:${size}px;height:${size}px;background:${color};border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);"></div>`,
-                    iconSize: [16, 16],
-                    iconAnchor: [8, 8]
-                })
-            }).addTo(map);
-
+            const el = document.createElement('div');
+            el.style.cssText = `width:${isFirst?14:10}px;height:${isFirst?14:10}px;
+                background:${isFirst ? PIN_SELECTED : GEO_COLOR};border-radius:50%;
+                border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.4);cursor:pointer;`;
             if (isFirst) {
-                marker.bindTooltip('Click here to close the shape', { direction: 'top', offset: [0, -8] });
-                marker.on('click', function(ev) {
-                    L.DomEvent.stop(ev);
-                    finish();
-                });
+                el.title = 'Click to close shape';
+                el.addEventListener('click', ev => { ev.stopPropagation(); finish(); });
             }
+            const m = new maplibregl.Marker({ element: el, anchor: 'center' })
+                .setLngLat([lng, lat]).addTo(map);
+            dotMarkers.push(m);
+            updatePreview();
+        }
 
-            tempMarkers.push(marker);
-            redraw();
+        function onDblClick(e) {
+            e.originalEvent.preventDefault();
+            if (points.length > 0) points.pop(); // remove the duplicate from dblclick first-click
+            finish();
         }
 
         map.on('click', onClick);
-        map.on('dblclick', finish);
+        map.on('dblclick', onDblClick);
         updateGeofenceStatus(null, 'Click to add points — click the first (red) point or double-click to finish.');
     }
 
-    // Enable circle drawing — one click drops the centre, radius comes from the
-    // input box and can be tweaked live afterwards.
+    // Circle: one click drops the centre; radius box resizes live.
     function enableCircleDrawing() {
         isDrawingMode = true;
-        map.off('click', handleMapClick);
 
         function onClick(e) {
+            if (e.originalEvent.button !== 0) return;
+            const lat = e.lngLat.lat, lng = e.lngLat.lng;
             const radius = parseInt(document.getElementById('radiusInput').value, 10) || 200;
-
-            if (currentGeofence) { map.removeLayer(currentGeofence); }
-            const center = [e.latlng.lat, e.latlng.lng];
-            currentGeofence = L.circle(center, { radius: radius, ...GEO_STYLE }).addTo(map);
-            currentCircle = { center: center, radius: radius };
-
+            const center = [lat, lng];
+            setSource('geofence', {
+                type: 'Feature',
+                geometry: { type: 'Polygon', coordinates: [circleRing(center, radius)] }
+            });
+            currentCircle = { center, radius };
             isDrawingMode = false;
             map.off('click', onClick);
-            map.on('click', handleMapClick);
             resetToolButtons();
-
-            saveGeofence('circle', { center: center, radius: radius }, true);
+            saveGeofence('circle', { center, radius }, true);
             updateGeofenceStatus(null, 'Circle placed. Adjust the radius box to resize.');
         }
 
@@ -1073,122 +1419,82 @@
         updateGeofenceStatus(null, 'Click once on the map to drop the circle centre.');
     }
 
-    // Update circle radius live. Resizes an already-placed circle and re-saves it.
-    // We rebuild from the tracked centre because after a save the layer is
-    // re-fetched from the server as a polygon (circles are stored as polygons),
-    // so currentGeofence is no longer an L.Circle instance.
+    // Live radius resize — redraws the circle polygon and debounces the server save.
     function updateCircleRadius() {
+        if (!currentCircle) return;
         const radius = parseInt(document.getElementById('radiusInput').value, 10) || 200;
-
-        // Prefer a live L.Circle if we still have one (before the server refresh)
-        let center = null;
-        if (currentGeofence && currentGeofence instanceof L.Circle) {
-            center = currentGeofence.getLatLng();
-            center = [center.lat, center.lng];
-        } else if (currentCircle) {
-            center = currentCircle.center;
-        }
-
-        if (!center) return; // no circle placed yet — nothing to resize
-
-        // Redraw the circle immediately at the new radius for instant feedback
-        if (currentGeofence) { map.removeLayer(currentGeofence); }
-        currentGeofence = L.circle(center, { radius: radius, ...GEO_STYLE }).addTo(map);
-        currentCircle = { center: center, radius: radius };
-
-        // Debounce the server save so typing/holding the spinner doesn't fire a
-        // POST per keystroke — persist once the user pauses.
+        const { center } = currentCircle;
+        setSource('geofence', {
+            type: 'Feature',
+            geometry: { type: 'Polygon', coordinates: [circleRing(center, radius)] }
+        });
+        currentCircle = { center, radius };
         clearTimeout(radiusSaveTimer);
-        radiusSaveTimer = setTimeout(() => {
-            saveGeofence('circle', { center: center, radius: radius }, true);
-        }, 400);
+        radiusSaveTimer = setTimeout(() => saveGeofence('circle', { center, radius }, true), 400);
     }
-    let radiusSaveTimer = null;
 
-    // Clear button — asks the server to delete the geofence. The visual is only
-    // removed once the server confirms; if the geofence is locked (e.g. an ongoing
-    // shift uses it) the server refuses and we surface why, leaving it on the map.
+    // ── Clear / Delete ────────────────────────────────────────────────────────
+
     function clearGeofence() {
-        if (!currentSiteId) {
-            updateGeofenceStatus(null, 'Select a site first, then clear its geofence');
-            return;
-        }
-
+        if (!currentSiteId) { updateGeofenceStatus(null, 'Select a site first, then clear its geofence'); return; }
         const site = sites.find(s => s.id == currentSiteId);
         const hasSaved = site && site.geofences && site.geofences.length > 0;
-        if (!hasSaved && !currentGeofence) {
-            updateGeofenceStatus(null, 'No geofence to clear for this site');
-            return;
-        }
-
+        if (!hasSaved && !currentCircle) { updateGeofenceStatus(null, 'No geofence to clear for this site'); return; }
         updateGeofenceStatus(null, 'Clearing geofence…');
         deleteGeofence();
     }
 
-    // Re-fetch this site's geofence from the server and redraw ONLY the map layer
-    // (no full page reload). Also keeps the in-memory `sites` array in sync so
-    // re-selecting the site later shows the correct, server-stored geometry.
-    function refreshSiteGeofence(siteId) {
-        if (!siteId) return;
-
-        fetch(`/admin/sites/${siteId}/geofences`, {
+    function deleteGeofence() {
+        if (!currentSiteId) return;
+        const siteId = currentSiteId;
+        const clearBtn = document.getElementById('clearBtn');
+        fetch(`/admin/geofences/site/${siteId}`, {
+            method: 'DELETE',
             headers: { 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content') }
         })
-        .then(r => r.json())
-        .then(data => {
-            const geofences = (data && data.success && data.geofences) ? data.geofences : [];
-
-            // Sync in-memory data
-            const site = sites.find(s => s.id == siteId);
-            if (site) site.geofences = geofences;
-
-            // Only redraw if this site is still the selected one
-            if (currentSiteId !== siteId) return;
-
-            removeGeofenceLayer();
-            if (geofences.length > 0) {
-                const active = geofences.find(g => g.is_active) || geofences[0];
-                if (active && active.coordinates) {
-                    displayGeofence(active);
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok && data.success) {
+                clearGeofenceLayer();
+                resetToolButtons();
+                const site = sites.find(s => s.id == siteId);
+                if (site) site.geofences = [];
+                updateGeofenceStatus(null, 'Geofence cleared');
+                if (clearBtn) {
+                    clearBtn.textContent = '✓ Cleared';
+                    clearBtn.classList.add('drawing');
+                    setTimeout(() => { clearBtn.textContent = 'Clear'; clearBtn.classList.remove('drawing'); }, 2000);
                 }
+            } else {
+                const msg = (data && data.error) || "Can't clear the geofence right now. Please try again.";
+                updateGeofenceStatus(null, msg); showToast(msg, 'error');
             }
-            updateGeofenceStatus(site);
         })
-        .catch(err => console.error('Error refreshing geofence:', err));
+        .catch(() => {
+            const msg = "Can't clear the geofence right now. Please try again.";
+            updateGeofenceStatus(null, msg); showToast(msg, 'error');
+        });
     }
 
-    // Save geofence to server.
-    // skipRefresh: when true we keep the current map layer instead of re-fetching
-    // the server geometry. Used for circles so the live L.circle (and its radius)
-    // isn't replaced by the stored polygon approximation, which would break live
-    // radius resizing.
+    // ── Save / Refresh ────────────────────────────────────────────────────────
+
     function saveGeofence(type, coordinates, skipRefresh = false) {
         if (!currentSiteId) return;
-
-        const data = {
-            site_id: currentSiteId,
-            type: type,
-            coordinates: coordinates,
-            is_active: true
-        };
-
         fetch('/admin/geofences', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
             },
-            body: JSON.stringify(data)
+            body: JSON.stringify({ site_id: currentSiteId, type, coordinates, is_active: true })
         })
-        .then(response => response.json())
+        .then(r => r.json())
         .then(data => {
             if (data.success) {
                 updateGeofenceStatus(null, `${type} geofence saved`);
-                // Keep in-memory data fresh, but only re-fetch/redraw the geometry
-                // when we're not preserving a live layer (e.g. an active circle).
                 if (skipRefresh) {
                     const site = sites.find(s => s.id == currentSiteId);
-                    if (site) site.geofences = [{ is_active: true, type: type, coordinates: coordinates }];
+                    if (site) site.geofences = [{ is_active: true, type, coordinates }];
                 } else {
                     refreshSiteGeofence(currentSiteId);
                 }
@@ -1196,212 +1502,158 @@
                 showToast('Error saving geofence', 'error');
             }
         })
-        .catch(error => {
-            console.error('Error:', error);
-            showToast('Error saving geofence', 'error');
-        });
+        .catch(() => showToast('Error saving geofence', 'error'));
     }
 
-    // Delete geofence from server. Only mutates the map/state on a confirmed
-    // success; on failure (e.g. 422 — geofence locked by an ongoing shift) it keeps
-    // the geofence visible and shows the server's reason.
-    function deleteGeofence() {
-        if (!currentSiteId) return;
-
-        const siteId = currentSiteId;
-        const clearBtn = document.getElementById('clearBtn');
-
-        fetch(`/admin/geofences/site/${siteId}`, {
-            method: 'DELETE',
-            headers: {
-                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
-            }
+    function refreshSiteGeofence(siteId) {
+        if (!siteId) return;
+        fetch(`/admin/sites/${siteId}/geofences`, {
+            headers: { 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content') }
         })
-        .then(response => response.json().then(data => ({ ok: response.ok, data })))
-        .then(({ ok, data }) => {
-            if (ok && data.success) {
-                // Now it's safe to wipe the visual + in-memory state (no reload)
-                removeGeofenceLayer();
-                resetToolButtons();
-                const site = sites.find(s => s.id == siteId);
-                if (site) site.geofences = [];
-                updateGeofenceStatus(null, 'Geofence cleared');
-
-                if (clearBtn) {
-                    clearBtn.textContent = '✓ Cleared';
-                    clearBtn.classList.add('drawing'); // reuse green confirmation colour
-                    setTimeout(() => {
-                        clearBtn.textContent = 'Clear';
-                        clearBtn.classList.remove('drawing');
-                    }, 2000);
-                }
-            } else {
-                // Geofence stays on the map — surface why it couldn't be cleared.
-                const msg = (data && data.error) || "Can't clear the geofence right now. Please try again.";
-                updateGeofenceStatus(null, msg);
-                showToast(msg, 'error');
+        .then(r => r.json())
+        .then(data => {
+            const geofences = (data && data.success && data.geofences) ? data.geofences : [];
+            const site = sites.find(s => s.id == siteId);
+            if (site) site.geofences = geofences;
+            if (currentSiteId !== siteId) return;
+            clearGeofenceLayer();
+            if (geofences.length > 0) {
+                const active = geofences.find(g => g.is_active) || geofences[0];
+                if (active && active.coordinates) displayGeofence(active);
             }
+            updateGeofenceStatus(site);
         })
-        .catch(error => {
-            console.error('Error:', error);
-            const msg = "Can't clear the geofence right now. Please try again.";
-            updateGeofenceStatus(null, msg);
-            showToast(msg, 'error');
-        });
+        .catch(err => console.error('refreshSiteGeofence:', err));
     }
 
-    // Update geofence status display
+    // ── Status bar ────────────────────────────────────────────────────────────
+
     function updateGeofenceStatus(site, customMessage = null) {
-        const statusElement = document.getElementById('geofenceStatus');
-
-        if (customMessage) {
-            statusElement.textContent = customMessage;
-            return;
-        }
-
-        if (!site) {
-            statusElement.textContent = 'Select a site to view or edit its geofence';
-            return;
-        }
-
+        const el = document.getElementById('geofenceStatus');
+        if (customMessage) { el.textContent = customMessage; return; }
+        if (!site)         { el.textContent = 'Select a site to view or edit its geofence'; return; }
         if (site.geofences && site.geofences.length > 0) {
-            const activeGeofence = site.geofences.find(g => g.is_active);
-            if (activeGeofence) {
-                statusElement.textContent = `Active geofence: ${activeGeofence.type} (${activeGeofence.name || 'Default'})`;
-            } else {
-                statusElement.textContent = `${site.geofences.length} geofence(s) - none active`;
-            }
+            const active = site.geofences.find(g => g.is_active);
+            el.textContent = active
+                ? `Active geofence: ${active.type} (${active.name || 'Default'})`
+                : `${site.geofences.length} geofence(s) - none active`;
         } else {
-            statusElement.textContent = 'No geofence defined - click above to draw one';
+            el.textContent = 'No geofence defined - click above to draw one';
         }
     }
 
-    // Site drawer management
+    // ── Site drawer ───────────────────────────────────────────────────────────
+
     function openSiteDrawer(mode, siteId = null) {
         currentMode = mode;
         currentSiteId = siteId;
-
-        const drawer = document.getElementById('siteDrawer');
-        const overlay = document.querySelector('.drawer-overlay');
-        const title = document.getElementById('drawerTitle');
-
-        // Set title based on mode
-        if (mode === 'add') {
-            title.textContent = 'Add Site';
-            clearSiteForm();
-        } else if (mode === 'edit') {
-            title.textContent = 'Edit Site';
-            loadSiteData(siteId);
-        }
-
-        drawer.classList.add('open');
-        overlay.classList.add('show');
+        document.getElementById('drawerTitle').textContent = mode === 'add' ? 'Add Site' : 'Edit Site';
+        if (mode === 'add') clearSiteForm(); else loadSiteData(siteId);
+        document.getElementById('siteDrawer').classList.add('open');
+        document.querySelector('.drawer-overlay').classList.add('show');
     }
 
     function closeSiteDrawer() {
-        const drawer = document.getElementById('siteDrawer');
-        const overlay = document.querySelector('.drawer-overlay');
+        // Abort any active pick
+        if (pickingLocation) {
+            pickingLocation = false;
+            map.getCanvas().style.cursor = '';
+            document.getElementById('mapPickBanner').classList.remove('visible');
+        }
+        clearPickSearch();
+        // Remove temp pick marker
+        if (pickMarker) { pickMarker.remove(); pickMarker = null; }
 
-        drawer.classList.remove('open');
-        overlay.classList.remove('show');
-
+        document.getElementById('siteDrawer').classList.remove('open');
+        document.querySelector('.drawer-overlay').classList.remove('show');
         clearSiteForm();
         currentMode = 'add';
         currentSiteId = null;
     }
 
-    // Clear site form
     function clearSiteForm() {
         document.getElementById('siteForm').reset();
         document.getElementById('siteId').value = '';
         document.getElementById('grace_period_minutes').value = '5';
     }
 
-    // Load site data into form
     function loadSiteData(siteId) {
         const site = sites.find(s => s.id == siteId);
         if (!site) return;
-
-        document.getElementById('siteId').value = site.id;
-        document.getElementById('name').value = site.name;
-        document.getElementById('address').value = site.address;
-        document.getElementById('latitude').value = site.latitude || '';
-        document.getElementById('longitude').value = site.longitude || '';
+        document.getElementById('siteId').value              = site.id;
+        document.getElementById('name').value                = site.name;
+        document.getElementById('address').value             = site.address;
+        document.getElementById('latitude').value            = site.latitude  || '';
+        document.getElementById('longitude').value           = site.longitude || '';
         document.getElementById('grace_period_minutes').value = site.grace_period_minutes;
-        document.getElementById('contact_person').value = site.contact_person || '';
-        document.getElementById('contact_phone').value = site.contact_phone || '';
-        document.getElementById('status').value = site.status;
+        document.getElementById('contact_person').value      = site.contact_person || '';
+        document.getElementById('contact_phone').value       = site.contact_phone  || '';
+        document.getElementById('status').value              = site.status;
     }
 
-    // Save site
     function saveSite(event) {
         event.preventDefault();
-
         const formData = new FormData(document.getElementById('siteForm'));
-        const url = currentMode === 'edit' ? `/admin/sites/${currentSiteId}` : '/admin/sites';
+        const url    = currentMode === 'edit' ? `/admin/sites/${currentSiteId}` : '/admin/sites';
         const method = currentMode === 'edit' ? 'PUT' : 'POST';
-
-        // Convert FormData to JSON
-        const data = {};
-        for (let [key, value] of formData.entries()) {
-            data[key] = value;
-        }
-
+        const data   = {};
+        for (let [k, v] of formData.entries()) data[k] = v;
         fetch(url, {
-            method: method,
+            method,
             headers: {
                 'Content-Type': 'application/json',
                 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
             },
             body: JSON.stringify(data)
         })
-        .then(response => response.json())
+        .then(r => r.json())
         .then(data => {
             if (data.success) {
                 showToast(`Site ${currentMode === 'edit' ? 'updated' : 'created'} successfully!`);
                 closeSiteDrawer();
-                // Reload page to update site list
                 setTimeout(() => location.reload(), 1000);
             } else {
                 showToast('Error saving site', 'error');
             }
         })
-        .catch(error => {
-            console.error('Error:', error);
-            showToast('Error saving site', 'error');
-        });
+        .catch(() => showToast('Error saving site', 'error'));
     }
 
-    // Show toast notification
+    // ── Toast ─────────────────────────────────────────────────────────────────
+
     function showToast(message, type = 'success') {
         const toast = document.getElementById('successToast');
         toast.textContent = message;
         toast.style.background = type === 'error' ? 'var(--critical-red)' : 'var(--success-green)';
         toast.classList.add('show');
-
-        setTimeout(() => {
-            toast.classList.remove('show');
-        }, 3000);
+        setTimeout(() => toast.classList.remove('show'), 3000);
     }
 
-    // Setup event listeners
-    function setupEventListeners() {
-        // Default UI — no tool highlighted and no draw mode until a site is
-        // selected and a tool is clicked (buttons only turn green while drawing).
-        drawingTool = 'circle';
+    // ── Boot ──────────────────────────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', () => {
         resetToolButtons();
         document.getElementById('radiusGroup').style.display = 'block';
-    }
+        initializeMap();
+    });
 
-    // Expose functions globally
-    window.selectSite = selectSite;
-    window.openSiteDrawer = openSiteDrawer;
-    window.closeSiteDrawer = closeSiteDrawer;
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && pickingLocation) cancelMapPick();
+    });
+
+    // Expose to inline HTML handlers
+    window.selectSite          = selectSite;
+    window.openSiteDrawer      = openSiteDrawer;
+    window.closeSiteDrawer     = closeSiteDrawer;
     window.activatePolygonTool = activatePolygonTool;
-    window.activateCircleTool = activateCircleTool;
-    window.updateCircleRadius = updateCircleRadius;
-    window.clearGeofence = clearGeofence;
-    window.saveSite = saveSite;
-    window.handleCoordInput = handleCoordInput;
+    window.activateCircleTool  = activateCircleTool;
+    window.updateCircleRadius  = updateCircleRadius;
+    window.clearGeofence       = clearGeofence;
+    window.saveSite            = saveSite;
+    window.handleCoordInput    = handleCoordInput;
+    window.startMapPick        = startMapPick;
+    window.cancelMapPick       = cancelMapPick;
+    window.handlePickSearch    = handlePickSearch;
+    window.selectPickResult    = selectPickResult;
 </script>
 @endsection

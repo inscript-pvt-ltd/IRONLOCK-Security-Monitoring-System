@@ -4,6 +4,7 @@ class ShiftCalendar {
         this.guards = [];
         this.sites = [];
         this.shifts = [];
+        this.activeShifts = [];
         this.editingShift = null;
         this.wtrValidationTimeout = null;
 
@@ -70,6 +71,31 @@ class ShiftCalendar {
             this.saveShift();
         });
 
+        // In-drawer resolve flow (missed / ended-early shifts).
+        document.getElementById('resolve-open-btn').addEventListener('click', () => {
+            this.showResolveForm(this.editingShift);
+        });
+        document.getElementById('resolve-back-btn').addEventListener('click', () => {
+            this.hideResolveForm();
+        });
+        document.getElementById('resolve-confirm-btn').addEventListener('click', () => {
+            this.submitResolve();
+        });
+        document.getElementById('resolve-outcome').addEventListener('change', () => {
+            this.updateResolveGuardRow();
+        });
+
+        // In-drawer cancel flow (pre-start shifts).
+        document.getElementById('cancel-shift-btn').addEventListener('click', () => {
+            this.showCancelForm();
+        });
+        document.getElementById('cancel-back-btn').addEventListener('click', () => {
+            this.hideCancelForm();
+        });
+        document.getElementById('cancel-confirm-btn').addEventListener('click', () => {
+            this.submitCancel();
+        });
+
         ['guard-select', 'shift-date', 'shift-start', 'shift-duration'].forEach(id => {
             const el = document.getElementById(id);
             if (el) {
@@ -89,6 +115,7 @@ class ShiftCalendar {
         });
 
         this.loadInitialData();
+        this.startAutoRefresh();
     }
 
     // ── Data loading ───────────────────────────────────────────
@@ -137,28 +164,67 @@ class ShiftCalendar {
             });
             if (!res.ok) throw new Error('Failed to load shifts');
             const data = await res.json();
-            // Shift times are wall-clock site times. Laravel serialises them with
-            // a UTC "Z" marker, which would make `new Date()` shift them by the
-            // browser's timezone offset and drift the schedule on every edit.
-            // Strip the zone so they parse as local wall-clock and round-trip cleanly.
-            this.shifts = (data.shifts || []).map(s => ({
-                ...s,
-                scheduled_start: this.toLocalNaive(s.scheduled_start),
-                scheduled_end:   this.toLocalNaive(s.scheduled_end),
-            }));
+            // Shift times are stored in UTC on the server (ISO 8601 with a "Z").
+            // Keep the zone intact so `new Date()` converts each timestamp to the
+            // admin's local timezone for display, and round-trips back to UTC on
+            // save. This is what keeps the stored instant aligned with the moment
+            // the admin actually meant — and what the mobile login-window check
+            // (which runs in UTC) compares against.
+            this.shifts = data.shifts || [];
         } catch (e) {
             console.error(e);
             this.shifts = [];
         }
+
+        // Active shifts are NOT week-bound — a shift in progress should always
+        // show regardless of which week the calendar is viewing — so they are
+        // fetched separately by status. Reuses the existing index endpoint.
+        await this.loadActiveShifts();
     }
 
-    // Normalise a server datetime (e.g. "2026-06-18T17:19:00.000000Z") to a
-    // timezone-naive local string ("2026-06-18T17:19:00") so `new Date()` reads
-    // it as wall-clock time rather than converting from UTC.
-    toLocalNaive(value) {
-        if (!value) return value;
-        const m = String(value).match(/(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
-        return m ? `${m[1]}T${m[2]}` : value;
+    async loadActiveShifts() {
+        try {
+            const res = await fetch('/admin/shifts?status=active', {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!res.ok) throw new Error('Failed to load active shifts');
+            const data = await res.json();
+            this.activeShifts = data.shifts || [];
+        } catch (e) {
+            console.error(e);
+            this.activeShifts = [];
+        }
+    }
+
+    // ── Auto-refresh ───────────────────────────────────────────
+    // The calendar reflects the *stored* shift status, not a live clock. Once
+    // the backend `shifts:mark-missed` sweep flips an expired shift to
+    // "missed", the cell only turns red after a re-fetch. Poll on an interval
+    // so an open dashboard repaints itself without a manual reload.
+    //
+    // Skipped while a drawer is open (don't yank the calendar out from under an
+    // admin mid-edit) and while the tab is hidden (no needless requests). The
+    // 60s cadence matches the every-minute backend sweep — refreshing faster
+    // wouldn't surface a change any sooner.
+    startAutoRefresh(intervalMs = 60000) {
+        if (this.refreshTimer) clearInterval(this.refreshTimer);
+        this.refreshTimer = setInterval(() => {
+            if (document.hidden) return;
+            const drawer = document.getElementById('shift-drawer');
+            if (drawer && drawer.classList.contains('open')) return;
+            this.loadShifts().then(() => this.renderCalendar());
+        }, intervalMs);
+    }
+
+    // Convert a wall-clock date+time the admin typed (interpreted in the admin's
+    // own browser timezone) into a UTC ISO-8601 string for the API. The server
+    // stores UTC, so applying the browser's offset here makes the stored instant
+    // match the real moment the admin meant — and the mobile login-window check
+    // lines up regardless of where the server, admin, or guard physically are.
+    // Also handles British Summer Time automatically: a UK admin's browser knows
+    // it is on BST, so 15:30 typed in summer becomes 14:30Z, not 15:30Z.
+    localToUtcIso(dateTimeStr) {
+        return new Date(dateTimeStr).toISOString();
     }
 
     populateGuardSelect() {
@@ -214,9 +280,57 @@ class ShiftCalendar {
 
         table.innerHTML = thead + tbody;
         this.attachCellHandlers();
+        this.renderActiveShifts();
         this.renderWTRWarnings();
         this.renderWeeklyHours();
         this.renderOverrideLog();
+    }
+
+    // ── Active shifts table ────────────────────────────────────
+
+    renderActiveShifts() {
+        const tbody = document.getElementById('active-shifts-tbody');
+        if (!tbody) return;
+
+        const rows = this.activeShifts || [];
+        if (rows.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="5" class="active-empty">No shifts are currently active.</td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = rows.map(shift => {
+            // Prefer the eager-loaded relation; fall back to the guards list
+            // already in memory (keyed by guard_id, as the calendar uses).
+            const guard = shift.assigned_guard
+                || this.guards.find(g => g.id === shift.guard_id)
+                || {};
+            const guardName = (guard.first_name || guard.last_name)
+                ? `${guard.first_name || ''} ${guard.last_name || ''}`.trim()
+                : 'Unassigned';
+            const siteName = (shift.site && shift.site.name) ? shift.site.name : '—';
+
+            const sched = `${this.fmtAmPm(new Date(shift.scheduled_start))}–${this.fmtAmPm(new Date(shift.scheduled_end))}`;
+            const started = shift.actual_start
+                ? ` · <span class="started">started ${this.fmtAmPm(new Date(shift.actual_start))}</span>`
+                : '';
+
+            const ref = shift.reference ? `#${shift.reference}` : '—';
+            const viewUrl = `/admin/shifts/${shift.id}/timeline`;
+
+            return `<tr>
+                <td class="active-ref">${ref}</td>
+                <td>${this.escapeHtml(siteName)}</td>
+                <td class="active-guard">${this.escapeHtml(guardName)}</td>
+                <td class="active-timeline">${sched}${started}</td>
+                <td style="text-align:right;"><a href="${viewUrl}" class="active-view-btn">View</a></td>
+            </tr>`;
+        }).join('');
+    }
+
+    escapeHtml(str) {
+        return String(str).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
     }
 
     buildGuardRow(guard, guardShifts) {
@@ -256,25 +370,38 @@ class ShiftCalendar {
                 const hasWarn    = violations.some(v => v.severity === 'WARNING');
                 const hasError   = violations.some(v => v.severity === 'ERROR');
 
-                let cls = 'shift-blk';
-                if (dayShift.status === 'active')         cls += ' active';
-                else if (dayShift.status === 'completed') cls += ' completed';
-                else if (dayShift.status === 'cancelled') cls += ' cancelled';
-                if (hasWarn || hasError) cls += ' wtr-warn-block';
+                // A shift awaiting supervisor resolution (missed, or completed
+                // but ended early) overrides the normal status colour: it turns
+                // solid red and carries a ⚠ triangle so the admin can spot it.
+                const needsResolve = !!dayShift.needs_resolution;
 
-                const warnIcon = (hasWarn || hasError) ? ' ⚠' : '';
+                let cls = 'shift-blk';
+                if (needsResolve)                          cls += ' needs-resolve';
+                else if (dayShift.status === 'active')     cls += ' active';
+                else if (dayShift.status === 'checked_in') cls += ' checked-in';
+                else if (dayShift.status === 'completed')  cls += ' completed';
+                else if (dayShift.status === 'cancelled')  cls += ' cancelled';
+                else if (dayShift.status === 'missed')     cls += ' missed';
+                if (!needsResolve && (hasWarn || hasError)) cls += ' wtr-warn-block';
+
+                const warnIcon = (!needsResolve && (hasWarn || hasError)) ? ' ⚠' : '';
+                // Build the chip's inner HTML: a leading ⚠ flag for resolve, or
+                // the trailing WTR warning icon otherwise.
+                const wrap = (label) => needsResolve
+                    ? `<span class="resolve-flag">⚠</span>${label}`
+                    : `${label}${warnIcon}`;
 
                 if (isOvernight && endsInWeek) {
                     // Overnight shift that ends within the week - merge into one cell spanning two days
                     const label = `${startFmt}–${endFmt}`;
-                    cells.push(`<td colspan="2" class="overnight-merged shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
+                    cells.push(`<td colspan="2" class="overnight-merged shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${wrap(label)}</span></td>`);
 
                     // Add placeholder for the consumed next cell so our indexing stays correct
                     cells.push(null); // This will be skipped in the final join
                 } else {
                     // Regular shift (single day) or overnight that extends beyond the week
                     const label = isOvernight ? `${startFmt}–${endFmt} →` : `${startFmt}–${endFmt}`;
-                    cells.push(`<td class="shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${label}${warnIcon}</span></td>`);
+                    cells.push(`<td class="shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${wrap(label)}</span></td>`);
                 }
                 continue;
             }
@@ -326,9 +453,280 @@ class ShiftCalendar {
         document.querySelectorAll('#calendar-table td.shift-cell[data-shift-id]').forEach(td => {
             td.addEventListener('click', () => {
                 const shift = this.shifts.find(s => s.id === td.dataset.shiftId);
-                if (shift) this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
+                if (!shift) return;
+                // Both missed and ended-early shifts open the edit drawer in
+                // "resolve" mode (read-only fields + a Resolve button) rather
+                // than the normal editable form. openShiftDrawer() detects the
+                // needs_resolution flag and adjusts itself.
+                this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
             });
         });
+    }
+
+    // ── Resolve flagged shift (supervisor recovery, in-drawer) ──
+    // A missed or ended-early shift opens the edit drawer in resolve mode: the
+    // form fields are shown read-only for context with an info banner and a
+    // Resolve button. Resolve swaps the form for the resolve view; Back returns
+    // to it. Everything lives inside #shift-drawer (no separate modal).
+
+    // Human-readable explanation of why the shift needs resolving.
+    resolutionMessage(shift) {
+        const kind = shift.resolution_kind;
+        if (kind === 'never_checked_in') {
+            return {
+                title: 'Missed — guard never checked in',
+                body: 'The guard never signed in within the allowed window, so the check-in period expired. Choose how to resolve it.'
+            };
+        }
+        if (kind === 'checked_in_no_start') {
+            return {
+                title: 'Missed — checked in but never started',
+                body: 'The guard checked in but never started the shift before the start window closed. Choose how to resolve it.'
+            };
+        }
+        if (kind === 'ended_early') {
+            const end   = shift.actual_end ? this.fmtAmPm(new Date(shift.actual_end)) : '—';
+            const sched = shift.scheduled_end ? this.fmtAmPm(new Date(shift.scheduled_end)) : '—';
+            return {
+                title: 'Ended early',
+                body: `The guard ended the shift at ${end}, but it was scheduled until ${sched}. Approve the early finish or flag it as an incident.`
+            };
+        }
+        return { title: 'Needs resolution', body: 'This shift needs supervisor attention.' };
+    }
+
+    // Outcome options offered for the shift's resolution kind.
+    resolveOutcomes(shift) {
+        if (shift.resolution_kind === 'ended_early') {
+            return [
+                { value: 'accept_early_end', label: 'Approve early finish (authorised)' },
+                { value: 'flag_early_end',   label: 'Flag as incident (unexcused)' },
+            ];
+        }
+        return [
+            { value: 'authorize_late',  label: 'Authorize late check-in' },
+            { value: 'excuse',          label: "Excuse (won't attend)" },
+            { value: 'reassign',        label: 'Reassign to another guard' },
+            { value: 'confirm_no_show', label: 'Confirm no-show' },
+        ];
+    }
+
+    // Put the open drawer into resolve mode for a flagged shift.
+    enterResolveFlaggedMode(shift) {
+        const msg = this.resolutionMessage(shift);
+        const banner = document.getElementById('resolve-banner');
+        banner.innerHTML = `<strong>${this.escapeHtml(msg.title)}</strong>${this.escapeHtml(msg.body)}`;
+        banner.style.display = 'block';
+
+        document.getElementById('drawer-title-text').textContent = 'Resolve Shift';
+
+        // Fields are context-only here — disable so the shift can't be edited
+        // through the normal save path (which the backend blocks anyway).
+        ['guard-select', 'site-select', 'shift-date', 'shift-start', 'shift-duration']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+
+        // Swap the Save button for Resolve.
+        document.getElementById('save-shift-btn').style.display = 'none';
+        document.getElementById('resolve-open-btn').style.display = 'block';
+    }
+
+    // Reset any resolve/cancel-mode UI back to the normal editable form. Called
+    // on every drawer open so a previous session never leaks through.
+    resetResolveUi() {
+        document.getElementById('resolve-banner').style.display = 'none';
+        document.getElementById('resolve-view').style.display = 'none';
+        document.getElementById('shift-form').style.display = '';
+        document.getElementById('save-shift-btn').style.display = 'block';
+        document.getElementById('resolve-open-btn').style.display = 'none';
+        this.resolvingShift = null;
+
+        // Cancel-shift UI.
+        document.getElementById('cancel-view').style.display = 'none';
+        document.getElementById('cancel-shift-row').style.display = 'none';
+
+        ['guard-select', 'site-select', 'shift-date', 'shift-start', 'shift-duration']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+
+        const err = document.getElementById('resolve-view-error');
+        if (err) { err.style.display = 'none'; err.textContent = ''; }
+        const cErr = document.getElementById('cancel-view-error');
+        if (cErr) { cErr.style.display = 'none'; cErr.textContent = ''; }
+    }
+
+    // Swap the (read-only) edit form for the resolve view.
+    showResolveForm(shift) {
+        if (!shift) return;
+        this.resolvingShift = shift;
+
+        const msg = this.resolutionMessage(shift);
+        const info = document.getElementById('resolve-view-info');
+        info.innerHTML = `<strong>${this.escapeHtml(msg.title)}</strong>${this.escapeHtml(msg.body)}`;
+
+        // Outcome options for this kind.
+        const outcomeSel = document.getElementById('resolve-outcome');
+        outcomeSel.innerHTML = this.resolveOutcomes(shift)
+            .map(o => `<option value="${o.value}">${this.escapeHtml(o.label)}</option>`)
+            .join('');
+
+        // Reassign guard list (exclude the currently assigned guard).
+        const guardSel = document.getElementById('resolve-guard');
+        guardSel.innerHTML = '<option value="">Select guard</option>' + this.guards
+            .filter(g => g.id !== shift.guard_id)
+            .map(g => `<option value="${g.id}">${this.escapeHtml(g.first_name + ' ' + g.last_name)}</option>`)
+            .join('');
+
+        // Reset transient fields.
+        document.getElementById('resolve-reason').value = 'emergency';
+        document.getElementById('resolve-note').value = '';
+        const err = document.getElementById('resolve-view-error');
+        err.style.display = 'none'; err.textContent = '';
+        this.updateResolveGuardRow();
+
+        document.getElementById('shift-form').style.display = 'none';
+        document.getElementById('resolve-view').style.display = 'block';
+    }
+
+    // Back from the resolve view to the (read-only) edit form.
+    hideResolveForm() {
+        document.getElementById('resolve-view').style.display = 'none';
+        document.getElementById('shift-form').style.display = '';
+    }
+
+    // Show the reassign-guard row only for the reassign outcome.
+    updateResolveGuardRow() {
+        const outcome = document.getElementById('resolve-outcome').value;
+        document.getElementById('resolve-guard-row').style.display =
+            outcome === 'reassign' ? 'block' : 'none';
+    }
+
+    async submitResolve() {
+        const shift = this.resolvingShift;
+        if (!shift) return;
+
+        const outcome = document.getElementById('resolve-outcome').value;
+        const reason  = document.getElementById('resolve-reason').value;
+        const note    = document.getElementById('resolve-note').value;
+        const guardId = document.getElementById('resolve-guard').value;
+        const errEl   = document.getElementById('resolve-view-error');
+        const confirmBtn = document.getElementById('resolve-confirm-btn');
+
+        errEl.style.display = 'none';
+
+        if (outcome === 'reassign' && !guardId) {
+            errEl.textContent = 'Please choose a guard to reassign the shift to.';
+            errEl.style.display = 'block';
+            return;
+        }
+
+        const body = { outcome, reason, note };
+        if (outcome === 'reassign') body.guard_id = guardId;
+
+        try {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = 'Resolving…';
+
+            const res = await fetch(`/admin/shifts/${shift.id}/resolve`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                },
+                body: JSON.stringify(body)
+            });
+
+            const data = await res.json();
+
+            if (!data.success) {
+                if (data.errors) {
+                    errEl.textContent = Object.values(data.errors).flat().join('\n');
+                } else if (data.conflicts && data.conflicts.length) {
+                    errEl.textContent = data.error || 'The selected guard is already booked for that time.';
+                } else {
+                    errEl.textContent = data.error || 'Unable to resolve the shift.';
+                }
+                errEl.style.display = 'block';
+                return;
+            }
+
+            this.closeShiftDrawer();
+            await this.loadShifts();
+            this.renderCalendar();
+        } catch (e) {
+            console.error('Resolve shift error:', e);
+            errEl.textContent = 'Something went wrong. Please try again.';
+            errEl.style.display = 'block';
+        } finally {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Resolve';
+        }
+    }
+
+    // ── Cancel shift (pre-start: scheduling error / emergency) ──
+    // Swaps the edit form for the cancel view (reason + note). Back returns.
+
+    showCancelForm() {
+        if (!this.editingShift) return;
+        document.getElementById('cancel-reason').value = 'scheduling_error';
+        document.getElementById('cancel-note').value = '';
+        const err = document.getElementById('cancel-view-error');
+        err.style.display = 'none'; err.textContent = '';
+
+        document.getElementById('shift-form').style.display = 'none';
+        document.getElementById('cancel-view').style.display = 'block';
+    }
+
+    hideCancelForm() {
+        document.getElementById('cancel-view').style.display = 'none';
+        document.getElementById('shift-form').style.display = '';
+    }
+
+    async submitCancel() {
+        const shift = this.editingShift;
+        if (!shift) return;
+
+        const reason = document.getElementById('cancel-reason').value;
+        const note   = document.getElementById('cancel-note').value;
+        const errEl  = document.getElementById('cancel-view-error');
+        const confirmBtn = document.getElementById('cancel-confirm-btn');
+
+        errEl.style.display = 'none';
+
+        try {
+            confirmBtn.disabled = true;
+            confirmBtn.textContent = 'Cancelling…';
+
+            const res = await fetch(`/admin/shifts/${shift.id}/cancel`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                },
+                body: JSON.stringify({ reason, note })
+            });
+
+            const data = await res.json();
+
+            if (!data.success) {
+                errEl.textContent = data.errors
+                    ? Object.values(data.errors).flat().join('\n')
+                    : (data.error || 'Unable to cancel the shift.');
+                errEl.style.display = 'block';
+                return;
+            }
+
+            this.closeShiftDrawer();
+            await this.loadShifts();
+            this.renderCalendar();
+        } catch (e) {
+            console.error('Cancel shift error:', e);
+            errEl.textContent = 'Something went wrong. Please try again.';
+            errEl.style.display = 'block';
+        } finally {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Cancel Shift';
+        }
     }
 
     // ── WTR warnings below calendar ───────────────────────────
@@ -470,6 +868,8 @@ class ShiftCalendar {
         document.getElementById('override-section').style.display = 'none';
         document.getElementById('computed-end-time').style.display = 'none';
         this.clearDrawerError();
+        // Clear any leftover resolve-mode UI from a previous open.
+        this.resetResolveUi();
 
         const saveBtn = document.getElementById('save-shift-btn');
         saveBtn.disabled   = false;
@@ -488,14 +888,27 @@ class ShiftCalendar {
             document.getElementById('shift-duration').value = Math.round(durationMs / 3600000 * 10) / 10;
             this.updateEndTimeDisplay();
 
-            // Load existing WTR overrides if any
-            this.loadExistingOverrides(shift);
+            // Load existing WTR overrides if any (not in resolve mode — the
+            // shift can't be edited there, so the WTR preview is irrelevant).
+            if (!shift.needs_resolution) {
+                this.loadExistingOverrides(shift);
+            }
+        }
+
+        // A flagged shift (missed / ended-early) opens in resolve mode instead
+        // of the editable form.
+        const flagged = !!(shift && shift.needs_resolution);
+        if (flagged) {
+            this.enterResolveFlaggedMode(shift);
+        } else if (shift && (shift.status === 'scheduled' || shift.status === 'checked_in')) {
+            // Editing a shift that hasn't started yet — offer Cancel Shift.
+            document.getElementById('cancel-shift-row').style.display = 'flex';
         }
 
         document.getElementById('shift-drawer').classList.add('open');
         document.querySelector('.shifts-main').classList.add('drawer-open');
 
-        if (guardId && date) this.validateWTR();
+        if (guardId && date && !flagged) this.validateWTR();
     }
 
     closeShiftDrawer() {
@@ -549,11 +962,6 @@ class ShiftCalendar {
         return new Date(new Date(`${date}T${start}:00`).getTime() + duration * 3600000);
     }
 
-    formatLocalDateTime(dt) {
-        const p = n => String(n).padStart(2, '0');
-        return `${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}T${p(dt.getHours())}:${p(dt.getMinutes())}:00`;
-    }
-
     updateEndTimeDisplay() {
         const endDt   = this.computeScheduledEnd();
         const display = document.getElementById('computed-end-time');
@@ -592,8 +1000,8 @@ class ShiftCalendar {
                     },
                     body: JSON.stringify({
                         guard_id:        guardId,
-                        scheduled_start: `${date}T${start}:00`,
-                        scheduled_end:   this.formatLocalDateTime(endDt),
+                        scheduled_start: this.localToUtcIso(`${date}T${start}:00`),
+                        scheduled_end:   endDt.toISOString(),
                         // When editing, exclude this shift from its own rest-period
                         // check so the live preview matches what saving will do.
                         shift_id:        this.editingShift ? this.editingShift.id : null
@@ -696,8 +1104,8 @@ class ShiftCalendar {
             const formData = {
                 guard_id:              document.getElementById('guard-select').value,
                 site_id:               document.getElementById('site-select').value,
-                scheduled_start:       `${date}T${startTime}:00`,
-                scheduled_end:         this.formatLocalDateTime(endDt),
+                scheduled_start:       this.localToUtcIso(`${date}T${startTime}:00`),
+                scheduled_end:         endDt.toISOString(),
                 override_12hr_warning: document.getElementById('override-12hr-warning').checked,
                 override_11hr_rest:    document.getElementById('override-11hr-rest').checked,
                 override_justification: document.getElementById('override-justification').value
@@ -732,8 +1140,8 @@ class ShiftCalendar {
                 // Shift conflict details
                 if (data.conflicts && data.conflicts.length) {
                     const lines = data.conflicts.map(c => {
-                        const startDt = new Date(this.toLocalNaive(c.start));
-                        const endDt   = new Date(this.toLocalNaive(c.end));
+                        const startDt = new Date(c.start);
+                        const endDt   = new Date(c.end);
                         const start = this.fmtAmPm(startDt);
                         const end   = this.fmtAmPm(endDt);
                         const day   = startDt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
