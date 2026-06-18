@@ -4,10 +4,12 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Domains\Shifts\Models\Shift;
+use App\Domains\Shifts\Models\ShiftEvent;
 use App\Domains\Guards\Models\Guard;
 use App\Domains\Sites\Models\Site;
 use App\Domains\Geofences\Models\Geofence;
 use App\Domains\Shifts\Models\WorkingTimeOverride;
+use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
@@ -37,7 +39,7 @@ class ShiftController extends Controller
         // Validate filter inputs up front so malformed values (e.g. a bad
         // date string passed to Carbon::parse) cannot trigger an unhandled 500.
         $validator = Validator::make($request->all(), [
-            'status' => 'nullable|in:scheduled,active,completed,cancelled',
+            'status' => 'nullable|in:scheduled,checked_in,active,completed,cancelled,missed',
             'guard_id' => 'nullable|uuid',
             'site_id' => 'nullable|uuid',
             'date_from' => 'nullable|date',
@@ -222,6 +224,42 @@ class ShiftController extends Controller
     }
 
     /**
+     * Shift Detail & Timeline page (D-04 / ADM-009).
+     *
+     * Renders the append-only audit timeline for one shift from its
+     * shift_events, plus the compliance summary. Only the shift-lifecycle events
+     * exist today (check-in, start, end, missed, resolution actions); GPS,
+     * wakefulness, photo and alert events arrive in later roadmap phases, so the
+     * view shows placeholders for those sections.
+     */
+    public function timeline(string $id)
+    {
+        try {
+            $shift = Shift::with(['assignedGuard', 'site', 'geofence', 'creator', 'lateAuthorizer'])
+                ->findOrFail($id);
+
+            // Append-only audit trail, oldest first, ordered by the authoritative
+            // server timestamp so the timeline reads chronologically.
+            $events = ShiftEvent::with('assignedGuard')
+                ->where('shift_id', $shift->id)
+                ->orderBy('server_received_at')
+                ->orderBy('created_at')
+                ->get();
+
+            return view('admin.shifts.timeline', compact('shift', 'events'));
+        } catch (ModelNotFoundException $e) {
+            return redirect()
+                ->route('admin.shifts.index')
+                ->with('error', 'Shift not found.');
+        } catch (\Exception $e) {
+            Log::error('Error loading shift timeline', ['shift_id' => $id, 'exception' => $e]);
+            return redirect()
+                ->route('admin.shifts.index')
+                ->with('error', 'Unable to load the shift timeline. Please try again.');
+        }
+    }
+
+    /**
      * Display shift details.
      */
     public function show(string $id): JsonResponse
@@ -255,11 +293,15 @@ class ShiftController extends Controller
         try {
             $shift = Shift::findOrFail($id);
 
-            // Prevent updating active or completed shifts
-            if (in_array($shift->status, ['active', 'completed'])) {
+            // Prevent updating active or completed shifts. Missed shifts are
+            // handled through the resolve() recovery flow, not the edit form.
+            if (in_array($shift->status, ['active', 'completed', 'missed'])) {
+                $label = $shift->status === 'missed' ? 'missed' : $shift->status;
                 return response()->json([
                     'success' => false,
-                    'error' => 'Cannot modify ' . $shift->status . ' shifts'
+                    'error' => $shift->status === 'missed'
+                        ? 'Use Resolve to handle a missed shift.'
+                        : 'Cannot modify ' . $label . ' shifts'
                 ], 422);
             }
 
@@ -398,25 +440,65 @@ class ShiftController extends Controller
     }
 
     /**
-     * Cancel a scheduled shift.
+     * Cancel a shift before the guard goes on duty.
+     *
+     * For a shift called off ahead of time — a scheduling mistake (wrong
+     * day/guard/site) or a short-notice emergency. Only a shift that has not
+     * yet started can be cancelled (scheduled or checked_in); an active shift
+     * that must stop early goes through End → early-finish resolution instead,
+     * and a missed shift is excused via resolve(). The cancellation reason +
+     * note are stored on the shift and an immutable SHIFT_CANCELLED event is
+     * appended for the audit trail.
      */
-    public function cancel(string $id): JsonResponse
+    public function cancel(Request $request, string $id): JsonResponse
     {
+        $validator = Validator::make($request->all(), [
+            'reason' => 'required|in:scheduling_error,emergency,client_request,other',
+            'note' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
         try {
             $shift = Shift::findOrFail($id);
 
-            if ($shift->status !== 'scheduled') {
+            if (!in_array($shift->status, [Shift::STATUS_SCHEDULED, Shift::STATUS_CHECKED_IN], true)) {
                 return response()->json([
                     'success' => false,
-                    'error' => 'Can only cancel scheduled shifts'
+                    'error' => 'Only a shift that has not started yet can be cancelled.'
                 ], 422);
             }
 
-            $shift->update(['status' => 'cancelled']);
+            $reason = $request->input('reason');
+            $note = $request->input('note');
+            $previousStatus = $shift->status;
+            $adminId = $this->currentAdminId();
+
+            DB::beginTransaction();
+            try {
+                $shift->update([
+                    'status' => Shift::STATUS_CANCELLED,
+                    'attendance_reason' => $reason,
+                    'attendance_note' => $note,
+                ]);
+                $this->logShiftEvent($shift, 'SHIFT_CANCELLED', [
+                    'reason' => $reason,
+                    'note' => $note,
+                    'previous_status' => $previousStatus,
+                    'cancelled_by' => $adminId,
+                ]);
+                DB::commit();
+            } catch (\Throwable $e) {
+                DB::rollBack();
+                throw $e;
+            }
 
             return response()->json([
                 'success' => true,
-                'message' => 'Shift cancelled successfully'
+                'message' => 'Shift cancelled successfully',
+                'shift' => $shift->fresh()->load('assignedGuard', 'site', 'geofence'),
             ]);
         } catch (ModelNotFoundException $e) {
             return response()->json([
@@ -428,6 +510,211 @@ class ShiftController extends Controller
             return response()->json([
                 'success' => false,
                 'error' => 'Unable to cancel shift. Please try again.'
+            ], 500);
+        }
+    }
+
+    /**
+     * Resolve a missed shift (supervisor recovery flow).
+     *
+     * A guard who fell outside the check-in/start window is marked Missed and
+     * told to contact their supervisor. The supervisor records a reason
+     * category + note and chooses an outcome:
+     *
+     *  - authorize_late : open a per-shift late-check-in override for
+     *    config('ironlock.late_authorization_minutes') and re-open the shift as
+     *    Scheduled so the guard can sign in and start late.
+     *  - excuse         : close the shift as Cancelled with the reason; no penalty.
+     *  - reassign       : hand the shift to another guard (re-opens as Scheduled).
+     *  - confirm_no_show: leave it Missed, recording the unexcused outcome.
+     *
+     * An early-finished shift (status completed, ended_early) is resolved the
+     * same way with its own two outcomes:
+     *  - accept_early_end: authorise the early finish — no penalty.
+     *  - flag_early_end  : record an unexcused early departure (incident).
+     *
+     * Every outcome stamps resolved_at so the red ⚠ clears on the dashboard.
+     */
+    public function resolve(Request $request, string $id): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'outcome' => 'required|in:authorize_late,excuse,reassign,confirm_no_show,accept_early_end,flag_early_end',
+            'reason' => 'required|in:emergency,transport,illness,personal,operational,other',
+            'note' => 'nullable|string|max:500',
+            'guard_id' => 'required_if:outcome,reassign|nullable|exists:guards,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $shift = Shift::findOrFail($id);
+
+            if (!$shift->needsResolution()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This shift does not need resolution.'
+                ], 422);
+            }
+
+            $outcome = $request->input('outcome');
+            $reason = $request->input('reason');
+            $note = $request->input('note');
+            $adminId = $this->currentAdminId();
+
+            // Guard against applying the wrong outcome group to the wrong flag:
+            // early-end outcomes only apply to an early-finished shift, and the
+            // missed outcomes only apply to a missed shift.
+            $earlyOutcomes = ['accept_early_end', 'flag_early_end'];
+            $isEarlyEnd = $shift->resolutionKind() === 'ended_early';
+
+            if (in_array($outcome, $earlyOutcomes, true) !== $isEarlyEnd) {
+                return response()->json([
+                    'success' => false,
+                    'error' => $isEarlyEnd
+                        ? 'Choose how to resolve the early finish.'
+                        : 'That outcome does not apply to this shift.',
+                ], 422);
+            }
+
+            DB::beginTransaction();
+            try {
+                switch ($outcome) {
+                    case 'authorize_late':
+                        $minutes = (int) config('ironlock.late_authorization_minutes', 30);
+                        $shift->update([
+                            'status' => Shift::STATUS_SCHEDULED,
+                            'checkin_override_until' => Carbon::now()->addMinutes($minutes),
+                            'late_authorized_by' => $adminId,
+                            'attendance_reason' => $reason,
+                            'attendance_note' => $note,
+                            'resolved_at' => Carbon::now(),
+                        ]);
+                        $this->logShiftEvent($shift, 'LATE_CHECKIN_AUTHORIZED', [
+                            'reason' => $reason,
+                            'note' => $note,
+                            'override_until' => $shift->checkin_override_until->toISOString(),
+                            'authorized_by' => $adminId,
+                        ]);
+                        break;
+
+                    case 'excuse':
+                        $shift->update([
+                            'status' => Shift::STATUS_CANCELLED,
+                            'attendance_reason' => $reason,
+                            'attendance_note' => $note,
+                            'resolved_at' => Carbon::now(),
+                        ]);
+                        $this->logShiftEvent($shift, 'SHIFT_EXCUSED', [
+                            'reason' => $reason,
+                            'note' => $note,
+                            'resolved_by' => $adminId,
+                        ]);
+                        break;
+
+                    case 'reassign':
+                        $newGuard = Guard::findOrFail($request->input('guard_id'));
+
+                        // The reassigned guard must be free for the slot.
+                        $conflicts = $this->checkShiftConflicts(
+                            $newGuard->id,
+                            Carbon::parse($shift->scheduled_start),
+                            Carbon::parse($shift->scheduled_end),
+                            $shift->id
+                        );
+                        if (!empty($conflicts)) {
+                            DB::rollBack();
+                            return response()->json([
+                                'success' => false,
+                                'error' => 'The selected guard already has a shift in that time window.',
+                                'conflicts' => $conflicts,
+                            ], 422);
+                        }
+
+                        $shift->update([
+                            'guard_id' => $newGuard->id,
+                            'status' => Shift::STATUS_SCHEDULED,
+                            'checked_in_at' => null,
+                            'checkin_override_until' => null,
+                            'late_authorized_by' => null,
+                            'attendance_reason' => $reason,
+                            'attendance_note' => $note,
+                            'resolved_at' => Carbon::now(),
+                        ]);
+                        $this->logShiftEvent($shift, 'SHIFT_REASSIGNED', [
+                            'reason' => $reason,
+                            'note' => $note,
+                            'reassigned_to' => $newGuard->id,
+                            'resolved_by' => $adminId,
+                        ]);
+                        break;
+
+                    case 'confirm_no_show':
+                        $shift->update([
+                            'attendance_reason' => $reason,
+                            'attendance_note' => $note,
+                            'resolved_at' => Carbon::now(),
+                        ]);
+                        $this->logShiftEvent($shift, 'SHIFT_NO_SHOW_CONFIRMED', [
+                            'reason' => $reason,
+                            'note' => $note,
+                            'resolved_by' => $adminId,
+                        ]);
+                        break;
+
+                    case 'accept_early_end':
+                        // Authorised early finish — keep the completed shift as-is,
+                        // just record the reason and clear the flag.
+                        $shift->update([
+                            'attendance_reason' => $reason,
+                            'attendance_note' => $note,
+                            'resolved_at' => Carbon::now(),
+                        ]);
+                        $this->logShiftEvent($shift, 'EARLY_END_APPROVED', [
+                            'reason' => $reason,
+                            'note' => $note,
+                            'actual_end' => optional($shift->actual_end)->toISOString(),
+                            'scheduled_end' => optional($shift->scheduled_end)->toISOString(),
+                            'resolved_by' => $adminId,
+                        ]);
+                        break;
+
+                    case 'flag_early_end':
+                        // Unexcused early departure — recorded as an incident.
+                        $shift->update([
+                            'attendance_reason' => $reason,
+                            'attendance_note' => $note,
+                            'resolved_at' => Carbon::now(),
+                        ]);
+                        $this->logShiftEvent($shift, 'EARLY_END_FLAGGED', [
+                            'reason' => $reason,
+                            'note' => $note,
+                            'actual_end' => optional($shift->actual_end)->toISOString(),
+                            'scheduled_end' => optional($shift->scheduled_end)->toISOString(),
+                            'resolved_by' => $adminId,
+                        ]);
+                        break;
+                }
+
+                DB::commit();
+            } catch (\Throwable $e) {
+                DB::rollBack();
+                throw $e;
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Shift resolved successfully',
+                'shift' => $shift->fresh()->load('assignedGuard', 'site', 'geofence'),
+            ]);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['success' => false, 'error' => 'Shift not found'], 404);
+        } catch (\Exception $e) {
+            Log::error('Error resolving shift', ['shift_id' => $id, 'exception' => $e]);
+            return response()->json([
+                'success' => false,
+                'error' => 'Unable to resolve shift. Please try again.'
             ], 500);
         }
     }
@@ -685,5 +972,25 @@ class ShiftController extends Controller
                 $query->whereNotIn('override_type', array_keys($activeTypes));
             })
             ->delete();
+    }
+
+    /**
+     * Append an immutable shift_events audit row for a supervisor action.
+     * Best-effort — a logging failure must not roll back the resolution.
+     */
+    private function logShiftEvent(Shift $shift, string $eventType, array $metadata = []): void
+    {
+        try {
+            ShiftEvent::create([
+                'id' => (string) Str::uuid(),
+                'shift_id' => $shift->id,
+                'guard_id' => $shift->guard_id,
+                'event_type' => $eventType,
+                'metadata' => $metadata,
+                'recorded_at' => Carbon::now(),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to write shift event', ['shift_id' => $shift->id, 'type' => $eventType]);
+        }
     }
 }

@@ -5,13 +5,16 @@ namespace App\Http\Controllers\Mobile;
 use App\Domains\Authentication\Services\AuthService;
 use App\Domains\Guards\Models\Guard;
 use App\Domains\Shifts\Models\Shift;
+use App\Domains\Shifts\Models\ShiftEvent;
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\Mobile\Concerns\InteractsWithMobileApi;
+use Carbon\Carbon;
 use Firebase\JWT\ExpiredException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 /**
  * Mobile guard authentication — login, token refresh, logout, profile.
@@ -33,6 +36,12 @@ class AuthController extends Controller
      */
     public function login(Request $request): JsonResponse
     {
+        \Log::info('Mobile Login Request', [
+            'headers' => $request->headers->all(),
+            'body'    => $request->except('password'),
+            'ip'      => $request->ip(),
+        ]);
+
         $validator = Validator::make($request->all(), [
             'identifier' => ['required', 'string'],
             'password' => ['required', 'string'],
@@ -67,7 +76,17 @@ class AuthController extends Controller
             return $this->apiError('LOGIN_WINDOW_CLOSED', $window['message'], 403, $window['details']);
         }
 
-        // 3. Window open → mint the session.
+        // 3. Window open → record the check-in (login ≠ start) and mint the
+        //    session. A matched scheduled/missed shift moves to Checked-In;
+        //    an already-active shift is left untouched.
+        if (($shift = $window['shift'] ?? null) instanceof Shift && $shift->checkIn()) {
+            $this->logShiftEvent($shift, 'CHECKED_IN', [
+                'source' => 'login',
+                'scheduled_start' => optional($shift->scheduled_start)->toISOString(),
+                'late' => $shift->hasActiveOverride(),
+            ]);
+        }
+
         $tokens = $this->authService->issueGuardSession($guard, (array) $request->input('device', []));
 
         return $this->apiSuccess([
@@ -84,6 +103,12 @@ class AuthController extends Controller
      */
     public function refresh(Request $request): JsonResponse
     {
+        \Log::info('Mobile Refresh Request', [
+            'headers' => $request->headers->all(),
+            'body'    => $request->all(),
+            'ip'      => $request->ip(),
+        ]);
+
         $validator = Validator::make($request->all(), [
             'refresh_token' => ['required', 'string'],
         ]);
@@ -149,6 +174,12 @@ class AuthController extends Controller
      */
     public function logout(Request $request): JsonResponse
     {
+        \Log::info('Mobile Logout Request', [
+            'headers' => $request->headers->all(),
+            'body'    => $request->all(),
+            'ip'      => $request->ip(),
+        ]);
+
         $guard = $this->currentGuard($request);
 
         if ($guard) {
@@ -163,77 +194,144 @@ class AuthController extends Controller
      */
     public function me(Request $request): JsonResponse
     {
+        \Log::info('Mobile Me Request', [
+            'headers' => $request->headers->all(),
+            'body'    => $request->all(),
+            'ip'      => $request->ip(),
+        ]);
+
         return $this->apiSuccess(['guard' => $this->guardPayload($this->currentGuard($request))]);
     }
 
     /**
      * Determine whether the guard's shift-bound login window is open.
      *
-     * Rule (MOBILE_API_INTEGRATION.md §5.1): a guard may sign in only from
-     * 10 minutes before a shift's scheduled start until the shift ends — i.e.
-     * while a shift is `active`, or a `scheduled` shift starts within 10 min
-     * and hasn't passed its scheduled end. Otherwise the response carries the
-     * next window so the app can show a countdown.
+     * Rule (Shift Attendance spec): a guard may sign in from
+     * `scheduled_start − window` to `scheduled_start + window` (window =
+     * config('ironlock.check_in_window_minutes')), while a shift is already
+     * `active`, or any time a supervisor has authorized a late check-in. The
+     * matched shift is returned so login() can move it to Checked-In.
      *
-     * @return array{open: bool, message?: string, details?: array}
+     * When closed, two distinct cases are distinguished for the app:
+     *  - too early  → carries window_opens_at so the app can show a countdown
+     *  - expired    → "contact your supervisor" (the window has passed)
+     *
+     * @return array{open: bool, shift?: ?Shift, message?: string, details?: array}
      */
     private function loginWindow(Guard $guard): array
     {
         $now = now();
+        $window = Shift::windowMinutes();
 
-        // A shift in progress always permits sign-in.
-        $hasActive = Shift::where('guard_id', $guard->id)
+        // A shift in progress always permits sign-in (no transition needed).
+        $active = Shift::where('guard_id', $guard->id)
             ->where('status', Shift::STATUS_ACTIVE)
-            ->exists();
-
-        if ($hasActive) {
-            return ['open' => true];
-        }
-
-        // A scheduled shift whose window is open (starts within 10 min and is
-        // not yet past its scheduled end).
-        $hasOpenScheduled = Shift::where('guard_id', $guard->id)
-            ->where('status', Shift::STATUS_SCHEDULED)
-            ->where('scheduled_start', '<=', $now->copy()->addMinutes(10))
-            ->where('scheduled_end', '>=', $now)
-            ->exists();
-
-        if ($hasOpenScheduled) {
-            return ['open' => true];
-        }
-
-        // Closed — surface when the next window opens, if any.
-        $next = Shift::where('guard_id', $guard->id)
-            ->where('status', Shift::STATUS_SCHEDULED)
-            ->where('scheduled_start', '>', $now)
             ->orderBy('scheduled_start')
             ->first();
 
-        if (!$next) {
+        if ($active) {
+            return ['open' => true, 'shift' => $active];
+        }
+
+        // A shift whose check-in window is currently open: inside ±window of
+        // its scheduled start, or carrying a live supervisor override. Pull the
+        // near-term candidates and let the model own the window arithmetic so
+        // the override clause stays in one place.
+        $candidate = Shift::where('guard_id', $guard->id)
+            ->whereIn('status', [Shift::STATUS_SCHEDULED, Shift::STATUS_CHECKED_IN, Shift::STATUS_MISSED])
+            ->where(function ($q) use ($now, $window) {
+                $q->whereBetween('scheduled_start', [
+                    $now->copy()->subMinutes($window),
+                    $now->copy()->addMinutes($window),
+                ])->orWhere('checkin_override_until', '>=', $now);
+            })
+            ->orderBy('scheduled_start')
+            ->get()
+            ->first(fn (Shift $s) => $s->canCheckIn());
+
+        if ($candidate) {
+            return ['open' => true, 'shift' => $candidate];
+        }
+
+        // Closed. Decide whether it is "too early" (a future window exists) or
+        // "expired" (a shift today whose window has already passed).
+        $next = Shift::where('guard_id', $guard->id)
+            ->where('status', Shift::STATUS_SCHEDULED)
+            ->where('scheduled_start', '>', $now->copy()->addMinutes($window))
+            ->orderBy('scheduled_start')
+            ->first();
+
+        if ($next) {
+            $opensAt = $next->scheduled_start->copy()->subMinutes($window);
+            $tz = config('app.timezone') ?: 'UTC';
+
             return [
                 'open' => false,
-                'message' => 'You have no upcoming shift. You can sign in 10 minutes before your next scheduled shift.',
-                'details' => ['window_opens_at' => null, 'next_shift_start' => null],
+                'message' => sprintf(
+                    'You can sign in from %s — %d minutes before your %s shift.',
+                    $opensAt->copy()->setTimezone($tz)->format('H:i'),
+                    $window,
+                    $next->scheduled_start->copy()->setTimezone($tz)->format('H:i')
+                ),
+                'details' => [
+                    'reason' => 'too_early',
+                    'window_opens_at' => $opensAt->toISOString(),
+                    'next_shift_start' => $next->scheduled_start->toISOString(),
+                ],
             ];
         }
 
-        $opensAt = $next->scheduled_start->copy()->subMinutes(10);
-        $tz = config('app.timezone') ?: 'UTC';
+        // A shift exists today but its check-in window has already expired.
+        $expired = Shift::where('guard_id', $guard->id)
+            ->whereIn('status', [Shift::STATUS_SCHEDULED, Shift::STATUS_CHECKED_IN, Shift::STATUS_MISSED])
+            ->where('scheduled_start', '<=', $now)
+            ->orderByDesc('scheduled_start')
+            ->first();
 
-        $message = sprintf(
-            'You can sign in from %s — 10 minutes before your %s shift.',
-            $opensAt->copy()->setTimezone($tz)->format('H:i'),
-            $next->scheduled_start->copy()->setTimezone($tz)->format('H:i')
-        );
+        if ($expired) {
+            return [
+                'open' => false,
+                'message' => 'The allowed check-in period for this shift has expired. Please contact your supervisor for assistance.',
+                'details' => [
+                    'reason' => 'expired',
+                    'window_opens_at' => null,
+                    'next_shift_start' => null,
+                ],
+            ];
+        }
 
         return [
             'open' => false,
-            'message' => $message,
+            'message' => sprintf(
+                'You have no upcoming shift. You can sign in %d minutes before your next scheduled shift.',
+                $window
+            ),
             'details' => [
-                'window_opens_at' => $opensAt->toISOString(),
-                'next_shift_start' => $next->scheduled_start->toISOString(),
+                'reason' => 'no_shift',
+                'window_opens_at' => null,
+                'next_shift_start' => null,
             ],
         ];
+    }
+
+    /**
+     * Append an immutable shift_events audit row. Best-effort: a logging
+     * failure must never block the auth flow, so swallow and move on.
+     */
+    private function logShiftEvent(Shift $shift, string $eventType, array $metadata = []): void
+    {
+        try {
+            ShiftEvent::create([
+                'id' => (string) Str::uuid(),
+                'shift_id' => $shift->id,
+                'guard_id' => $shift->guard_id,
+                'event_type' => $eventType,
+                'metadata' => $metadata,
+                'recorded_at' => Carbon::now(),
+            ]);
+        } catch (\Throwable $e) {
+            // Audit is non-critical to the request; do not surface.
+        }
     }
 
     /**
