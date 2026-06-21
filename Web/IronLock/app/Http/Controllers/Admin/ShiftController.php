@@ -71,7 +71,7 @@ class ShiftController extends Controller
                     $q->where('scheduled_start', '>=', Carbon::parse($v)->startOfDay());
                 })
                 ->when($request->get('date_to'), function($q, $v) {
-                    $q->where('scheduled_end', '<=', Carbon::parse($v)->endOfDay());
+                    $q->where('scheduled_start', '<=', Carbon::parse($v)->endOfDay());
                 })
                 ->orderBy('scheduled_start', 'asc');
 
@@ -578,6 +578,18 @@ class ShiftController extends Controller
                 ], 422);
             }
 
+            // Late check-in and reassignment bring a guard in now, so they only
+            // make sense while the shift still has time left to work. Once the
+            // scheduled end has passed there is nothing to recover — refuse and
+            // leave Excuse / Confirm no-show as the only valid outcomes.
+            $lateRecoveryOutcomes = ['authorize_late', 'reassign'];
+            if (in_array($outcome, $lateRecoveryOutcomes, true) && !$shift->canRecoverLate()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This shift has already ended, so it can no longer be recovered with a late check-in or reassignment. Excuse it or confirm the no-show instead.',
+                ], 422);
+            }
+
             DB::beginTransaction();
             try {
                 switch ($outcome) {
@@ -632,11 +644,17 @@ class ShiftController extends Controller
                             ], 422);
                         }
 
+                        // The original scheduled_start is already in the past, so
+                        // re-opening as Scheduled would let the every-minute
+                        // mark-missed sweep flip this straight back to Missed.
+                        // Grant a fresh check-in window from now so the new guard
+                        // has the normal grace period to reach the site and start;
+                        // if they also no-show, it correctly goes Missed again.
                         $shift->update([
                             'guard_id' => $newGuard->id,
                             'status' => Shift::STATUS_SCHEDULED,
                             'checked_in_at' => null,
-                            'checkin_override_until' => null,
+                            'checkin_override_until' => Carbon::now()->addMinutes(Shift::windowMinutes()),
                             'late_authorized_by' => null,
                             'attendance_reason' => $reason,
                             'attendance_note' => $note,
@@ -800,7 +818,7 @@ class ShiftController extends Controller
             ->when($excludeShiftId, function($query) use ($excludeShiftId) {
                 $query->where('id', '!=', $excludeShiftId);
             })
-            ->where('scheduled_end', '<', $scheduledStart)
+            ->where('scheduled_end', '<=', $scheduledStart)
             ->orderBy('scheduled_end', 'desc')
             ->first();
 
@@ -927,6 +945,47 @@ class ShiftController extends Controller
                 'start' => $shift->scheduled_start,
                 'end' => $shift->scheduled_end,
                 'status' => $shift->status
+            ];
+        })->toArray();
+    }
+
+    /**
+     * Enforce one shift per guard per day.
+     *
+     * A guard can be rostered across as many different days as needed, but may
+     * only hold one shift on any given day. A second shift starting on a day
+     * the guard already works is refused. A cancelled (e.g. excused) shift has
+     * been called off and frees that day, so it does not block a replacement;
+     * every other status — scheduled, checked_in, active, completed or missed —
+     * counts as the day being taken.
+     *
+     * The day is bounded by the start/end of $date in the same (stored) time
+     * frame the rest of the scheduling logic uses, so the comparison lines up
+     * with scheduled_start values already in the table.
+     *
+     * Returns the blocking shifts (empty when the guard's day is free).
+     */
+    private function findSameDayShifts(string $guardId, Carbon $date, ?string $excludeShiftId = null): array
+    {
+        $dayStart = $date->copy()->startOfDay();
+        $dayEnd   = $date->copy()->endOfDay();
+
+        $blocking = Shift::where('guard_id', $guardId)
+            ->where('status', '!=', Shift::STATUS_CANCELLED)
+            ->whereBetween('scheduled_start', [$dayStart, $dayEnd])
+            ->when($excludeShiftId, function ($query) use ($excludeShiftId) {
+                $query->where('id', '!=', $excludeShiftId);
+            })
+            ->with('site')
+            ->get();
+
+        return $blocking->map(function ($shift) {
+            return [
+                'shift_id' => $shift->id,
+                'site_name' => $shift->site->name ?? '—',
+                'start' => $shift->scheduled_start,
+                'end' => $shift->scheduled_end,
+                'status' => $shift->status,
             ];
         })->toArray();
     }

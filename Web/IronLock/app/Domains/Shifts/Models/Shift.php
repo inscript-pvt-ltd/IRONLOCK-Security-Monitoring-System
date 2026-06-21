@@ -84,6 +84,7 @@ class Shift extends Model
     protected $appends = [
         'needs_resolution',
         'resolution_kind',
+        'can_recover_late',
     ];
 
     protected function casts(): array
@@ -457,11 +458,33 @@ class Shift extends Model
     }
 
     /**
+     * Whether a missed shift can still be recovered by bringing a guard in now
+     * (Authorize late check-in / Reassign). Only true while there is still
+     * shift time left to work — i.e. the scheduled end is in the future. Once
+     * the shift's window is fully past, the only sensible outcomes are Excuse
+     * or Confirm no-show, so those recovery options must be withdrawn.
+     */
+    public function canRecoverLate(): bool
+    {
+        return $this->status === self::STATUS_MISSED
+            && $this->scheduled_end !== null
+            && Carbon::now()->lessThan($this->scheduled_end);
+    }
+
+    /**
      * Accessor for the appended `needs_resolution` JSON attribute.
      */
     public function getNeedsResolutionAttribute(): bool
     {
         return $this->needsResolution();
+    }
+
+    /**
+     * Accessor for the appended `can_recover_late` JSON attribute.
+     */
+    public function getCanRecoverLateAttribute(): bool
+    {
+        return $this->canRecoverLate();
     }
 
     /**
