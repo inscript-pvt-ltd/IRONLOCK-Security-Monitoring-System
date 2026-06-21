@@ -25,7 +25,11 @@ class ShiftCalendar {
     getCurrentWeekDates() {
         const today = new Date();
         const monday = new Date(today);
-        monday.setDate(today.getDate() - today.getDay() + 1);
+        // Monday of the week that CONTAINS today (Mon–Sun week). getDay() is
+        // 0 for Sunday, so a naive `-getDay()+1` rolls Sunday forward into next
+        // week; `(getDay()+6) % 7` gives the correct days-back for every day
+        // (Sun→6, Mon→0, …, Sat→5) so Sunday stays in the current week.
+        monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
         monday.setHours(0, 0, 0, 0);
 
         const dates = [];
@@ -160,7 +164,8 @@ class ShiftCalendar {
             const from = this.formatDate(this.currentWeek[0]);
             const to   = this.formatDate(this.currentWeek[6]);
             const res  = await fetch(`/admin/shifts?date_from=${from}&date_to=${to}`, {
-                headers: { 'Accept': 'application/json' }
+                headers: { 'Accept': 'application/json' },
+                cache: 'no-store'
             });
             if (!res.ok) throw new Error('Failed to load shifts');
             const data = await res.json();
@@ -185,7 +190,8 @@ class ShiftCalendar {
     async loadActiveShifts() {
         try {
             const res = await fetch('/admin/shifts?status=active', {
-                headers: { 'Accept': 'application/json' }
+                headers: { 'Accept': 'application/json' },
+                cache: 'no-store'
             });
             if (!res.ok) throw new Error('Failed to load active shifts');
             const data = await res.json();
@@ -252,6 +258,7 @@ class ShiftCalendar {
     // ── Calendar rendering ─────────────────────────────────────
 
     renderCalendar() {
+        this.updateWeekLabel();
         const table = document.getElementById('calendar-table');
         const days  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -503,12 +510,20 @@ class ShiftCalendar {
                 { value: 'flag_early_end',   label: 'Flag as incident (unexcused)' },
             ];
         }
-        return [
-            { value: 'authorize_late',  label: 'Authorize late check-in' },
-            { value: 'excuse',          label: "Excuse (won't attend)" },
-            { value: 'reassign',        label: 'Reassign to another guard' },
-            { value: 'confirm_no_show', label: 'Confirm no-show' },
-        ];
+        // Late check-in and reassignment bring a guard in now, so they only
+        // apply while the shift still has time left to work. Once it has ended
+        // (can_recover_late = false) those options are withdrawn and only
+        // Excuse / Confirm no-show remain.
+        const outcomes = [];
+        if (shift.can_recover_late) {
+            outcomes.push({ value: 'authorize_late', label: 'Authorize late check-in' });
+        }
+        outcomes.push({ value: 'excuse', label: "Excuse (won't attend)" });
+        if (shift.can_recover_late) {
+            outcomes.push({ value: 'reassign', label: 'Reassign to another guard' });
+        }
+        outcomes.push({ value: 'confirm_no_show', label: 'Confirm no-show' });
+        return outcomes;
     }
 
     // Put the open drawer into resolve mode for a flagged shift.
@@ -870,6 +885,9 @@ class ShiftCalendar {
         this.clearDrawerError();
         // Clear any leftover resolve-mode UI from a previous open.
         this.resetResolveUi();
+        // Hide the past-shift notice; re-shown below only when relevant.
+        const pastNotice = document.getElementById('past-shift-notice');
+        if (pastNotice) pastNotice.style.display = 'none';
 
         const saveBtn = document.getElementById('save-shift-btn');
         saveBtn.disabled   = false;
@@ -903,6 +921,14 @@ class ShiftCalendar {
         } else if (shift && (shift.status === 'scheduled' || shift.status === 'checked_in')) {
             // Editing a shift that hasn't started yet — offer Cancel Shift.
             document.getElementById('cancel-shift-row').style.display = 'flex';
+
+            // If its start time is already in the past, the backend will reject a
+            // save unless the start is moved forward (scheduled_start must be
+            // after now). Surface that up front instead of as a raw validation
+            // error after the admin hits Save.
+            if (pastNotice && new Date(shift.scheduled_start) <= new Date()) {
+                pastNotice.style.display = 'block';
+            }
         }
 
         document.getElementById('shift-drawer').classList.add('open');
@@ -1181,6 +1207,26 @@ class ShiftCalendar {
             return nd;
         });
         this.loadShifts().then(() => this.renderCalendar());
+    }
+
+    // Drive the week-selector label from the SAME currentWeek array the grid
+    // renders, so the label can never disagree with the columns (the old PHP
+    // `date()` label used server/UTC time and could drift a day). next/prev act
+    // as one-shot nav: after each move we reset the select to "current" and
+    // relabel it with the week now on screen.
+    updateWeekLabel() {
+        const sel = document.getElementById('week-selector');
+        if (!sel) return;
+        const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const first = this.currentWeek[0];
+        const last  = this.currentWeek[6];
+        const range = first.getMonth() === last.getMonth()
+            ? `${first.getDate()}–${last.getDate()} ${MONTHS[last.getMonth()]}`
+            : `${first.getDate()} ${MONTHS[first.getMonth()]} – ${last.getDate()} ${MONTHS[last.getMonth()]}`;
+        const opt = sel.querySelector('option[value="current"]');
+        if (opt) opt.textContent = `Week: ${range}`;
+        sel.value = 'current';
     }
 
     // ── Error helpers ──────────────────────────────────────────

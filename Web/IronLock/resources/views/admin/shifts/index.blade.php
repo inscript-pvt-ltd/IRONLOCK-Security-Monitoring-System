@@ -5,7 +5,7 @@
 
 @section('topbar-actions')
     <select id="week-selector" class="topbar-filter">
-        <option value="current">Week: {{ date('d') }}–{{ date('d', strtotime('+6 days')) }} {{ date('M') }}</option>
+        <option value="current">This week</option>
         <option value="next">Next week</option>
         <option value="prev">Previous week</option>
     </select>
@@ -693,6 +693,15 @@
         <!-- Shown only when the opened shift needs supervisor resolution -->
         <div id="resolve-banner" class="resolve-banner" style="display:none;"></div>
 
+        <!-- Shown when editing a shift whose start time is already in the past -->
+        <div id="past-shift-notice"
+             style="display:none; margin-bottom:12px; padding:8px 10px; border-radius:6px;
+                    font-size:11px; line-height:1.4; color:#92400e;
+                    background:#fef3c7; border:1px solid #fcd34d;">
+            This shift's start time has already passed. To save changes, move the
+            <strong>Date / Start</strong> to a future time first.
+        </div>
+
         <label class="drawer-label" style="margin-top:0;">Guard</label>
         <select id="guard-select" class="drawer-select" required>
             <option value="">Select Guard</option>
@@ -838,5 +847,5 @@
      ShiftCalendar.init() again here — a second init binds a duplicate form
      submit handler, which fires saveShift() twice (one PUT + one stray POST
      that then "conflicts" with the shift just saved). --}}
-<script src="{{ asset('js/admin/shifts.js') }}"></script>
+<script src="{{ asset('js/admin/shifts.js') }}?v={{ filemtime(public_path('js/admin/shifts.js')) }}"></script>
 @endsection
