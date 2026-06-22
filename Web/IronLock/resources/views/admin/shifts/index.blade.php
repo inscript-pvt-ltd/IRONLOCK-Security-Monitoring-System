@@ -4,11 +4,7 @@
 @section('page-title', 'Shift Scheduling')
 
 @section('topbar-actions')
-    <select id="week-selector" class="topbar-filter">
-        <option value="current">This week</option>
-        <option value="next">Next week</option>
-        <option value="prev">Previous week</option>
-    </select>
+    <button id="jump-today-btn" class="topbar-filter" style="background:var(--surface-dark);color:var(--text-secondary);border:1.5px solid var(--border-dark);padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;font-weight:bold;">↑ Today</button>
     <button id="new-shift-btn" class="btn-primary-sm" style="background:var(--deep-security-blue);color:white;border:none;padding:6px 12px;border-radius:4px;font-size:11px;font-weight:bold;cursor:pointer;">+ New Shift</button>
 @endsection
 
@@ -31,8 +27,29 @@
         background: var(--surface-dark);
         border: 1.5px solid var(--border-dark);
         border-radius: 4px;
-        overflow: hidden;
+        overflow-x: auto;
+        overflow-y: hidden;
         margin-bottom: 12px;
+        /* Firefox */
+        scrollbar-width: thin;
+        scrollbar-color: var(--deep-security-blue) var(--bg-dark);
+    }
+
+    /* Custom horizontal scrollbar (WebKit/Chromium) */
+    .cal-container::-webkit-scrollbar {
+        height: 10px;
+    }
+    .cal-container::-webkit-scrollbar-track {
+        background: var(--bg-dark);
+        border-radius: 0 0 4px 4px;
+    }
+    .cal-container::-webkit-scrollbar-thumb {
+        background: var(--deep-security-blue);
+        border-radius: 6px;
+        border: 2px solid var(--bg-dark);
+    }
+    .cal-container::-webkit-scrollbar-thumb:hover {
+        background: var(--premium-gold);
     }
 
     .cal {
@@ -52,13 +69,86 @@
         white-space: nowrap;
     }
 
+    /* Guard column header — sticky so it pins while scrolling horizontally */
     .cal thead th:first-child {
+        position: sticky;
+        left: 0;
+        z-index: 5;
+        background: var(--border-dark);
         text-align: left;
         font-size: 9px;
         text-transform: uppercase;
         letter-spacing: 0.06em;
         padding-left: 10px;
     }
+
+    /* Month tabs above the calendar — one per month in the 3-month range. They
+       live OUTSIDE the scrolling table so they're always visible. The tab for
+       the month currently in view is highlighted; clicking one scrolls the
+       calendar to that month. */
+    .cal-month-tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+    }
+
+    .cal-month-tab {
+        flex: 1;
+        padding: 7px 4px;
+        font-size: 10px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-muted);
+        background: var(--bg-dark);
+        border: 1px solid var(--border-dark);
+        border-radius: 5px;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+
+    .cal-month-tab:hover {
+        color: var(--text-primary);
+        border-color: var(--deep-security-blue);
+    }
+
+    .cal-month-tab.active {
+        color: var(--text-primary);
+        background: var(--deep-security-blue);
+        border-color: var(--deep-security-blue);
+    }
+
+    /* Day columns are sized in JS (sizeDayColumns) so roughly one week fills
+       the viewport, like the old weekly view — the rest of the 3-month range
+       is reached with the horizontal scrollbar. --day-col-w is set on the
+       table; a sensible fallback keeps columns readable before JS runs.
+       Single-line "Mon 22" header, matching the original weekly table. */
+    .cal-day-th {
+        width: var(--day-col-w, 120px);
+        min-width: var(--day-col-w, 120px);
+        padding: 8px 6px;
+        font-size: 10px;
+        font-weight: bold;
+        white-space: nowrap;
+    }
+
+    /* Match the body day cells to the header column width. The sticky guard
+       column keeps its own fixed 90px and is excluded here. */
+    .cal tbody td:not(.guard-col) {
+        width: var(--day-col-w, 120px);
+        min-width: var(--day-col-w, 120px);
+    }
+
+    /* Today column */
+    .col-today {
+        background: rgba(255, 193, 7, 0.09) !important;
+        border-left: 1px solid rgba(255, 193, 7, 0.5) !important;
+        border-right: 1px solid rgba(255, 193, 7, 0.5) !important;
+    }
+    .cal thead th.col-today { color: var(--premium-gold); }
+
+    /* Weekend columns */
+    .col-weekend { background: rgba(0, 0, 0, 0.12) !important; }
 
     .cal tbody td {
         background: var(--surface-dark);
@@ -71,6 +161,11 @@
     }
 
     .cal tbody td.guard-col {
+        position: sticky;
+        left: 0;
+        z-index: 4;
+        background: var(--surface-dark);
+        box-shadow: 2px 0 4px rgba(0,0,0,0.25);
         text-align: left;
         font-weight: bold;
         font-size: 10px;
@@ -112,10 +207,14 @@
         z-index: 1;
     }
 
+    /* The merged overnight chip keeps its rounded, padded pill shape but takes
+       its colour from the shift's status class (.missed → red, .active → green,
+       etc.) — so a missed overnight cell fills red exactly like a single-day
+       missed cell. (No background is set here, otherwise it would out-specify
+       the status modifiers and force every overnight chip blue.) */
     .cal tbody td.overnight-merged .shift-blk {
         position: relative;
         z-index: 2;
-        background: var(--deep-security-blue);
         border-radius: 8px;
         padding: 4px 12px;
         margin: 0 auto;
@@ -631,6 +730,8 @@
 <div class="shifts-main">
 
     <!-- ① Calendar table (thead + tbody populated by JS) -->
+    <!-- Month tabs (populated by JS) — always-visible, click to jump to a month -->
+    <div class="cal-month-tabs" id="cal-month-tabs"></div>
     <div class="cal-container">
         <table class="cal" id="calendar-table"></table>
     </div>
@@ -816,8 +917,9 @@
     <!-- Cancel view — swaps in over the edit form (Back returns to it) -->
     <div id="cancel-view" style="display:none;">
         <div class="resolve-banner">
-            <strong>Cancel this shift?</strong>This calls the shift off before the guard goes on duty.
-            Pick a reason for the audit trail. To create the correct shift afterwards, add a new one.
+            <strong>Cancel this shift?</strong>This calls the shift off before the guard goes on duty
+            and <strong>permanently removes it from the system</strong> — this can't be undone.
+            To schedule the correct shift afterwards, add a new one.
         </div>
 
         <label class="drawer-label">Reason</label>
@@ -830,7 +932,7 @@
 
         <label class="drawer-label">Note (optional)</label>
         <textarea id="cancel-note" class="drawer-textarea" maxlength="500"
-                  placeholder="Add any context for the audit trail…"></textarea>
+                  placeholder="Add any context for your own reference…"></textarea>
 
         <div id="cancel-view-error" class="resolve-view-error"></div>
 

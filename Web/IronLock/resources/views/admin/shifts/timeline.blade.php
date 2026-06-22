@@ -20,9 +20,21 @@
         'EARLY_END_APPROVED'      => ['label' => 'Early Finish Approved',    'tone' => 'warn'],
         'EARLY_END_FLAGGED'       => ['label' => 'Early Finish Flagged',     'tone' => 'alert'],
         'SHIFT_CANCELLED'         => ['label' => 'Shift Cancelled',          'tone' => 'warn'],
+        'EARLY_END_REQUESTED'         => ['label' => 'Early Finish Requested',        'tone' => 'warn'],
+        'EARLY_END_REQUEST_APPROVED'  => ['label' => 'Early Finish Request Approved', 'tone' => 'ok'],
+        'EARLY_END_REQUEST_REJECTED'  => ['label' => 'Early Finish Request Rejected', 'tone' => 'alert'],
+        'SHIFT_AUTO_CLOSED'           => ['label' => 'Auto-Closed (overdue)',         'tone' => 'alert'],
     ];
 
     $summary = is_array($shift->compliance_summary) ? $shift->compliance_summary : null;
+
+    // A guard's early-finish request lives in the timeline as an
+    // EARLY_END_REQUESTED audit event. While it is still pending a supervisor
+    // decision, attach Accept / Reject controls to that event's card (the latest
+    // such event, since a rejected request can be re-submitted).
+    $pendingEarlyEndEventId = $shift->hasPendingEarlyEnd()
+        ? optional($events->where('event_type', 'EARLY_END_REQUESTED')->first())->id
+        : null;
 @endphp
 
 @section('styles')
@@ -106,6 +118,28 @@
     }
     .tl-empty { font-size: 12px; color: var(--text-muted); padding: 10px 0; }
 
+    /* ── Pending early-finish request action card (in timeline) ──────── */
+    .tl-action {
+        margin-top: 8px; padding: 10px 12px; border-radius: 4px;
+        background: rgba(245, 158, 11, 0.08);
+        border: 1px solid var(--warning-amber);
+    }
+    .tl-action-label {
+        font-size: 10px; font-weight: bold; text-transform: uppercase;
+        letter-spacing: 0.05em; color: var(--warning-amber); margin-bottom: 8px;
+    }
+    .tl-action-btns { display: flex; gap: 8px; }
+    .tl-btn {
+        font-size: 11px; font-weight: bold; padding: 6px 16px;
+        border-radius: 4px; cursor: pointer; border: 1px solid; background: transparent;
+        transition: all 0.2s ease;
+    }
+    .tl-btn:disabled { opacity: 0.5; cursor: default; }
+    .tl-btn-approve { color: var(--success-green); border-color: var(--success-green); }
+    .tl-btn-approve:hover:not(:disabled) { background: var(--success-green); color: #04230f; }
+    .tl-btn-reject { color: var(--error-red); border-color: var(--error-red); }
+    .tl-btn-reject:hover:not(:disabled) { background: var(--error-red); color: #2a0606; }
+
     /* ── Compliance side panel ──────────────────────── */
     .sum-row {
         display: flex; justify-content: space-between; gap: 8px;
@@ -157,6 +191,36 @@
         <div class="panel">
             <div class="panel-title">Timeline — Append-only audit log</div>
             <div class="tl">
+                {{-- Fallback: the request is pending but its audit event is missing
+                     (best-effort logging can fail) — still let the supervisor act.
+                     Shown at the top since the timeline reads newest-first. --}}
+                @if ($shift->hasPendingEarlyEnd() && !$pendingEarlyEndEventId)
+                    @php $req = $shift->early_end_request; @endphp
+                    <div class="tl-row">
+                        <div class="tl-node">
+                            <div class="tl-dot warn"></div>
+                            <div class="tl-line"></div>
+                        </div>
+                        <div class="tl-body">
+                            <div class="tl-heading">Early Finish Requested</div>
+                            <div class="tl-meta">{{ $fmt($shift->early_end_requested_at) }} · pending</div>
+                            @if (!empty($req['reason']) || !empty($req['note']))
+                                <div class="tl-card">
+                                    @if (!empty($req['reason']))<div>Reason: {{ $req['reason'] }}</div>@endif
+                                    @if (!empty($req['note']))<div>Note: {{ $req['note'] }}</div>@endif
+                                </div>
+                            @endif
+                            <div class="tl-action" data-shift-id="{{ $shift->id }}">
+                                <div class="tl-action-label">Awaiting your decision</div>
+                                <div class="tl-action-btns">
+                                    <button type="button" class="tl-btn tl-btn-approve" data-action="approve">Accept</button>
+                                    <button type="button" class="tl-btn tl-btn-reject" data-action="reject">Reject</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                @endif
+
                 @forelse ($events as $event)
                     @php
                         $meta = $eventMeta[$event->event_type] ?? ['label' => \Illuminate\Support\Str::headline(strtolower($event->event_type)), 'tone' => 'ok'];
@@ -178,6 +242,15 @@
                                         @php $v = is_bool($v) ? ($v ? 'yes' : 'no') : (is_array($v) ? json_encode($v) : $v); @endphp
                                         <div>{{ \Illuminate\Support\Str::headline($k) }}: {{ $v }}</div>
                                     @endforeach
+                                </div>
+                            @endif
+                            @if ($event->id === $pendingEarlyEndEventId)
+                                <div class="tl-action" data-shift-id="{{ $shift->id }}">
+                                    <div class="tl-action-label">Awaiting your decision</div>
+                                    <div class="tl-action-btns">
+                                        <button type="button" class="tl-btn tl-btn-approve" data-action="approve">Accept</button>
+                                        <button type="button" class="tl-btn tl-btn-reject" data-action="reject">Reject</button>
+                                    </div>
                                 </div>
                             @endif
                         </div>
@@ -262,6 +335,58 @@
     // Came from the same page (e.g. browser F5 / open-in-tab) or another
     // admin page that isn't shifts → keep the shifts fallback.
     // Came from shifts → default href is already correct.
+})();
+
+// ── Approve / reject a pending early-finish request ──────────────────
+// The server is the authority on early ends: only an approved request lets
+// the guard's app finish the shift early. On success we reload so the
+// timeline shows the recorded decision and the buttons disappear.
+(function () {
+    var token = document.querySelector('meta[name="csrf-token"]');
+    token = token ? token.content : '';
+
+    document.querySelectorAll('.tl-action .tl-btn').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+            var wrap = btn.closest('.tl-action');
+            if (!wrap) return;
+            var shiftId = wrap.dataset.shiftId;
+            var action = btn.dataset.action; // 'approve' | 'reject'
+
+            if (action === 'reject' && !confirm('Reject this early-finish request? The guard will keep working to the scheduled end.')) {
+                return;
+            }
+            if (action === 'approve' && !confirm('Approve this early finish? The guard will be able to end the shift now.')) {
+                return;
+            }
+
+            var btns = wrap.querySelectorAll('.tl-btn');
+            btns.forEach(function (b) { b.disabled = true; });
+
+            try {
+                var res = await fetch('/admin/shifts/' + shiftId + '/early-end/' + action, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': token
+                    }
+                });
+                var data = await res.json();
+
+                if (!data.success) {
+                    alert(data.error || 'Unable to update the request.');
+                    btns.forEach(function (b) { b.disabled = false; });
+                    return;
+                }
+
+                window.location.reload();
+            } catch (e) {
+                console.error('Early-end decision error:', e);
+                alert('Something went wrong. Please try again.');
+                btns.forEach(function (b) { b.disabled = false; });
+            }
+        });
+    });
 })();
 </script>
 @endsection

@@ -26,4 +26,18 @@ return [
 
     'late_authorization_minutes' => (int) env('IRONLOCK_LATE_AUTH_MINUTES', 30),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Shift auto-close
+    |--------------------------------------------------------------------------
+    |
+    | Grace period after scheduled_end before the server force-closes a shift
+    | the guard never ended (BACKEND_SHIFT_END_SPEC §2). Long enough to let a
+    | slightly-late manual end happen first; short enough that open records do
+    | not linger. The auto-closed shift's actual_end is set to scheduled_end.
+    |
+    */
+
+    'auto_close_grace_minutes' => (int) env('IRONLOCK_AUTO_CLOSE_GRACE', 45),
+
 ];
