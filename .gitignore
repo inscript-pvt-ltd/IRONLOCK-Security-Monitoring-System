@@ -1,0 +1,49 @@
+# macOS
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+
+# Flutter / Dart
+**/build/
+**/.dart_tool/
+**/.pub-cache/
+**/.pub/
+**/doc/api/
+**/.flutter-plugins-dependencies
+
+# Android
+**/.gradle/
+**/android/local.properties
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+**/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/ephemeral/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Runner/GeneratedPluginRegistrant.h
+**/ios/Runner/GeneratedPluginRegistrant.m
+
+# IDE
+.idea/
+**/.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+**/.vscode/
+
+# Claude Code local settings and installed agent skills (machine-specific)
+**/.claude/settings.local.json
+**/.agents/
+
+# Node
+**/node_modules/
+
+# Logs
+*.log

@@ -11,10 +11,16 @@ class AppChip extends StatelessWidget {
     super.key,
     required this.label,
     this.variant = AppChipVariant.info,
+    this.icon,
   });
 
   final String label;
   final AppChipVariant variant;
+
+  /// Optional leading icon. Prefer a vector [IconData] over an emoji/glyph
+  /// inside [label] — emojis render inconsistently across platforms and can't
+  /// inherit the chip's semantic colour.
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
@@ -29,11 +35,20 @@ class AppChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(AppRadius.chip),
         border: Border.all(color: colors.border),
       ),
-      child: Text(label,
-          style: AppType.micro.copyWith(
-            fontSize: context.sp(11),
-            color: colors.fg,
-          )),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: context.sp(12), color: colors.fg),
+            SizedBox(width: context.s(4)),
+          ],
+          Text(label,
+              style: AppType.micro.copyWith(
+                fontSize: context.sp(11),
+                color: colors.fg,
+              )),
+        ],
+      ),
     );
   }
 

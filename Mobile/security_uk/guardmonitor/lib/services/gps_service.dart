@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:battery_plus/battery_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
@@ -8,6 +9,7 @@ import 'api_client.dart';
 class GpsService {
   GpsService(this._dio);
   final Dio _dio;
+  final Battery _battery = Battery();
 
   Timer? _timer;
   String? _shiftId;
@@ -50,9 +52,9 @@ class GpsService {
         'latitude': position.latitude,
         'longitude': position.longitude,
         'accuracy': position.accuracy,
-        // No battery-info package wired (kept dependency-free per project
-        // constraints) — placeholder fraction, not read from the device.
-        'battery': 0.8,
+        // Real device battery as a 0–1 fraction; null when unknown (e.g. the
+        // iOS simulator reports a negative level).
+        'battery': await _readBatteryFraction(),
         'recorded_at': DateTime.now().toUtc().toIso8601String(),
       };
 
@@ -69,6 +71,17 @@ class GpsService {
       if (zone != null) _zoneController.add(zone);
     } catch (_) {
       // Silently ignore — offline queue phase will handle persistence
+    }
+  }
+
+  /// Real battery level as a 0–1 fraction, or null when the platform can't
+  /// report it (e.g. the iOS simulator returns a negative "unknown" level).
+  Future<double?> _readBatteryFraction() async {
+    try {
+      final level = await _battery.batteryLevel;
+      return level < 0 ? null : level / 100.0;
+    } catch (_) {
+      return null;
     }
   }
 

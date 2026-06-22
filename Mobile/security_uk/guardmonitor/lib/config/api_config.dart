@@ -1,8 +1,9 @@
 abstract class ApiConfig {
-  // Dev: Android emulator → 10.0.2.2, iOS simulator → 127.0.0.1, real device → your machine IP
+  // Real Laravel backend (cPanel-hosted). Override for local mock-backend
+  // testing with: flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000/api/mobile/v1
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://127.0.0.1:8000/api/mobile/v1',
+    defaultValue: 'http://generous-yellow-jaguar.23-111-165-74.cpanel.site/api/mobile/v1',
   );
 
   static const Duration connectTimeout = Duration(seconds: 10);

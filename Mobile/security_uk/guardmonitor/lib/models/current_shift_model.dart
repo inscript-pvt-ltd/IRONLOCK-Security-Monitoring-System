@@ -48,6 +48,7 @@ class CurrentShiftModel {
     required this.scheduledEnd,
     required this.canStart,
     required this.canEnd,
+    this.reference,
     this.actualStart,
     this.actualEnd,
     this.role,
@@ -58,7 +59,8 @@ class CurrentShiftModel {
   });
 
   final String id;
-  final String status; // scheduled | active | completed | cancelled
+  final String? reference; // human-readable display code (e.g. "SH-2847"); display-only, never a key
+  final String status; // scheduled | checked_in | active | completed | cancelled | missed
   final DateTime scheduledStart;
   final DateTime scheduledEnd;
   final DateTime? actualStart;
@@ -71,13 +73,17 @@ class CurrentShiftModel {
   final ShiftGeofenceModel? geofence;
   final double? durationHours;
 
-  /// The spec has no human-readable shift reference (only a UUID `id`), so
-  /// derive a short display label until the backend adds a real field.
-  String get displayRef => '#SH-${id.replaceAll('-', '').substring(0, 6).toUpperCase()}';
+  /// Display label for the shift. Prefers the server's human-readable
+  /// `reference` (e.g. "SH-2847"), prefixed with "#"; falls back to a short
+  /// label derived from the UUID when the backend doesn't send one.
+  String get displayRef => reference != null
+      ? '#$reference'
+      : '#SH-${id.replaceAll('-', '').substring(0, 6).toUpperCase()}';
 
   factory CurrentShiftModel.fromJson(Map<String, dynamic> json) {
     return CurrentShiftModel(
       id: json['id'] as String,
+      reference: json['reference'] as String?,
       status: json['status'] as String,
       scheduledStart: DateTime.parse(json['scheduled_start'] as String).toLocal(),
       scheduledEnd: DateTime.parse(json['scheduled_end'] as String).toLocal(),

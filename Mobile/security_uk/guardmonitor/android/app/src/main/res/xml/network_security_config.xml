@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Allows cleartext (HTTP) only for the temporary cPanel backend host.
+  The rest of the app stays HTTPS-only (Android's secure default).
+  REMOVE this exception once the backend is served over HTTPS.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">generous-yellow-jaguar.23-111-165-74.cpanel.site</domain>
+    </domain-config>
+</network-security-config>

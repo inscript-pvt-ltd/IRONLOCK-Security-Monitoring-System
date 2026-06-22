@@ -191,7 +191,7 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                       ],
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  SizedBox(height: context.s(8)),
 
                   // Progress bar
                   Padding(
@@ -208,7 +208,7 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                       ),
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  SizedBox(height: context.s(16)),
 
                   // Camera view — real on device, simulated on simulator
                   Padding(
@@ -217,10 +217,10 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                         ? _RealCameraView(controller: _cameraCtrl!)
                         : _SimulatedCameraView(scanCtrl: _scanCtrl),
                   ),
-                  const SizedBox(height: 16),
+                  SizedBox(height: context.s(16)),
 
                   Text('Photograph your current location', style: AppType.label),
-                  const SizedBox(height: 4),
+                  SizedBox(height: context.s(4)),
                   Text(
                     _cameraReady
                         ? 'Point camera at your surroundings and tap capture'
@@ -402,7 +402,7 @@ class _CameraLabels extends StatelessWidget {
         child: Text(
           'Simulated camera · gallery disabled',
           style: AppType.micro.copyWith(
-            fontSize: 10,
+            fontSize: context.sp(10),
             color: const Color(0x73D4AF37),
             fontWeight: FontWeight.w400,
           ),
@@ -488,14 +488,14 @@ class _UploadStatus extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Text(cfg.icon, style: const TextStyle(fontSize: 16)),
+          Text(cfg.icon, style: TextStyle(fontSize: context.sp(16))),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               status == PhotoStatus.expired
                   ? '⏱ Request expired — new request in ${expireCountdown}s'
                   : cfg.text,
-              style: AppType.caption.copyWith(fontSize: 13, color: cfg.color),
+              style: AppType.caption.copyWith(fontSize: context.sp(13), color: cfg.color),
             ),
           ),
         ],

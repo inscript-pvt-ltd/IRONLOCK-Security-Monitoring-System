@@ -4,11 +4,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'providers/app_providers.dart';
 import 'screens/login/login_screen.dart';
 import 'screens/home/home_screen.dart';
+import 'services/notification_service.dart';
 import 'theme/app_colors.dart';
 import 'theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Initialise local notifications (timezone DB + plugin) early; permission is
+  // requested contextually when a shift starts.
+  NotificationService.init();
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
     DeviceOrientation.portraitDown,
@@ -40,7 +44,20 @@ class IronlockApp extends ConsumerWidget {
               maxScaleFactor: 1.1,
             ),
           ),
-          child: child!,
+          // The UI is designed phone-first. On wide screens (tablets, landscape,
+          // desktop/web) stretching it edge-to-edge looks unintentional, so we
+          // cap the content width and letterbox the sides with the app bg.
+          // This is a no-op on phones: any screen narrower than the cap fills
+          // the width exactly as before.
+          child: ColoredBox(
+            color: AppColors.bg,
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 560),
+                child: child!,
+              ),
+            ),
+          ),
         );
       },
       home: authValue.when(

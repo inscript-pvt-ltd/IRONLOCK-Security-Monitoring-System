@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/api_response.dart';
 import '../../providers/app_providers.dart';
+import '../../services/secure_storage_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_spacing.dart';
@@ -19,12 +20,26 @@ class LoginScreen extends ConsumerStatefulWidget {
 }
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
-  final _emailCtrl = TextEditingController(text: 'j.smith@ironlock.co.uk');
-  final _passCtrl = TextEditingController(text: 'password123');
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
   bool _obscure = true;
   bool _rememberMe = true;
   bool _loading = false;
   String? _error;
+  bool _windowExpired = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedEmail();
+  }
+
+  Future<void> _loadSavedEmail() async {
+    final email = await SecureStorageService.getSavedEmail();
+    if (email != null && mounted) {
+      setState(() => _emailCtrl.text = email);
+    }
+  }
 
   @override
   void dispose() {
@@ -44,12 +59,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     setState(() {
       _loading = true;
       _error = null;
+      _windowExpired = false;
     });
 
     try {
       await ref.read(authProvider.notifier).signIn(
         _emailCtrl.text.trim(),
         _passCtrl.text,
+        rememberMe: _rememberMe,
       );
       // authProvider state change triggers navigation in main.dart automatically
     } on DioException catch (e) {
@@ -60,6 +77,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _error = apiError.code == 'ACCOUNT_LOCKED'
             ? '⚠ Account locked. Please contact your supervisor.'
             : '⚠ ${apiError.message}';
+        _windowExpired = apiError.code == 'LOGIN_WINDOW_CLOSED' &&
+            apiError.details?['reason'] == 'expired';
       });
     } catch (_) {
       if (!mounted) return;
@@ -90,21 +109,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Widget _buildFormLayout() {
-    return Column(
-      children: [
-        // Scrollable content
-        Expanded(
-          child: SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(
-              context.s(AppSpacing.xl),
-              context.s(36),
-              context.s(AppSpacing.xl),
-              context.s(AppSpacing.base),
-            ),
-            child: ListenableBuilder(
-              listenable: Listenable.merge([_emailCtrl, _passCtrl]),
-              builder: (context, _) {
-                return Column(
+    return ListenableBuilder(
+      listenable: Listenable.merge([_emailCtrl, _passCtrl]),
+      builder: (context, _) {
+        return Column(
+          children: [
+            // Scrollable content
+            Expanded(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(
+                  context.s(AppSpacing.xl),
+                  context.s(36),
+                  context.s(AppSpacing.xl),
+                  context.s(AppSpacing.base),
+                ),
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     // Logo
@@ -124,9 +143,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     // Password
                     AppInput(
                       controller: _passCtrl,
-                      label: 'Password',
-                      hint: '••••••••',
+                      label: 'Passcode',
+                      hint: '8-digit code',
                       obscureText: _obscure,
+                      keyboardType: TextInputType.number,
                       textInputAction: TextInputAction.done,
                       onSubmitted: (_canSubmit) ? (_) => _signIn() : null,
                       suffix: IconButton(
@@ -143,6 +163,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     if (_error != null) ...[
                       SizedBox(height: context.s(AppSpacing.md)),
                       _MessageBox(message: _error!, isError: true),
+                      if (_windowExpired) ...[
+                        SizedBox(height: context.s(8)),
+                        _MessageBox(
+                          message: 'Once your supervisor authorises your access, tap Sign In again to retry.',
+                          isError: false,
+                        ),
+                      ],
                     ],
 
                     SizedBox(height: context.s(AppSpacing.base)),
@@ -173,38 +200,38 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
                   ],
-                );
-              },
-            ),
-          ),
-        ),
-
-        // Fixed bottom section with Sign In button and Footer
-        Padding(
-          padding: EdgeInsets.fromLTRB(
-            context.s(AppSpacing.xl),
-            context.s(AppSpacing.base),
-            context.s(AppSpacing.xl),
-            context.s(AppSpacing.xl),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Sign In button
-              AppButton(
-                label: 'Sign In',
-                variant: AppButtonVariant.primary,
-                onPressed: _canSubmit ? _signIn : null,
-                enabled: _canSubmit,
+                ),
               ),
-              SizedBox(height: context.s(AppSpacing.lg)),
+            ),
 
-              // Footer
-              _Footer(),
-            ],
-          ),
-        ),
-      ],
+            // Fixed bottom section with Sign In button and Footer
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                context.s(AppSpacing.xl),
+                context.s(AppSpacing.base),
+                context.s(AppSpacing.xl),
+                context.s(AppSpacing.xl),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Sign In button
+                  AppButton(
+                    label: 'Sign In',
+                    variant: AppButtonVariant.primary,
+                    onPressed: _canSubmit ? _signIn : null,
+                    enabled: _canSubmit,
+                  ),
+                  SizedBox(height: context.s(AppSpacing.lg)),
+
+                  // Footer
+                  _Footer(),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -282,7 +309,7 @@ class _MessageBox extends StatelessWidget {
       ),
       child: Text(
         message,
-        style: AppType.caption.copyWith(fontSize: 13, color: color),
+        style: AppType.caption.copyWith(fontSize: context.sp(13), color: color),
       ),
     );
   }
