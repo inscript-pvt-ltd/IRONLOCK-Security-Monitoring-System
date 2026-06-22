@@ -159,6 +159,100 @@
             position: relative;
         }
 
+        /* Notification bell (topbar, left of the profile avatar) */
+        .notif-wrap { position: relative; display: flex; align-items: center; }
+
+        .notif-bell {
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: 1.5px solid var(--border-dark);
+            border-radius: 50%;
+            color: var(--text-secondary);
+            cursor: pointer;
+            position: relative;
+            transition: border-color 0.2s ease, color 0.2s ease;
+        }
+        .notif-bell:hover { border-color: var(--premium-gold); color: var(--premium-gold); }
+        .notif-bell.has-items { color: var(--premium-gold); border-color: var(--premium-gold); }
+
+        .notif-badge {
+            position: absolute;
+            top: -4px;
+            right: -4px;
+            min-width: 16px;
+            height: 16px;
+            padding: 0 4px;
+            background: var(--critical-red);
+            color: #fff;
+            font-size: 10px;
+            font-weight: bold;
+            line-height: 16px;
+            text-align: center;
+            border-radius: 8px;
+            border: 1.5px solid var(--surface-dark);
+        }
+
+        .notif-panel {
+            position: absolute;
+            top: 40px;
+            right: 0;
+            width: 320px;
+            max-height: 420px;
+            overflow-y: auto;
+            background: var(--surface-dark);
+            border: 1.5px solid var(--border-dark);
+            border-radius: 6px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            display: none;
+            z-index: 200;
+        }
+        .notif-panel.open { display: block; }
+
+        .notif-panel-head {
+            padding: 10px 14px;
+            font-size: 10px;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-dark);
+        }
+
+        .notif-item {
+            padding: 11px 14px;
+            border-bottom: 1px solid var(--border-dark);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .notif-item:last-child { border-bottom: none; }
+        .notif-item--early-end { border-left: 3px solid var(--warning-amber); }
+        .notif-item--resolve { border-left: 3px solid var(--critical-red); }
+
+        .notif-item-title { font-size: 12px; font-weight: bold; color: var(--text-primary); }
+        .notif-item-meta { font-size: 11px; color: var(--text-secondary); }
+        .notif-item-reason { font-size: 11px; color: var(--text-muted); }
+        .notif-item-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+        .notif-item-time { font-size: 10px; color: var(--text-muted); }
+
+        .notif-view-btn {
+            font-size: 10px;
+            font-weight: bold;
+            text-decoration: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            background: var(--deep-security-blue);
+            color: #fff;
+            border: 1px solid var(--deep-security-blue);
+        }
+        .notif-view-btn:hover { background: transparent; color: var(--soft-gold); border-color: var(--premium-gold); }
+
+        .notif-empty { padding: 18px 14px; font-size: 11px; color: var(--text-muted); text-align: center; }
+
         /* Content Area */
         .content {
             padding: 16px 18px;
@@ -474,6 +568,23 @@
             <div class="topbar-filter">Site: All ▼</div>
             <div class="topbar-filter">Date: Today ▼</div>
 
+            <!-- Notifications -->
+            <div class="notif-wrap">
+                <button type="button" class="notif-bell" id="notif-bell" onclick="toggleNotifPanel(event)" aria-label="Notifications" title="Notifications">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                    </svg>
+                    <span class="notif-badge" id="notif-badge" style="display:none;">0</span>
+                </button>
+                <div class="notif-panel" id="notif-panel">
+                    <div class="notif-panel-head">Notifications</div>
+                    <div id="notif-list">
+                        <div class="notif-empty">Nothing needs your attention.</div>
+                    </div>
+                </div>
+            </div>
+
             <!-- User Menu -->
             <div class="user-menu" onclick="showUserMenu()">
                 {{ substr(session('admin_name', 'Admin'), 0, 1) }}
@@ -521,6 +632,94 @@
                 document.getElementById('logout-form').submit();
             }
         }
+
+        // ── Notification bell ──────────────────────────────────────────────
+        // Polls the admin notification feed (pending early-finish requests) and
+        // keeps the badge + dropdown in sync on every admin page. Each item has a
+        // View button that opens the shift timeline, where the request can be
+        // approved or rejected.
+        (function () {
+            var wrap   = document.querySelector('.notif-wrap');
+            var bell   = document.getElementById('notif-bell');
+            var panel  = document.getElementById('notif-panel');
+            var badge  = document.getElementById('notif-badge');
+            var list   = document.getElementById('notif-list');
+            if (!wrap || !bell || !panel || !badge || !list) return;
+
+            function escapeHtml(s) {
+                return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+                });
+            }
+
+            function timeAgo(iso) {
+                if (!iso) return '';
+                var then = new Date(iso).getTime();
+                if (isNaN(then)) return '';
+                var secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+                if (secs < 60) return 'just now';
+                var mins = Math.floor(secs / 60);
+                if (mins < 60) return mins + ' min ago';
+                var hrs = Math.floor(mins / 60);
+                if (hrs < 24) return hrs + 'h ago';
+                return Math.floor(hrs / 24) + 'd ago';
+            }
+
+            function render(items) {
+                var count = items.length;
+                if (count > 0) {
+                    badge.textContent = count > 99 ? '99+' : count;
+                    badge.style.display = '';
+                    bell.classList.add('has-items');
+                } else {
+                    badge.style.display = 'none';
+                    bell.classList.remove('has-items');
+                }
+
+                if (count === 0) {
+                    list.innerHTML = '<div class="notif-empty">Nothing needs your attention.</div>';
+                    return;
+                }
+
+                list.innerHTML = items.map(function (it) {
+                    var detail = it.detail ? '<div class="notif-item-reason">' + escapeHtml(it.detail) + '</div>' : '';
+                    var typeClass = it.type === 'resolve' ? 'notif-item--resolve' : 'notif-item--early-end';
+                    return '' +
+                        '<div class="notif-item ' + typeClass + '">' +
+                            '<div class="notif-item-title">' + escapeHtml(it.title) + '</div>' +
+                            '<div class="notif-item-meta">' + escapeHtml(it.site_name) +
+                                (it.reference ? ' · #' + escapeHtml(it.reference) : '') + '</div>' +
+                            detail +
+                            '<div class="notif-item-foot">' +
+                                '<span class="notif-item-time">' + escapeHtml(timeAgo(it.at)) + '</span>' +
+                                '<a class="notif-view-btn" href="' + escapeHtml(it.action_url) + '">' +
+                                    escapeHtml(it.action_label || 'View') + '</a>' +
+                            '</div>' +
+                        '</div>';
+                }).join('');
+            }
+
+            function load() {
+                fetch('{{ route('admin.notifications') }}', { headers: { 'Accept': 'application/json' } })
+                    .then(function (res) { return res.ok ? res.json() : null; })
+                    .then(function (data) {
+                        if (data && data.success) render(data.notifications || []);
+                    })
+                    .catch(function () { /* transient — keep last good state */ });
+            }
+
+            window.toggleNotifPanel = function (e) {
+                if (e) e.stopPropagation();
+                panel.classList.toggle('open');
+            };
+
+            document.addEventListener('click', function (e) {
+                if (!wrap.contains(e.target)) panel.classList.remove('open');
+            });
+
+            load();
+            setInterval(load, 30000);
+        })();
     </script>
     @yield('scripts')
 </body>

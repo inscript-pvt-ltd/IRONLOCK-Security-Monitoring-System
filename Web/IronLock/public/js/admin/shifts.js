@@ -1,12 +1,13 @@
 class ShiftCalendar {
     constructor() {
-        this.currentWeek = this.getCurrentWeekDates();
-        this.guards = [];
-        this.sites = [];
-        this.shifts = [];
-        this.activeShifts = [];
-        this.editingShift = null;
+        this.calendarDates     = this.getThreeMonthDates();
+        this.guards            = [];
+        this.sites             = [];
+        this.shifts            = [];
+        this.activeShifts      = [];
+        this.editingShift      = null;
         this.wtrValidationTimeout = null;
+        this.initialScrollDone = false;
 
         this.bindEvents();
     }
@@ -20,23 +21,19 @@ class ShiftCalendar {
         window.closeShiftDrawer = () => window.shiftCalendar.closeShiftDrawer();
     }
 
-    // ── Week helpers ───────────────────────────────────────────
+    // ── Calendar date range (prev month / current month / next month) ─
 
-    getCurrentWeekDates() {
+    getThreeMonthDates() {
         const today = new Date();
-        const monday = new Date(today);
-        // Monday of the week that CONTAINS today (Mon–Sun week). getDay() is
-        // 0 for Sunday, so a naive `-getDay()+1` rolls Sunday forward into next
-        // week; `(getDay()+6) % 7` gives the correct days-back for every day
-        // (Sun→6, Mon→0, …, Sat→5) so Sunday stays in the current week.
-        monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
-        monday.setHours(0, 0, 0, 0);
-
+        const y = today.getFullYear();
+        const m = today.getMonth();           // 0-indexed
+        const start = new Date(y, m - 1, 1); // 1st of previous month
+        const end   = new Date(y, m + 2, 0); // last day of next month
         const dates = [];
-        for (let i = 0; i < 7; i++) {
-            const d = new Date(monday);
-            d.setDate(monday.getDate() + i);
-            dates.push(d);
+        const cur = new Date(start);
+        while (cur <= end) {
+            dates.push(new Date(cur));
+            cur.setDate(cur.getDate() + 1);
         }
         return dates;
     }
@@ -62,13 +59,17 @@ class ShiftCalendar {
             const drawer = document.getElementById('shift-drawer');
             if (!drawer || !drawer.classList.contains('open')) return;
             if (drawer.contains(e.target)) return;
-            if (e.target.closest('#calendar-table, #new-shift-btn, #week-selector')) return;
+            if (e.target.closest('#calendar-table, #new-shift-btn, #jump-today-btn')) return;
             this.closeShiftDrawer();
         });
 
-        document.getElementById('week-selector').addEventListener('change', (e) => {
-            this.changeWeek(e.target.value);
+        document.getElementById('jump-today-btn').addEventListener('click', () => {
+            this.scrollToToday();
         });
+
+        // Re-fit the ~one-week column width when the viewport changes (window
+        // resize, or the drawer opening/closing narrows the table area).
+        window.addEventListener('resize', () => this.sizeDayColumns());
 
         document.getElementById('shift-form').addEventListener('submit', (e) => {
             e.preventDefault();
@@ -128,8 +129,54 @@ class ShiftCalendar {
         try {
             await Promise.all([this.loadGuards(), this.loadSites(), this.loadShifts()]);
             this.renderCalendar();
+            // A notification "Resolve" link lands here with ?resolve={id} — open
+            // that shift straight into its resolve drawer.
+            await this.handleResolveDeepLink();
         } catch (error) {
             console.error('Failed to load initial data:', error);
+        }
+    }
+
+    // Open a specific shift's resolve drawer when arrived at via the topbar
+    // notification ("Resolve" deep-link: /admin/shifts?resolve={id}). The shift
+    // is taken from already-loaded data when present, otherwise fetched directly
+    // so it works even when the shift falls outside the visible calendar range.
+    async handleResolveDeepLink() {
+        const params = new URLSearchParams(window.location.search);
+        const resolveId = params.get('resolve');
+        if (!resolveId) return;
+
+        // Strip the param so a refresh or Back doesn't reopen the drawer.
+        params.delete('resolve');
+        const qs = params.toString();
+        window.history.replaceState({}, '', window.location.pathname + (qs ? '?' + qs : ''));
+
+        let shift = this.shifts.find(s => s.id === resolveId)
+            || this.activeShifts.find(s => s.id === resolveId);
+
+        if (!shift) {
+            try {
+                const res = await fetch(`/admin/shifts/${resolveId}`, {
+                    headers: { 'Accept': 'application/json' },
+                    cache: 'no-store'
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.success) shift = data.shift;
+                }
+            } catch (e) {
+                console.error('Resolve deep-link fetch failed:', e);
+            }
+        }
+
+        if (!shift) return;
+
+        // A flagged shift opens in resolve mode automatically; jump straight to
+        // the outcome picker since the supervisor came here to act. If it was
+        // resolved in the meantime it simply opens read-only.
+        this.openShiftDrawer(shift.guard_id, new Date(shift.scheduled_start), shift);
+        if (shift.needs_resolution) {
+            this.showResolveForm(shift);
         }
     }
 
@@ -161,8 +208,8 @@ class ShiftCalendar {
 
     async loadShifts() {
         try {
-            const from = this.formatDate(this.currentWeek[0]);
-            const to   = this.formatDate(this.currentWeek[6]);
+            const from = this.formatDate(this.calendarDates[0]);
+            const to   = this.formatDate(this.calendarDates[this.calendarDates.length - 1]);
             const res  = await fetch(`/admin/shifts?date_from=${from}&date_to=${to}`, {
                 headers: { 'Accept': 'application/json' },
                 cache: 'no-store'
@@ -258,14 +305,38 @@ class ShiftCalendar {
     // ── Calendar rendering ─────────────────────────────────────
 
     renderCalendar() {
-        this.updateWeekLabel();
-        const table = document.getElementById('calendar-table');
-        const days  = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        const table    = document.getElementById('calendar-table');
+        const dates    = this.calendarDates;
+        const todayStr = this.formatDate(new Date());
+        const DAYS     = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-        const thead = `<thead><tr>
-            <th style="width:90px;text-align:left;">Guard</th>
-            ${this.currentWeek.map((d, i) => `<th>${days[i]} ${d.getDate()}</th>`).join('')}
-        </tr></thead>`;
+        // Build the list of months in the range (e.g. May / June / July) with
+        // each month's first date, used to render the month tabs above the
+        // calendar and to scroll to a month when its tab is clicked.
+        const monthGroups = [];
+        dates.forEach(d => {
+            const key   = `${d.getFullYear()}-${d.getMonth()}`;
+            const label = d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+            if (!monthGroups.length || monthGroups[monthGroups.length - 1].key !== key) {
+                monthGroups.push({ key, label, firstDate: this.formatDate(d) });
+            }
+        });
+
+        const thead = `<thead>
+            <tr>
+                <th style="width:90px;min-width:90px;text-align:left;padding-left:10px;">Guard</th>
+                ${dates.map(d => {
+                    const ds  = this.formatDate(d);
+                    const dow = d.getDay();
+                    const isToday   = ds === todayStr;
+                    const isWeekend = dow === 0 || dow === 6;
+                    let cls = 'cal-day-th';
+                    if (isToday)   cls += ' col-today';
+                    if (isWeekend) cls += ' col-weekend';
+                    return `<th class="${cls}" data-date="${ds}">${DAYS[dow]} ${d.getDate()}</th>`;
+                }).join('')}
+            </tr>
+        </thead>`;
 
         const shiftsByGuard = {};
         this.shifts.forEach(s => {
@@ -276,21 +347,120 @@ class ShiftCalendar {
         let tbody;
         if (this.guards.length === 0) {
             tbody = `<tbody><tr>
-                <td colspan="8" style="text-align:center;padding:28px;color:var(--text-muted);font-size:11px;">
+                <td colspan="${dates.length + 1}" style="text-align:center;padding:28px;color:var(--text-muted);font-size:11px;">
                     No guards found. Add guards first to schedule shifts.
                 </td>
             </tr></tbody>`;
         } else {
-            const rows = this.guards.map(g => this.buildGuardRow(g, shiftsByGuard[g.id] || [])).join('');
+            const rows = this.guards.map(g => this.buildGuardRow(g, shiftsByGuard[g.id] || [], todayStr)).join('');
             tbody = `<tbody>${rows}</tbody>`;
         }
 
         table.innerHTML = thead + tbody;
         this.attachCellHandlers();
+        this.sizeDayColumns();
         this.renderActiveShifts();
         this.renderWTRWarnings();
         this.renderWeeklyHours();
         this.renderOverrideLog();
+
+        // Render the month tabs (May / June / July) and highlight the one in
+        // view. They live outside the scrolling table, so the scroll listener —
+        // bound once, since the container persists across re-renders — just
+        // updates which tab is active.
+        this.buildMonthTabs(monthGroups);
+        if (!this.monthScrollBound) {
+            this.monthScrollBound = true;
+            const container = document.querySelector('.cal-container');
+            if (container) container.addEventListener('scroll', () => this.updateActiveMonthTab());
+        }
+        this.updateActiveMonthTab();
+
+        // Auto-scroll to today only on the initial page load — subsequent
+        // auto-refreshes must not reset a scroll position the admin has moved.
+        if (!this.initialScrollDone) {
+            this.initialScrollDone = true;
+            this.scrollToToday();
+        }
+    }
+
+    // ── Month tabs (above the calendar) ────────────────────────
+
+    // Render one tab per month in the range. Clicking a tab scrolls the calendar
+    // to that month's first day.
+    buildMonthTabs(monthGroups) {
+        const wrap = document.getElementById('cal-month-tabs');
+        if (!wrap) return;
+        wrap.innerHTML = monthGroups.map(g =>
+            `<button type="button" class="cal-month-tab" data-month="${g.key}" data-first="${g.firstDate}">${g.label}</button>`
+        ).join('');
+        wrap.querySelectorAll('.cal-month-tab').forEach(btn => {
+            btn.addEventListener('click', () => this.scrollToMonth(btn.dataset.first));
+        });
+    }
+
+    // Highlight the tab for the month of the first day column visible just right
+    // of the guard column. Viewport pixels (getBoundingClientRect) are used so
+    // the detection is frame-independent.
+    updateActiveMonthTab() {
+        const container = document.querySelector('.cal-container');
+        if (!container) return;
+        const GUARD_COL_W = 90;
+        const threshold = container.getBoundingClientRect().left + GUARD_COL_W;
+        const ths = document.querySelectorAll('#calendar-table th.cal-day-th[data-date]');
+        let activeKey = null;
+        for (const th of ths) {
+            if (th.getBoundingClientRect().right > threshold) {
+                const d = new Date(th.dataset.date + 'T00:00:00');
+                activeKey = `${d.getFullYear()}-${d.getMonth()}`;
+                break;
+            }
+        }
+        document.querySelectorAll('.cal-month-tab').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.month === activeKey);
+        });
+    }
+
+    // Scroll the calendar so the given date's column sits just right of the
+    // guard column. Uses relative rects + current scrollLeft so it's frame-safe.
+    scrollToMonth(firstDate) {
+        const container = document.querySelector('.cal-container');
+        const th = document.querySelector(`#calendar-table th.cal-day-th[data-date="${firstDate}"]`);
+        if (!container || !th) return;
+        const GUARD_COL_W = 90;
+        const delta = th.getBoundingClientRect().left - container.getBoundingClientRect().left - GUARD_COL_W;
+        container.scrollTo({ left: container.scrollLeft + delta, behavior: 'smooth' });
+    }
+
+    // Size the day columns so roughly one week (7 days) fills the visible
+    // viewport — the old weekly look — while the full 3-month range stays
+    // reachable via the horizontal scrollbar. Re-run on resize so the fit
+    // adapts when the window or the edit drawer changes the available width.
+    sizeDayColumns() {
+        const container = document.querySelector('.cal-container');
+        const table     = document.getElementById('calendar-table');
+        if (!container || !table) return;
+        const GUARD_COL_W = 90;
+        const avail = container.clientWidth - GUARD_COL_W;
+        // Floor to 7 columns per viewport; clamp to a readable minimum so a
+        // wide chip (e.g. "11:36PM–5:36AM →") never gets crushed on a narrow
+        // screen — it just means slightly fewer than 7 days show at once.
+        const dayW = Math.max(110, Math.floor(avail / 7));
+        table.style.setProperty('--day-col-w', dayW + 'px');
+    }
+
+    // Scroll the calendar so today's column is the first visible date column
+    // (immediately to the right of the sticky guard column).
+    scrollToToday() {
+        requestAnimationFrame(() => {
+            const container = document.querySelector('.cal-container');
+            const todayTh   = document.querySelector('#calendar-table th.col-today');
+            if (!container || !todayTh) return;
+            // offsetLeft gives the th's position relative to the table.
+            // Subtract the guard column width so today lands right at the edge.
+            container.scrollLeft = todayTh.offsetLeft - 90;
+            this.updateActiveMonthTab();
+        });
     }
 
     // ── Active shifts table ────────────────────────────────────
@@ -340,18 +510,19 @@ class ShiftCalendar {
         }[c]));
     }
 
-    buildGuardRow(guard, guardShifts) {
+    buildGuardRow(guard, guardShifts, todayStr = '') {
         const name = `${guard.first_name.charAt(0)}. ${guard.last_name}`;
 
         const cells = [];
-        const processedShifts = new Set(); // Track shifts we've already rendered to avoid duplicates
+        const processedShifts = new Set();
 
-        // New logic: Overnight shifts that span exactly 2 days within the current week
-        // are merged into a single cell with colspan="2" to avoid edit conflicts.
-
-        for (let i = 0; i < this.currentWeek.length; i++) {
-            const date = this.currentWeek[i];
+        for (let i = 0; i < this.calendarDates.length; i++) {
+            const date    = this.calendarDates[i];
             const dateStr = this.formatDate(date);
+            const dow        = date.getDay();
+            const isToday    = dateStr === todayStr;
+            const isWeekend  = dow === 0 || dow === 6;
+            const colCls     = (isToday ? ' col-today' : '') + (isWeekend ? ' col-weekend' : '');
 
             // Skip this cell if it's already been consumed by an overnight shift
             if (cells.length > i) continue;
@@ -369,17 +540,26 @@ class ShiftCalendar {
                 const endFmt   = this.fmtAmPm(new Date(dayShift.scheduled_end));
                 const isOvernight = new Date(dayShift.scheduled_end).toDateString() !== date.toDateString();
 
+                // Would the next column also host a shift that STARTS that day?
+                // (e.g. back-to-back overnights: 21→22 and 22→23.) If so, this
+                // overnight can't claim the shared column with a colspan-2 merge
+                // — the next day's shift needs it. Fall back to the single-column
+                // "→" arrow form so that shift still renders (and merges itself).
+                const nextDate = (i < this.calendarDates.length - 1) ? this.calendarDates[i + 1] : null;
+                const nextDayHasOwnShift = !!nextDate && guardShifts.some(s =>
+                    !processedShifts.has(s.id)
+                    && new Date(s.scheduled_start).toDateString() === nextDate.toDateString()
+                );
+
                 // Check if the overnight shift ends within our current week
-                const endsInWeek = isOvernight && i < this.currentWeek.length - 1
-                    && new Date(dayShift.scheduled_end).toDateString() === this.currentWeek[i + 1].toDateString();
+                const endsNextDay = isOvernight && i < this.calendarDates.length - 1
+                    && new Date(dayShift.scheduled_end).toDateString() === this.calendarDates[i + 1].toDateString()
+                    && !nextDayHasOwnShift;
 
                 const violations = dayShift.wtr_violations || [];
                 const hasWarn    = violations.some(v => v.severity === 'WARNING');
                 const hasError   = violations.some(v => v.severity === 'ERROR');
 
-                // A shift awaiting supervisor resolution (missed, or completed
-                // but ended early) overrides the normal status colour: it turns
-                // solid red and carries a ⚠ triangle so the admin can spot it.
                 const needsResolve = !!dayShift.needs_resolution;
 
                 let cls = 'shift-blk';
@@ -392,28 +572,22 @@ class ShiftCalendar {
                 if (!needsResolve && (hasWarn || hasError)) cls += ' wtr-warn-block';
 
                 const warnIcon = (!needsResolve && (hasWarn || hasError)) ? ' ⚠' : '';
-                // Build the chip's inner HTML: a leading ⚠ flag for resolve, or
-                // the trailing WTR warning icon otherwise.
                 const wrap = (label) => needsResolve
                     ? `<span class="resolve-flag">⚠</span>${label}`
                     : `${label}${warnIcon}`;
 
-                if (isOvernight && endsInWeek) {
-                    // Overnight shift that ends within the week - merge into one cell spanning two days
+                if (isOvernight && endsNextDay) {
                     const label = `${startFmt}–${endFmt}`;
-                    cells.push(`<td colspan="2" class="overnight-merged shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${wrap(label)}</span></td>`);
-
-                    // Add placeholder for the consumed next cell so our indexing stays correct
-                    cells.push(null); // This will be skipped in the final join
+                    cells.push(`<td colspan="2" class="overnight-merged shift-cell${colCls}" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${wrap(label)}</span></td>`);
+                    cells.push(null);
                 } else {
-                    // Regular shift (single day) or overnight that extends beyond the week
                     const label = isOvernight ? `${startFmt}–${endFmt} →` : `${startFmt}–${endFmt}`;
-                    cells.push(`<td class="shift-cell" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${wrap(label)}</span></td>`);
+                    cells.push(`<td class="shift-cell${colCls}" data-shift-id="${dayShift.id}"><span class="${cls}" data-shift-id="${dayShift.id}">${wrap(label)}</span></td>`);
                 }
                 continue;
             }
 
-            // Check for overnight continuation from previous day (only if not already processed as merged cell)
+            // Check for overnight continuation from previous day
             const prevDay = new Date(date);
             prevDay.setDate(date.getDate() - 1);
             const overnight = guardShifts.find(s => {
@@ -423,15 +597,14 @@ class ShiftCalendar {
             });
 
             if (overnight) {
-                // This should only happen if the shift started before our current week view
                 processedShifts.add(overnight.id);
                 const until = this.fmtAmPm(new Date(overnight.scheduled_end));
-                cells.push(`<td class="shift-cell" data-shift-id="${overnight.id}"><span class="shift-blk shift-cont" data-shift-id="${overnight.id}" title="Overnight from previous day — until ${until}">← ${until}</span></td>`);
+                cells.push(`<td class="shift-cell${colCls}" data-shift-id="${overnight.id}"><span class="shift-blk shift-cont" data-shift-id="${overnight.id}" title="Overnight from previous day — until ${until}">← ${until}</span></td>`);
                 continue;
             }
 
-            // Empty cell — click to create a new shift
-            cells.push(`<td class="day-cell" data-guard-id="${guard.id}" data-date="${dateStr}"></td>`);
+            // Empty cell — click to create a new shift on this guard/date
+            cells.push(`<td class="day-cell${colCls}" data-guard-id="${guard.id}" data-date="${dateStr}"></td>`);
         }
 
         // Filter out null placeholders and join
@@ -543,6 +716,55 @@ class ShiftCalendar {
         // Swap the Save button for Resolve.
         document.getElementById('save-shift-btn').style.display = 'none';
         document.getElementById('resolve-open-btn').style.display = 'block';
+    }
+
+    // Put the open drawer into a locked, read-only view for a shift that can no
+    // longer be edited — checked-in, active, completed, or already resolved.
+    // Fields are shown for reference only; the backend rejects an update on any
+    // of these statuses too.
+    enterReadonlyMode(shift) {
+        const banner = document.getElementById('resolve-banner');
+        banner.innerHTML = this.readonlyBanner(shift);
+        banner.style.display = 'block';
+
+        document.getElementById('drawer-title-text').textContent = 'Shift Details';
+
+        // Reference-only fields — disable so nothing can be changed.
+        ['guard-select', 'site-select', 'shift-date', 'shift-start', 'shift-duration']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+
+        // No actions apply: it can't be edited, resolved, or cancelled.
+        document.getElementById('save-shift-btn').style.display = 'none';
+        document.getElementById('resolve-open-btn').style.display = 'none';
+        document.getElementById('cancel-shift-row').style.display = 'none';
+    }
+
+    // The banner text for a locked shift, explaining why it can't be edited.
+    readonlyBanner(shift) {
+        // A supervisor-approved early finish also stamps resolved_at, but it isn't
+        // a "needs-resolution" outcome — it was an approved request. Show the
+        // approval, not the generic resolve/lock notice.
+        if (shift.end_type === 'early' || (shift.ended_early && shift.early_end_status === 'approved')) {
+            const at = shift.early_end_decided_at || shift.actual_end || shift.resolved_at;
+            const when = at ? ` at ${this.fmtAmPm(new Date(at))}, ${this.formatDate(new Date(at))}` : '';
+            return `<strong>Early finish approved</strong>This shift was ended early with supervisor approval${this.escapeHtml(when)} `
+                + `and can no longer be edited. Create a new shift if changes are needed.`;
+        }
+        if (shift.resolved_at) {
+            const when = ` on ${this.fmtAmPm(new Date(shift.resolved_at))}, ${this.formatDate(new Date(shift.resolved_at))}`;
+            return `<strong>Resolved &amp; locked</strong>This shift was resolved${this.escapeHtml(when)} `
+                + `and can no longer be edited. Create a new shift if changes are needed.`;
+        }
+        switch (shift.status) {
+            case 'checked_in':
+                return `<strong>Guard checked in</strong>This shift has begun, so it can no longer be edited.`;
+            case 'active':
+                return `<strong>Shift in progress</strong>This shift is active and can no longer be edited.`;
+            case 'completed':
+                return `<strong>Shift completed</strong>This shift has finished and can no longer be edited.`;
+            default:
+                return `<strong>Locked</strong>This shift can no longer be edited.`;
+        }
     }
 
     // Reset any resolve/cancel-mode UI back to the normal editable form. Called
@@ -782,8 +1004,23 @@ class ShiftCalendar {
             return;
         }
 
+        // The 3-month dataset spans ~90 days; sum only the current calendar
+        // week (Mon–Sun) so the WTR weekly-hours figure remains meaningful.
+        const today  = new Date();
+        const monday = new Date(today);
+        monday.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+        monday.setHours(0, 0, 0, 0);
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        sunday.setHours(23, 59, 59, 999);
+
         this.guards.forEach(guard => {
-            const gShifts = this.shifts.filter(s => s.guard_id === guard.id && s.status !== 'cancelled');
+            const gShifts = this.shifts.filter(s =>
+                s.guard_id === guard.id &&
+                s.status !== 'cancelled' &&
+                new Date(s.scheduled_start) >= monday &&
+                new Date(s.scheduled_start) <= sunday
+            );
             const totalMins = gShifts.reduce((sum, s) => {
                 return sum + (new Date(s.scheduled_end) - new Date(s.scheduled_start)) / 60000;
             }, 0);
@@ -822,7 +1059,7 @@ class ShiftCalendar {
         if (!summary) return;
 
         if (allOverrides.length === 0) {
-            summary.textContent = '[ No overrides this week ]';
+            summary.textContent = '[ No overrides this period ]';
             toggle.style.display = 'none';
             entries.style.display = 'none';
             entries.innerHTML = '';
@@ -830,7 +1067,7 @@ class ShiftCalendar {
         }
 
         const n = allOverrides.length;
-        summary.textContent = `${n} override${n !== 1 ? 's' : ''} this week`;
+        summary.textContent = `${n} override${n !== 1 ? 's' : ''} this period`;
         toggle.style.display = 'inline';
 
         // Reset to collapsed on each re-render
@@ -916,10 +1153,17 @@ class ShiftCalendar {
         // A flagged shift (missed / ended-early) opens in resolve mode instead
         // of the editable form.
         const flagged = !!(shift && shift.needs_resolution);
+        // Only an un-resolved scheduled shift is editable. Anything else —
+        // checked-in, active, completed, or already resolved — is locked.
+        const editable = !!(shift && shift.status === 'scheduled' && !shift.resolved_at);
         if (flagged) {
             this.enterResolveFlaggedMode(shift);
-        } else if (shift && (shift.status === 'scheduled' || shift.status === 'checked_in')) {
-            // Editing a shift that hasn't started yet — offer Cancel Shift.
+        } else if (shift && !editable) {
+            // Locked: open read-only with a banner explaining why.
+            this.enterReadonlyMode(shift);
+        } else if (editable) {
+            // A scheduled shift that hasn't begun yet — offer Cancel Shift. Once
+            // a guard has checked in (or the shift is active) cancellation is gone.
             document.getElementById('cancel-shift-row').style.display = 'flex';
 
             // If its start time is already in the past, the backend will reject a
@@ -1195,38 +1439,6 @@ class ShiftCalendar {
             saveBtn.disabled    = false;
             saveBtn.textContent = 'Save';
         }
-    }
-
-    // ── Week navigation ────────────────────────────────────────
-
-    changeWeek(direction) {
-        const offset = direction === 'next' ? 7 : direction === 'prev' ? -7 : 0;
-        this.currentWeek = this.currentWeek.map(d => {
-            const nd = new Date(d);
-            nd.setDate(d.getDate() + offset);
-            return nd;
-        });
-        this.loadShifts().then(() => this.renderCalendar());
-    }
-
-    // Drive the week-selector label from the SAME currentWeek array the grid
-    // renders, so the label can never disagree with the columns (the old PHP
-    // `date()` label used server/UTC time and could drift a day). next/prev act
-    // as one-shot nav: after each move we reset the select to "current" and
-    // relabel it with the week now on screen.
-    updateWeekLabel() {
-        const sel = document.getElementById('week-selector');
-        if (!sel) return;
-        const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        const first = this.currentWeek[0];
-        const last  = this.currentWeek[6];
-        const range = first.getMonth() === last.getMonth()
-            ? `${first.getDate()}–${last.getDate()} ${MONTHS[last.getMonth()]}`
-            : `${first.getDate()} ${MONTHS[first.getMonth()]} – ${last.getDate()} ${MONTHS[last.getMonth()]}`;
-        const opt = sel.querySelector('option[value="current"]');
-        if (opt) opt.textContent = `Week: ${range}`;
-        sel.value = 'current';
     }
 
     // ── Error helpers ──────────────────────────────────────────

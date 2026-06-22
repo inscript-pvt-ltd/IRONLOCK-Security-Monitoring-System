@@ -64,6 +64,16 @@ class Shift extends Model
         'attendance_reason',
         'attendance_note',
         'ended_early',
+        'end_type',
+        'auto_closed',
+        'end_reason',
+        'end_note',
+        'early_end_status',
+        'early_end_reason',
+        'early_end_note',
+        'early_end_requested_at',
+        'early_end_decided_at',
+        'early_end_decided_by',
         'resolved_at',
         'totp_seed',
         'status',
@@ -85,6 +95,7 @@ class Shift extends Model
         'needs_resolution',
         'resolution_kind',
         'can_recover_late',
+        'early_end_request',
     ];
 
     protected function casts(): array
@@ -97,6 +108,9 @@ class Shift extends Model
             'checked_in_at' => 'datetime',
             'checkin_override_until' => 'datetime',
             'ended_early' => 'boolean',
+            'auto_closed' => 'boolean',
+            'early_end_requested_at' => 'datetime',
+            'early_end_decided_at' => 'datetime',
             'resolved_at' => 'datetime',
             'compliance_summary' => 'array',
             'created_at' => 'datetime',
@@ -113,6 +127,23 @@ class Shift extends Model
     const STATUS_COMPLETED = 'completed';
     const STATUS_CANCELLED = 'cancelled';
     const STATUS_MISSED = 'missed';
+
+    /**
+     * How a completed shift was closed (BACKEND_SHIFT_END_SPEC §3).
+     *  - guard : ended on/after scheduled_end via the app (trustworthy)
+     *  - early : ended before scheduled_end, supervisor-approved (reason on file)
+     *  - auto  : server force-closed an overdue shift (flag for supervisor)
+     */
+    const END_TYPE_GUARD = 'guard';
+    const END_TYPE_EARLY = 'early';
+    const END_TYPE_AUTO = 'auto';
+
+    /**
+     * Lifecycle of the single open early-end request on a shift.
+     */
+    const EARLY_END_PENDING = 'pending';
+    const EARLY_END_APPROVED = 'approved';
+    const EARLY_END_REJECTED = 'rejected';
 
     /**
      * The configured check-in / start window, in minutes either side of
@@ -194,6 +225,14 @@ class Shift extends Model
     public function lateAuthorizer(): BelongsTo
     {
         return $this->belongsTo(Admin::class, 'late_authorized_by');
+    }
+
+    /**
+     * Get the admin who approved/rejected the early-end request, if any.
+     */
+    public function earlyEndDecider(): BelongsTo
+    {
+        return $this->belongsTo(Admin::class, 'early_end_decided_by');
     }
 
     /**
@@ -327,11 +366,49 @@ class Shift extends Model
     }
 
     /**
-     * Check if shift can be ended now.
+     * Whether a NORMAL (on-time) end is allowed right now. A guard may only end
+     * their own shift once the contracted end time has passed — leaving before
+     * scheduled_end requires the supervisor-approved early-end flow instead.
+     * @see canEndEarly(), BACKEND_SHIFT_END_SPEC §1
      */
     public function canEnd(): bool
     {
-        return $this->status === self::STATUS_ACTIVE;
+        return $this->status === self::STATUS_ACTIVE
+            && $this->scheduled_end !== null
+            && Carbon::now()->greaterThanOrEqualTo($this->scheduled_end);
+    }
+
+    /**
+     * Whether the guard may request to leave early — an active shift that has
+     * not yet reached its scheduled end. The request itself does not end the
+     * shift; a supervisor must approve it first.
+     */
+    public function canRequestEarlyEnd(): bool
+    {
+        return $this->status === self::STATUS_ACTIVE
+            && $this->scheduled_end !== null
+            && Carbon::now()->lessThan($this->scheduled_end);
+    }
+
+    /**
+     * Whether an early end may be carried out now — i.e. there is a supervisor
+     * APPROVED request on file. The server is the authority: a tampered client
+     * cannot end early without this.
+     */
+    public function canEndEarly(): bool
+    {
+        return $this->status === self::STATUS_ACTIVE
+            && $this->early_end_status === self::EARLY_END_APPROVED;
+    }
+
+    public function hasPendingEarlyEnd(): bool
+    {
+        return $this->early_end_status === self::EARLY_END_PENDING;
+    }
+
+    public function hasApprovedEarlyEnd(): bool
+    {
+        return $this->early_end_status === self::EARLY_END_APPROVED;
     }
 
     /**
@@ -393,11 +470,20 @@ class Shift extends Model
     }
 
     /**
-     * End the shift.
+     * End an active shift.
+     *
+     * @param string|null $endedBy who/what closed it (defaults to mobile_app)
+     * @param string      $endType END_TYPE_GUARD (normal) or END_TYPE_EARLY (approved)
+     * @param string|null $reason  early-end reason (mirrors the approved request)
+     * @param string|null $note    early-end free-text note
      */
-    public function end(?string $endedBy = null): bool
-    {
-        if (!$this->canEnd()) {
+    public function end(
+        ?string $endedBy = null,
+        string $endType = self::END_TYPE_GUARD,
+        ?string $reason = null,
+        ?string $note = null
+    ): bool {
+        if ($this->status !== self::STATUS_ACTIVE) {
             return false;
         }
 
@@ -405,22 +491,136 @@ class Shift extends Model
         // getActualDurationAttribute() sees the correct value inside generateComplianceSummary().
         $this->actual_end = Carbon::now();
 
-        // Flag an early finish for supervisor resolution: the guard ended more
-        // than one window (the same ±15-min grace used elsewhere) before the
-        // scheduled end. This drives the red ⚠ on the schedule until resolved.
+        // Record whether this finished materially before the scheduled end (same
+        // ±window grace used elsewhere) for reporting/payroll.
         $endedEarly = $this->actual_end->lessThan(
             $this->scheduled_end->copy()->subMinutes(self::windowMinutes())
         );
 
-        $this->update([
+        $attributes = [
             'status' => self::STATUS_COMPLETED,
             'actual_end' => $this->actual_end,
             'ended_by' => $endedBy ?? 'mobile_app',
             'ended_early' => $endedEarly,
-            'compliance_summary' => $this->generateComplianceSummary()
+            'end_type' => $endType,
+            'end_reason' => $reason,
+            'end_note' => $note,
+            'compliance_summary' => $this->generateComplianceSummary(),
+        ];
+
+        // A pre-approved early end has already been signed off by a supervisor —
+        // the approval IS its resolution, so stamp resolved_at to keep it off the
+        // red ⚠ list rather than asking them to resolve it a second time.
+        if ($endType === self::END_TYPE_EARLY) {
+            $attributes['resolved_at'] = $this->actual_end;
+        }
+
+        $this->update($attributes);
+
+        return true;
+    }
+
+    /**
+     * Server-forced close of an overdue shift the guard never ended
+     * (BACKEND_SHIFT_END_SPEC §2). actual_end is set to scheduled_end — the
+     * contracted boundary — because there is no trustworthy signal the guard
+     * stayed on past it; crediting time up to "now" would over-pay coverage.
+     * Flagged auto_closed so it surfaces in supervisor reporting.
+     */
+    public function autoClose(): bool
+    {
+        if ($this->status !== self::STATUS_ACTIVE) {
+            return false;
+        }
+
+        $this->actual_end = $this->scheduled_end;
+
+        $this->update([
+            'status' => self::STATUS_COMPLETED,
+            'actual_end' => $this->actual_end,
+            'ended_by' => 'system_auto_close',
+            'ended_early' => false,
+            'end_type' => self::END_TYPE_AUTO,
+            'auto_closed' => true,
+            'compliance_summary' => $this->generateComplianceSummary(),
         ]);
 
         return true;
+    }
+
+    /**
+     * Record (or overwrite) a guard's request to leave early. One open request
+     * per shift: a re-request after a rejection simply replaces the prior one.
+     * Does NOT end the shift — it stays active until a supervisor approves and
+     * the guard then ends it.
+     */
+    public function requestEarlyEnd(string $reason, ?string $note = null): bool
+    {
+        if (!$this->canRequestEarlyEnd()) {
+            return false;
+        }
+
+        $this->update([
+            'early_end_status' => self::EARLY_END_PENDING,
+            'early_end_reason' => $reason,
+            'early_end_note' => $note,
+            'early_end_requested_at' => Carbon::now(),
+            'early_end_decided_at' => null,
+            'early_end_decided_by' => null,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Apply a supervisor's decision to the pending early-end request. This is
+     * how the guard's phone learns the outcome (it polls GET /shifts/current).
+     *
+     * @param string      $decision EARLY_END_APPROVED or EARLY_END_REJECTED
+     * @param string|null $adminId  the deciding supervisor
+     */
+    public function decideEarlyEnd(string $decision, ?string $adminId = null): bool
+    {
+        if ($this->early_end_status !== self::EARLY_END_PENDING) {
+            return false;
+        }
+
+        $this->update([
+            'early_end_status' => $decision,
+            'early_end_decided_at' => Carbon::now(),
+            'early_end_decided_by' => $adminId,
+        ]);
+
+        return true;
+    }
+
+    /**
+     * The early-end request object exposed on the shift payload (§0.3), or null
+     * when there is no outstanding request. Once completed there is nothing the
+     * app needs to act on, so it is suppressed.
+     */
+    public function earlyEndRequestPayload(): ?array
+    {
+        if ($this->early_end_status === null || $this->status === self::STATUS_COMPLETED) {
+            return null;
+        }
+
+        return [
+            'status' => $this->early_end_status,
+            'reason' => $this->early_end_reason,
+            'note' => $this->early_end_note,
+            'requested_at' => optional($this->early_end_requested_at)->toISOString(),
+            'decided_at' => optional($this->early_end_decided_at)->toISOString(),
+            'decided_by' => $this->early_end_decided_by,
+        ];
+    }
+
+    /**
+     * Accessor for the appended `early_end_request` JSON attribute.
+     */
+    public function getEarlyEndRequestAttribute(): ?array
+    {
+        return $this->earlyEndRequestPayload();
     }
 
     /**

@@ -20,6 +20,10 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('/', [App\Http\Controllers\Admin\DashboardController::class, 'index'])->name('dashboard');
         Route::get('dashboard', [App\Http\Controllers\Admin\DashboardController::class, 'index']);
 
+        // Topbar notification feed (pending early-end requests today). Polled by
+        // the bell in the admin layout on every page.
+        Route::get('notifications', [App\Http\Controllers\Admin\DashboardController::class, 'notifications'])->name('notifications');
+
         // Guard Management routes - D-05 Wireframe with Drawer UI
         Route::get('guards', [App\Http\Controllers\Admin\GuardController::class, 'index'])->name('guards.index');
         Route::get('guards/list', [App\Http\Controllers\Admin\GuardController::class, 'list'])->name('guards.list'); // Must be before parameterized routes
@@ -62,6 +66,8 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::put('shifts/{shift}', [App\Http\Controllers\Admin\ShiftController::class, 'update'])->name('shifts.update');
         Route::patch('shifts/{shift}/cancel', [App\Http\Controllers\Admin\ShiftController::class, 'cancel'])->name('shifts.cancel');
         Route::patch('shifts/{shift}/resolve', [App\Http\Controllers\Admin\ShiftController::class, 'resolve'])->name('shifts.resolve');
+        Route::patch('shifts/{shift}/early-end/approve', [App\Http\Controllers\Admin\ShiftController::class, 'approveEarlyEnd'])->name('shifts.early-end.approve');
+        Route::patch('shifts/{shift}/early-end/reject', [App\Http\Controllers\Admin\ShiftController::class, 'rejectEarlyEnd'])->name('shifts.early-end.reject');
 
         // API status endpoint
         Route::get('status', function () {

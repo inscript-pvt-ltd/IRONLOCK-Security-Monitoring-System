@@ -9,6 +9,7 @@ use App\Http\Controllers\Mobile\Concerns\InteractsWithMobileApi;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
 /**
@@ -126,7 +127,14 @@ class ShiftController extends Controller
     }
 
     /**
-     * POST /shifts/{id}/end — end an active shift.
+     * POST /shifts/{id}/end — end an active shift (BACKEND_SHIFT_END_SPEC §1).
+     *
+     * Two paths, both server-enforced:
+     *  - Normal end (ended_early:false): allowed only once scheduled_end has
+     *    passed. Before then the guard must go through the early-end request.
+     *  - Early end (ended_early:true): allowed only when a supervisor has
+     *    APPROVED the early-end request — the server never trusts the client to
+     *    self-approve. The stored request reason/note are used as the record.
      */
     public function end(Request $request, string $id): JsonResponse
     {
@@ -148,15 +156,55 @@ class ShiftController extends Controller
             return $this->apiError('FORBIDDEN', 'This shift is not assigned to you.', 403);
         }
 
-        if (!$shift->canEnd()) {
+        if ($shift->status !== Shift::STATUS_ACTIVE) {
             return $this->apiError('SHIFT_NOT_ENDABLE', 'This shift is not active.', 409);
         }
 
-        $shift->end(); // status -> completed, stamps actual_end + compliance summary
+        $endedEarly = $request->boolean('ended_early');
+        $reason = $request->input('reason');
+        $note = $request->input('note');
+
+        if ($endedEarly) {
+            // The server is the authority: refuse an early end without an
+            // approved request so a tampered client cannot skip approval.
+            if (!$shift->hasApprovedEarlyEnd()) {
+                return $this->apiError(
+                    'EARLY_END_NOT_APPROVED',
+                    'Your early-end request has not been approved by a supervisor.',
+                    409
+                );
+            }
+
+            // Trust the reason/note recorded on the approved request; fall back
+            // to the client-supplied values only to fill a gap. Never reject an
+            // approved end over a missing reason — close it and flag for review.
+            $reason = $shift->early_end_reason ?: $reason;
+            $note = $shift->early_end_note ?: $note;
+            $endType = Shift::END_TYPE_EARLY;
+        } else {
+            // A normal end is only honest once the contracted end has passed.
+            if (!$shift->canEnd()) {
+                return $this->apiError(
+                    'END_BEFORE_SCHEDULED',
+                    'You cannot end this shift before its scheduled end time. Request an early end if you need to leave.',
+                    409
+                );
+            }
+
+            $endType = Shift::END_TYPE_GUARD;
+            $reason = null;
+            $note = null;
+        }
+
+        $shift->end('mobile_app', $endType, $reason, $note);
         $shift->refresh();
 
         $this->logShiftEvent($shift, 'SHIFT_ENDED', [
             'actual_end' => optional($shift->actual_end)->toISOString(),
+            'end_type' => $shift->end_type,
+            'ended_early' => (bool) $shift->ended_early,
+            'reason' => $reason,
+            'note' => $note,
         ]);
 
         return $this->apiSuccess([
@@ -164,11 +212,71 @@ class ShiftController extends Controller
                 'id' => $shift->id,
                 'reference' => $shift->reference,
                 'status' => $shift->status,
+                'end_type' => $shift->end_type,
                 'actual_start' => optional($shift->actual_start)->toISOString(),
                 'actual_end' => optional($shift->actual_end)->toISOString(),
                 'duration_hours' => $shift->actual_duration !== null ? round($shift->actual_duration, 2) : null,
             ],
         ]);
+    }
+
+    /**
+     * POST /shifts/{id}/early-end-request — guard asks to leave before
+     * scheduled_end (BACKEND_SHIFT_END_SPEC §0.1). Does NOT end the shift; it
+     * records a pending request for a supervisor to approve/reject. The app
+     * locks its END button and polls GET /shifts/current for the decision.
+     */
+    public function earlyEndRequest(Request $request, string $id): JsonResponse
+    {
+        \Log::info('Mobile Early End Request', [
+            'headers' => $request->headers->all(),
+            'body'    => $request->all(),
+            'ip'      => $request->ip(),
+        ]);
+
+        $guard = $this->currentGuard($request);
+
+        $shift = Shift::find($id);
+
+        if (!$shift) {
+            return $this->apiError('NOT_FOUND', 'Shift not found.', 404);
+        }
+
+        if ($shift->guard_id !== $guard->id) {
+            return $this->apiError('FORBIDDEN', 'This shift is not assigned to you.', 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'reason' => 'required|string|max:100',
+            'note' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->apiError('VALIDATION_ERROR', 'Please provide a reason for leaving early.', 422, $validator->errors()->toArray());
+        }
+
+        // Only valid for an active shift before its scheduled end; otherwise the
+        // app falls back to a normal end.
+        if (!$shift->canRequestEarlyEnd()) {
+            return $this->apiError(
+                'EARLY_END_NOT_APPLICABLE',
+                'An early-end request can only be made during an active shift before its scheduled end.',
+                409
+            );
+        }
+
+        $shift->requestEarlyEnd($request->input('reason'), $request->input('note'));
+        $shift->refresh();
+
+        $this->logShiftEvent($shift, 'EARLY_END_REQUESTED', [
+            'reason' => $shift->early_end_reason,
+            'note' => $shift->early_end_note,
+            'requested_at' => optional($shift->early_end_requested_at)->toISOString(),
+        ]);
+
+        // NOTE: supervisor notification (push/dashboard) is handled out of band.
+
+        return $this->apiSuccess(['shift' => $this->shiftPayload($shift)]);
     }
 
     /**
@@ -207,6 +315,8 @@ class ShiftController extends Controller
             'actual_end' => optional($shift->actual_end)->toISOString(),
             'can_start' => $shift->canStart(),
             'can_end' => $shift->canEnd(),
+            'can_request_early_end' => $shift->canRequestEarlyEnd(),
+            'early_end_request' => $shift->earlyEndRequestPayload(),
             'site' => $shift->site ? [
                 'id' => $shift->site->id,
                 'name' => $shift->site->name,

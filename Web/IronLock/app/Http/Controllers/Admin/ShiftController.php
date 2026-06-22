@@ -238,12 +238,12 @@ class ShiftController extends Controller
             $shift = Shift::with(['assignedGuard', 'site', 'geofence', 'creator', 'lateAuthorizer'])
                 ->findOrFail($id);
 
-            // Append-only audit trail, oldest first, ordered by the authoritative
-            // server timestamp so the timeline reads chronologically.
+            // Append-only audit trail, newest first, ordered by the authoritative
+            // server timestamp so the most recent activity reads at the top.
             $events = ShiftEvent::with('assignedGuard')
                 ->where('shift_id', $shift->id)
-                ->orderBy('server_received_at')
-                ->orderBy('created_at')
+                ->orderByDesc('server_received_at')
+                ->orderByDesc('created_at')
                 ->get();
 
             return view('admin.shifts.timeline', compact('shift', 'events'));
@@ -293,15 +293,28 @@ class ShiftController extends Controller
         try {
             $shift = Shift::findOrFail($id);
 
-            // Prevent updating active or completed shifts. Missed shifts are
-            // handled through the resolve() recovery flow, not the edit form.
-            if (in_array($shift->status, ['active', 'completed', 'missed'])) {
-                $label = $shift->status === 'missed' ? 'missed' : $shift->status;
+            // A resolved shift is locked. Once a supervisor has recorded an
+            // outcome (late authorisation, excuse, reassignment, no-show) the
+            // schedule must not be quietly rewritten — editing is closed off
+            // entirely. The form opens read-only, but enforce it here too so the
+            // API itself can't be used to bypass the lock.
+            if ($shift->resolved_at) {
                 return response()->json([
                     'success' => false,
-                    'error' => $shift->status === 'missed'
+                    'error' => 'This shift has already been resolved and is locked. Create a new shift if changes are needed.'
+                ], 422);
+            }
+
+            // Only a scheduled shift can be edited. Once a guard has checked in,
+            // the shift is active, or it has finished (completed/missed), the
+            // schedule is fixed: a missed shift is handled via resolve(), and an
+            // early stop on an active shift goes through End → early-finish.
+            if ($shift->status !== Shift::STATUS_SCHEDULED) {
+                return response()->json([
+                    'success' => false,
+                    'error' => $shift->status === Shift::STATUS_MISSED
                         ? 'Use Resolve to handle a missed shift.'
-                        : 'Cannot modify ' . $label . ' shifts'
+                        : 'Only a scheduled shift can be edited. This shift has already begun or finished.'
                 ], 422);
             }
 
@@ -443,12 +456,13 @@ class ShiftController extends Controller
      * Cancel a shift before the guard goes on duty.
      *
      * For a shift called off ahead of time — a scheduling mistake (wrong
-     * day/guard/site) or a short-notice emergency. Only a shift that has not
-     * yet started can be cancelled (scheduled or checked_in); an active shift
-     * that must stop early goes through End → early-finish resolution instead,
-     * and a missed shift is excused via resolve(). The cancellation reason +
-     * note are stored on the shift and an immutable SHIFT_CANCELLED event is
-     * appended for the audit trail.
+     * day/guard/site) or a short-notice emergency. Only a scheduled shift can
+     * be cancelled; once a guard has checked in or the shift is active it has
+     * already begun, so an early stop goes through End → early-finish
+     * resolution instead, and a missed shift is excused via resolve(). Because
+     * a cancelled shift
+     * will never run, it is deleted outright — removed from the table along with
+     * its dependent rows — rather than kept as a Cancelled record.
      */
     public function cancel(Request $request, string $id): JsonResponse
     {
@@ -464,31 +478,29 @@ class ShiftController extends Controller
         try {
             $shift = Shift::findOrFail($id);
 
-            if (!in_array($shift->status, [Shift::STATUS_SCHEDULED, Shift::STATUS_CHECKED_IN], true)) {
+            if ($shift->status !== Shift::STATUS_SCHEDULED) {
                 return response()->json([
                     'success' => false,
-                    'error' => 'Only a shift that has not started yet can be cancelled.'
+                    'error' => 'Only a scheduled shift can be cancelled. Once a guard has checked in or started, cancellation is no longer available.'
                 ], 422);
             }
 
-            $reason = $request->input('reason');
-            $note = $request->input('note');
-            $previousStatus = $shift->status;
-            $adminId = $this->currentAdminId();
-
+            // A cancelled shift will never run, so it is removed from the system
+            // entirely. Clear every child row that references it first — most of
+            // these only exist once a guard is on duty, but a checked-in shift
+            // can already have some (a nonce, a check-in event), and only
+            // working_time_overrides has a cascading FK, so the rest must be
+            // deleted explicitly or the delete would hit a foreign-key constraint.
             DB::beginTransaction();
             try {
-                $shift->update([
-                    'status' => Shift::STATUS_CANCELLED,
-                    'attendance_reason' => $reason,
-                    'attendance_note' => $note,
-                ]);
-                $this->logShiftEvent($shift, 'SHIFT_CANCELLED', [
-                    'reason' => $reason,
-                    'note' => $note,
-                    'previous_status' => $previousStatus,
-                    'cancelled_by' => $adminId,
-                ]);
+                foreach ([
+                    'shift_events', 'working_time_overrides', 'nonces', 'photo_requests',
+                    'wakefulness_checks', 'alerts', 'reports', 'guard_locations',
+                    'offline_sync_queue',
+                ] as $childTable) {
+                    DB::table($childTable)->where('shift_id', $shift->id)->delete();
+                }
+                $shift->delete();
                 DB::commit();
             } catch (\Throwable $e) {
                 DB::rollBack();
@@ -497,8 +509,9 @@ class ShiftController extends Controller
 
             return response()->json([
                 'success' => true,
-                'message' => 'Shift cancelled successfully',
-                'shift' => $shift->fresh()->load('assignedGuard', 'site', 'geofence'),
+                'message' => 'Shift cancelled and removed.',
+                'deleted' => true,
+                'shift_id' => $id,
             ]);
         } catch (ModelNotFoundException $e) {
             return response()->json([
@@ -733,6 +746,73 @@ class ShiftController extends Controller
             return response()->json([
                 'success' => false,
                 'error' => 'Unable to resolve shift. Please try again.'
+            ], 500);
+        }
+    }
+
+    /**
+     * Approve a guard's pending early-end request (BACKEND_SHIFT_END_SPEC §0.2).
+     * The guard's phone learns of this by polling GET /shifts/current; once
+     * approved it unlocks END and the guard finishes the shift early.
+     */
+    public function approveEarlyEnd(Request $request, string $id): JsonResponse
+    {
+        return $this->decideEarlyEnd($id, Shift::EARLY_END_APPROVED);
+    }
+
+    /**
+     * Reject a guard's pending early-end request. The guard may submit a fresh
+     * request or keep working through to the scheduled end.
+     */
+    public function rejectEarlyEnd(Request $request, string $id): JsonResponse
+    {
+        return $this->decideEarlyEnd($id, Shift::EARLY_END_REJECTED);
+    }
+
+    /**
+     * Shared approve/reject handler — records the supervisor's decision on the
+     * pending early-end request and audits it. The server is the authority on
+     * early ends; only an approved request lets the guard's POST /end succeed.
+     */
+    private function decideEarlyEnd(string $id, string $decision): JsonResponse
+    {
+        try {
+            $shift = Shift::findOrFail($id);
+
+            if (!$shift->hasPendingEarlyEnd()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'There is no pending early-end request for this shift.',
+                ], 422);
+            }
+
+            $adminId = $this->currentAdminId();
+            $shift->decideEarlyEnd($decision, $adminId);
+
+            $this->logShiftEvent(
+                $shift,
+                $decision === Shift::EARLY_END_APPROVED ? 'EARLY_END_REQUEST_APPROVED' : 'EARLY_END_REQUEST_REJECTED',
+                [
+                    'reason' => $shift->early_end_reason,
+                    'note' => $shift->early_end_note,
+                    'decided_by' => $adminId,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => $decision === Shift::EARLY_END_APPROVED
+                    ? 'Early-end request approved.'
+                    : 'Early-end request rejected.',
+                'shift' => $shift->fresh()->load('assignedGuard', 'site', 'geofence'),
+            ]);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['success' => false, 'error' => 'Shift not found'], 404);
+        } catch (\Exception $e) {
+            Log::error('Error deciding early-end request', ['shift_id' => $id, 'decision' => $decision, 'exception' => $e]);
+            return response()->json([
+                'success' => false,
+                'error' => 'Unable to update the early-end request. Please try again.',
             ], 500);
         }
     }

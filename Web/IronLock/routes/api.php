@@ -40,6 +40,7 @@ Route::prefix('mobile/v1')->middleware(\App\Http\Middleware\LogMobileApiActivity
 
         Route::get('shifts/current', [ShiftController::class, 'current']);
         Route::post('shifts/{id}/start', [ShiftController::class, 'start']);
+        Route::post('shifts/{id}/early-end-request', [ShiftController::class, 'earlyEndRequest']);
         Route::post('shifts/{id}/end', [ShiftController::class, 'end']);
 
         // Reserved (Phase 3.3+) — shapes frozen in the contract (§6); these
