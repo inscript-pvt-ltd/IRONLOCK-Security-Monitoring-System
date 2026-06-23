@@ -29,17 +29,25 @@
             --warning-amber: #F59E0B;
             --error-red: #EF4444;
             --critical-red: #DC2626;
+
+            /* Shared height for the topbar and the sidebar logo block, so their
+               bottom borders line up across the top of the dashboard. */
+            --header-h: 56px;
         }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--bg-dark);
             color: var(--text-primary);
-            min-height: 100vh;
+            /* Pin the whole shell to the viewport so the sidebar and topbar stay
+               put — only the content area scrolls (see .content). */
+            height: 100vh;
+            overflow: hidden;
             display: flex;
         }
 
-        /* Sidebar Navigation */
+        /* Sidebar Navigation — full viewport height; the nav-spacer keeps the
+           logo pinned to the top and Settings to the bottom of the screen. */
         .sidebar {
             width: 180px;
             flex-shrink: 0;
@@ -47,16 +55,25 @@
             border-right: 1.5px solid var(--border-dark);
             display: flex;
             flex-direction: column;
+            height: 100vh;
+            overflow-y: auto;
         }
 
         .sidebar-logo {
-            padding: 16px;
+            height: var(--header-h);
+            flex-shrink: 0;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             border-bottom: 1.5px solid var(--border-dark);
             margin-bottom: 8px;
         }
 
         .logo img {
-            width: 70%;
+            max-width: 100%;
+            max-height: 32px;
+            width: auto;
             height: auto;
             display: block;
             margin-inline: auto;
@@ -87,11 +104,33 @@
         }
 
         .nav-icon {
-            width: 14px;
-            height: 14px;
-            background: var(--border-dark);
-            border-radius: 2px;
+            width: 16px;
+            height: 16px;
             flex-shrink: 0;
+            display: block;
+            color: inherit;
+            transform-origin: center;
+        }
+
+        /* Bounce the icon in place on hover/click. translateY-only so it returns
+           to its exact spot and never nudges the label or neighbours. */
+        @keyframes nav-icon-bounce {
+            0%, 100% { transform: translateY(0); }
+            30%      { transform: translateY(-5px); }
+            55%      { transform: translateY(0); }
+            75%      { transform: translateY(-2px); }
+        }
+
+        /* A sharper one-shot pop for the click. */
+        @keyframes nav-icon-pop {
+            0%   { transform: translateY(0) scale(1); }
+            35%  { transform: translateY(-6px) scale(1.18); }
+            100% { transform: translateY(0) scale(1); }
+        }
+
+        /* A punchier pop on the actual press (hover no longer animates). */
+        .nav-item:active .nav-icon {
+            animation: nav-icon-pop 0.4s ease;
         }
 
         .nav-badge {
@@ -120,7 +159,7 @@
         .topbar {
             background: var(--surface-dark);
             border-bottom: 1.5px solid var(--border-dark);
-            height: 48px;
+            height: var(--header-h);
             display: flex;
             align-items: center;
             padding: 0 18px;
@@ -178,6 +217,32 @@
         }
         .notif-bell:hover { border-color: var(--premium-gold); color: var(--premium-gold); }
         .notif-bell.has-items { color: var(--premium-gold); border-color: var(--premium-gold); }
+
+        /* Ring the bell when a NEW alert arrives (triggered from JS, see below).
+           Swings from the top like a real bell and settles back in place. */
+        @keyframes notif-bell-ring {
+            0%   { transform: rotate(0); }
+            10%  { transform: rotate(18deg); }
+            20%  { transform: rotate(-15deg); }
+            30%  { transform: rotate(12deg); }
+            40%  { transform: rotate(-9deg); }
+            50%  { transform: rotate(6deg); }
+            60%  { transform: rotate(-4deg); }
+            70%  { transform: rotate(2deg); }
+            100% { transform: rotate(0); }
+        }
+        .notif-bell.ringing svg {
+            transform-origin: top center;
+            animation: notif-bell-ring 0.9s ease;
+        }
+
+        /* The badge pops in alongside the ring. */
+        @keyframes notif-badge-pop {
+            0%   { transform: scale(0.5); }
+            55%  { transform: scale(1.3); }
+            100% { transform: scale(1); }
+        }
+        .notif-badge.pop { animation: notif-badge-pop 0.45s ease; }
 
         .notif-badge {
             position: absolute;
@@ -253,11 +318,39 @@
 
         .notif-empty { padding: 18px 14px; font-size: 11px; color: var(--text-muted); text-align: center; }
 
-        /* Content Area */
+        /* Content Area — the only scrolling region; min-height:0 lets it shrink
+           inside the flex column so its own scrollbar engages (not the window). */
         .content {
             padding: 16px 18px;
             flex: 1;
+            min-height: 0;
             overflow-y: auto;
+        }
+
+        /* Custom scrollbar — same blue/gold treatment used by the schedule
+           table (.cal-container) and the drawers, applied to the app shell's
+           two scroll regions (main content + sidebar). */
+        .content,
+        .sidebar {
+            scrollbar-width: thin;
+            scrollbar-color: var(--deep-security-blue) var(--bg-dark);
+        }
+        .content::-webkit-scrollbar,
+        .sidebar::-webkit-scrollbar { width: 10px; }
+        .content::-webkit-scrollbar-track,
+        .sidebar::-webkit-scrollbar-track {
+            background: var(--bg-dark);
+            border-radius: 4px;
+        }
+        .content::-webkit-scrollbar-thumb,
+        .sidebar::-webkit-scrollbar-thumb {
+            background: var(--deep-security-blue);
+            border-radius: 6px;
+            border: 2px solid var(--bg-dark);
+        }
+        .content::-webkit-scrollbar-thumb:hover,
+        .sidebar::-webkit-scrollbar-thumb:hover {
+            background: var(--premium-gold);
         }
 
         /* KPI Cards */
@@ -516,45 +609,93 @@
         </div>
 
         <a href="{{ route('admin.dashboard') }}" class="nav-item {{ request()->routeIs('admin.dashboard') ? 'active' : '' }}">
-            <div class="nav-icon"></div>
+            {{-- Dashboard — grid of panels --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"></rect>
+                <rect x="14" y="3" width="7" height="7"></rect>
+                <rect x="14" y="14" width="7" height="7"></rect>
+                <rect x="3" y="14" width="7" height="7"></rect>
+            </svg>
             <span>Dashboard</span>
         </a>
 
         <a href="#" class="nav-item">
-            <div class="nav-icon"></div>
+            {{-- Live Map — map pin --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                <circle cx="12" cy="10" r="3"></circle>
+            </svg>
             <span>Live Map</span>
         </a>
 
         <a href="#" class="nav-item">
-            <div class="nav-icon"></div>
+            {{-- Alerts — warning triangle --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
             <span>Alerts</span>
             <span class="nav-badge">4</span>
         </a>
 
         <a href="{{ route('admin.shifts.index') }}" class="nav-item {{ request()->routeIs('admin.shifts.*') ? 'active' : '' }}">
-            <div class="nav-icon"></div>
+            {{-- Shifts — calendar --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="16" y1="2" x2="16" y2="6"></line>
+                <line x1="8" y1="2" x2="8" y2="6"></line>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+            </svg>
             <span>Shifts</span>
         </a>
 
         <a href="{{ route('admin.guards.index') }}" class="nav-item {{ request()->routeIs('admin.guards.*') ? 'active' : '' }}">
-            <div class="nav-icon"></div>
+            {{-- Guards — security personnel (people) --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
             <span>Guards</span>
         </a>
 
         <a href="{{ route('admin.sites.index') }}" class="nav-item {{ request()->routeIs('admin.sites.*') || request()->routeIs('admin.geofences.*') ? 'active' : '' }}">
-            <div class="nav-icon"></div>
+            {{-- Sites — building --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect>
+                <path d="M9 22v-4h6v4"></path>
+                <line x1="8" y1="6" x2="8.01" y2="6"></line>
+                <line x1="12" y1="6" x2="12.01" y2="6"></line>
+                <line x1="16" y1="6" x2="16.01" y2="6"></line>
+                <line x1="8" y1="10" x2="8.01" y2="10"></line>
+                <line x1="12" y1="10" x2="12.01" y2="10"></line>
+                <line x1="16" y1="10" x2="16.01" y2="10"></line>
+                <line x1="8" y1="14" x2="8.01" y2="14"></line>
+                <line x1="16" y1="14" x2="16.01" y2="14"></line>
+            </svg>
             <span>Sites</span>
         </a>
 
         <a href="#" class="nav-item">
-            <div class="nav-icon"></div>
+            {{-- Reports — bar chart --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"></line>
+                <line x1="12" y1="20" x2="12" y2="4"></line>
+                <line x1="6" y1="20" x2="6" y2="14"></line>
+            </svg>
             <span>Reports</span>
         </a>
 
         <div class="nav-spacer"></div>
 
         <a href="#" class="nav-item">
-            <div class="nav-icon"></div>
+            {{-- Settings — gear --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
             <span>Settings</span>
         </a>
     </nav>
@@ -652,6 +793,30 @@
                 });
             }
 
+            // Identity for an alert, so we can tell a genuinely new one from a
+            // still-pending one across polls (no explicit id in the feed).
+            function keyFor(it) {
+                return (it.type || '') + ':' + (it.shift_id || it.reference || it.title || '');
+            }
+
+            // Remembered keys from the previous poll. null = nothing loaded yet,
+            // so the very first batch of alerts counts as "new" and rings once.
+            var seenKeys = null;
+
+            // Play the ring (+ badge pop). Re-trigger safely by clearing the
+            // class and forcing a reflow before re-adding it.
+            function ring() {
+                bell.classList.remove('ringing');
+                badge.classList.remove('pop');
+                void bell.offsetWidth;
+                bell.classList.add('ringing');
+                badge.classList.add('pop');
+            }
+            bell.addEventListener('animationend', function () {
+                bell.classList.remove('ringing');
+                badge.classList.remove('pop');
+            });
+
             function timeAgo(iso) {
                 if (!iso) return '';
                 var then = new Date(iso).getTime();
@@ -675,6 +840,17 @@
                     badge.style.display = 'none';
                     bell.classList.remove('has-items');
                 }
+
+                // Ring only when something NEW shows up — the first batch of
+                // alerts, or a key we hadn't seen on the previous poll. Items
+                // that simply persist across polls don't re-trigger it.
+                var keys = items.map(keyFor);
+                if (seenKeys === null) {
+                    if (count > 0) ring();
+                } else if (keys.some(function (k) { return seenKeys.indexOf(k) === -1; })) {
+                    ring();
+                }
+                seenKeys = keys;
 
                 if (count === 0) {
                     list.innerHTML = '<div class="notif-empty">Nothing needs your attention.</div>';

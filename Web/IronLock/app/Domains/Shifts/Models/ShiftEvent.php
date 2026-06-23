@@ -59,6 +59,7 @@ class ShiftEvent extends Model
         'event_type',
         'metadata',
         'recorded_at',
+        'server_received_at',
     ];
 
     /**

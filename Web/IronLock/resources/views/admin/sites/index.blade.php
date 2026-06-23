@@ -16,7 +16,7 @@
     /* D-06 Site & Geofence Management - Exact Wireframe Implementation */
     .d06-layout {
         display: flex;
-        min-height: calc(100vh - 64px);
+        min-height: calc(100vh - var(--header-h) - 32px);
         gap: 0;
         border: 1.5px solid var(--border-dark);
         border-radius: 8px;
@@ -537,7 +537,7 @@
         padding: 20px;
         position: fixed;
         right: 0;
-        top: 48px;
+        top: var(--header-h);
         bottom: 0;
         transform: translateX(100%);
         transition: transform 0.3s ease;

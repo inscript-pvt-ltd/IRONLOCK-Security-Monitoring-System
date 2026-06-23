@@ -1127,6 +1127,10 @@ class ShiftController extends Controller
                 'event_type' => $eventType,
                 'metadata' => $metadata,
                 'recorded_at' => Carbon::now(),
+                // Authoritative server timestamp, assigned in PHP (UTC) at receipt.
+                // Set explicitly so it never falls back to the DB CURRENT_TIMESTAMP
+                // default, which uses the DB session timezone (not UTC).
+                'server_received_at' => Carbon::now(),
             ]);
         } catch (\Throwable $e) {
             Log::warning('Failed to write shift event', ['shift_id' => $shift->id, 'type' => $eventType]);

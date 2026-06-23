@@ -13,7 +13,7 @@
     /* ── Layout ─────────────────────────────────────── */
     .shifts-main {
         position: relative;
-        min-height: calc(100vh - 64px);
+        min-height: calc(100vh - var(--header-h) - 32px);
         margin-right: 0;
         transition: margin-right 0.3s ease;
     }
@@ -350,6 +350,10 @@
     /* Info banner shown on the edit form when the opened shift needs resolving. */
     .resolve-banner {
         margin-top: 4px;
+        /* Match the standard field-to-field spacing so the gap above the
+           GUARD label is consistent with the rest of the form (the label
+           itself keeps margin-top:0 for the no-banner New Shift case). */
+        margin-bottom: 12px;
         padding: 9px 10px;
         border-radius: 4px;
         font-size: 10px;
@@ -464,7 +468,7 @@
         padding: 16px;
         position: fixed;
         right: 0;
-        top: 48px;
+        top: var(--header-h);
         bottom: 0;
         transform: translateX(100%);
         transition: transform 0.3s ease;
@@ -473,6 +477,26 @@
     }
 
     .shift-drawer.open { transform: translateX(0); }
+
+    /* Custom scrollbar — same blue/gold treatment as the schedule table
+       (.cal-container), but vertical for the drawer. */
+    .shift-drawer {
+        scrollbar-width: thin;
+        scrollbar-color: var(--deep-security-blue) var(--bg-dark);
+    }
+    .shift-drawer::-webkit-scrollbar { width: 10px; }
+    .shift-drawer::-webkit-scrollbar-track {
+        background: var(--bg-dark);
+        border-radius: 4px;
+    }
+    .shift-drawer::-webkit-scrollbar-thumb {
+        background: var(--deep-security-blue);
+        border-radius: 6px;
+        border: 2px solid var(--bg-dark);
+    }
+    .shift-drawer::-webkit-scrollbar-thumb:hover {
+        background: var(--premium-gold);
+    }
 
     .drawer-header {
         display: flex;
@@ -875,6 +899,11 @@
         <!-- Cancel-shift action — only for a shift that hasn't started yet -->
         <div class="drawer-actions" id="cancel-shift-row" style="display:none; margin-top:8px;">
             <button type="button" class="drawer-btn drawer-btn-danger" id="cancel-shift-btn">Cancel Shift</button>
+        </div>
+        <!-- View full timeline — shown for a completed shift -->
+        <div class="drawer-actions" id="view-timeline-row" style="display:none; margin-top:8px;">
+            <a class="drawer-btn drawer-btn-primary" id="view-timeline-btn" href="#"
+               style="text-decoration:none; line-height:1.4;">View Timeline →</a>
         </div>
     </form>
 

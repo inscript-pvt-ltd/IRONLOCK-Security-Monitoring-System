@@ -12,7 +12,7 @@
     /* Guards Management with Right Drawer - Following D-05 Wireframe */
     .guards-layout {
         display: flex;
-        min-height: calc(100vh - 64px);
+        min-height: calc(100vh - var(--header-h) - 32px);
         position: relative;
     }
 
@@ -71,7 +71,7 @@
         padding: 20px;
         position: fixed;
         right: 0;
-        top: 48px;
+        top: var(--header-h);
         bottom: 0;
         transform: translateX(100%);
         transition: transform 0.3s ease;
@@ -81,6 +81,26 @@
 
     .guard-drawer.open {
         transform: translateX(0);
+    }
+
+    /* Custom scrollbar — same blue/gold treatment as the schedule table
+       (.cal-container) on the shifts page, but vertical for the drawer. */
+    .guard-drawer {
+        scrollbar-width: thin;
+        scrollbar-color: var(--deep-security-blue) var(--bg-dark);
+    }
+    .guard-drawer::-webkit-scrollbar { width: 10px; }
+    .guard-drawer::-webkit-scrollbar-track {
+        background: var(--bg-dark);
+        border-radius: 4px;
+    }
+    .guard-drawer::-webkit-scrollbar-thumb {
+        background: var(--deep-security-blue);
+        border-radius: 6px;
+        border: 2px solid var(--bg-dark);
+    }
+    .guard-drawer::-webkit-scrollbar-thumb:hover {
+        background: var(--premium-gold);
     }
 
     /* Info Mode Styling */

@@ -63,6 +63,7 @@ class MarkMissedShifts extends Command
                             'window_minutes' => $window,
                         ],
                         'recorded_at' => $now,
+                        'server_received_at' => $now,
                     ]);
                 } catch (\Throwable $e) {
                     // Audit is non-critical; the status transition already holds.
