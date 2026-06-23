@@ -59,6 +59,7 @@ class AutoCloseShifts extends Command
                         'closed_at' => $now->toISOString(),
                     ],
                     'recorded_at' => $now,
+                    'server_received_at' => $now,
                 ]);
             } catch (\Throwable $e) {
                 // Audit is non-critical; the close already holds.

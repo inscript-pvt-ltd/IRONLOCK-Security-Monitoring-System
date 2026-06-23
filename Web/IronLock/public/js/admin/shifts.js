@@ -737,6 +737,14 @@ class ShiftCalendar {
         document.getElementById('save-shift-btn').style.display = 'none';
         document.getElementById('resolve-open-btn').style.display = 'none';
         document.getElementById('cancel-shift-row').style.display = 'none';
+
+        // A completed shift has a full audit timeline — offer a link to it.
+        const vtRow = document.getElementById('view-timeline-row');
+        const vtBtn = document.getElementById('view-timeline-btn');
+        if (vtRow && vtBtn && shift.status === 'completed') {
+            vtBtn.href = `/admin/shifts/${shift.id}/timeline`;
+            vtRow.style.display = 'flex';
+        }
     }
 
     // The banner text for a locked shift, explaining why it can't be edited.
@@ -780,6 +788,10 @@ class ShiftCalendar {
         // Cancel-shift UI.
         document.getElementById('cancel-view').style.display = 'none';
         document.getElementById('cancel-shift-row').style.display = 'none';
+
+        // View-timeline link (only re-shown for a completed shift).
+        const vtRow = document.getElementById('view-timeline-row');
+        if (vtRow) vtRow.style.display = 'none';
 
         ['guard-select', 'site-select', 'shift-date', 'shift-start', 'shift-duration']
             .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });

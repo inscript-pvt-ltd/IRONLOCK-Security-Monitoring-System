@@ -328,6 +328,10 @@ class AuthController extends Controller
                 'event_type' => $eventType,
                 'metadata' => $metadata,
                 'recorded_at' => Carbon::now(),
+                // Authoritative server timestamp, assigned in PHP (UTC) at receipt.
+                // Set explicitly so it never falls back to the DB CURRENT_TIMESTAMP
+                // default, which uses the DB session timezone (not UTC).
+                'server_received_at' => Carbon::now(),
             ]);
         } catch (\Throwable $e) {
             // Audit is non-critical to the request; do not surface.

@@ -167,8 +167,34 @@
     $guard = $shift->assignedGuard;
     $guardName = $guard ? trim($guard->first_name . ' ' . $guard->last_name) : 'Unassigned';
     $tz = config('app.timezone') ?: 'UTC';
-    $fmt = fn ($dt) => $dt ? \Illuminate\Support\Carbon::parse($dt)->setTimezone($tz)->format('d M Y · H:i') : '—';
-    $time = fn ($dt) => $dt ? \Illuminate\Support\Carbon::parse($dt)->setTimezone($tz)->format('H:i:s') : '—';
+    $fmt  = fn ($dt) => $dt ? \Illuminate\Support\Carbon::parse($dt)->setTimezone($tz)->format('d M Y · g:i A') : '—';
+    $time = fn ($dt) => $dt ? \Illuminate\Support\Carbon::parse($dt)->setTimezone($tz)->format('g:i:s A') : '—';
+    // Emit a clean UTC ISO-8601 string for client-side local-timezone rendering.
+    $iso  = fn ($dt) => $dt ? \Illuminate\Support\Carbon::parse($dt)->utc()->format('Y-m-d\TH:i:s\Z') : null;
+    // Event metadata payloads echo raw ISO-8601 UTC strings (e.g. actual_end,
+    // requested_at). Detect those so the card can render them in admin-local
+    // time too, instead of dumping a raw "…Z" value next to local timestamps.
+    $isTs = fn ($v) => is_string($v) && preg_match('/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/', $v);
+    // Render a decimal-hours duration as a readable "Xh Ym".
+    $hm = function ($hours) {
+        if ($hours === null) return '—';
+        $mins = (int) round($hours * 60);
+        return intdiv($mins, 60) . 'h ' . ($mins % 60) . 'm';
+    };
+    // End-of-shift outcome for the compliance panel. An early end only reaches
+    // end_type='early' after a supervisor approves it, so that label is the
+    // "approved early finish" indicator.
+    $endTypeLabel = match ($shift->end_type) {
+        'early' => 'Early finish — supervisor approved',
+        'auto'  => 'Auto-closed (overdue)',
+        'guard' => 'Ended by guard',
+        default => null,
+    };
+    $endTypeColor = match ($shift->end_type) {
+        'early' => 'var(--warning-amber)',
+        'auto'  => 'var(--error-red)',
+        default => 'var(--text-primary)',
+    };
 @endphp
 
 <div class="detail-head">
@@ -176,10 +202,10 @@
     <span class="detail-head-meta">
         <strong>{{ $guardName }}</strong>
         · {{ $shift->site->name ?? 'No site' }}
-        · {{ optional($shift->scheduled_start)->setTimezone($tz)->format('d M Y') }}
+        · <time class="tl-ts-date" data-ts="{{ $iso($shift->scheduled_start) }}">{{ optional($shift->scheduled_start)->setTimezone($tz)->format('d M Y') }}</time>
     </span>
     <span class="detail-head-meta">
-        {{ optional($shift->scheduled_start)->setTimezone($tz)->format('H:i') }}–{{ optional($shift->scheduled_end)->setTimezone($tz)->format('H:i') }}
+        <time class="tl-ts-hhmm" data-ts="{{ $iso($shift->scheduled_start) }}">{{ optional($shift->scheduled_start)->setTimezone($tz)->format('g:i A') }}</time>–<time class="tl-ts-hhmm" data-ts="{{ $iso($shift->scheduled_end) }}">{{ optional($shift->scheduled_end)->setTimezone($tz)->format('g:i A') }}</time>
     </span>
     <span class="detail-head-spacer"></span>
     <span class="detail-status-chip {{ $shift->status }}">{{ $shift->formatted_status }}</span>
@@ -203,7 +229,7 @@
                         </div>
                         <div class="tl-body">
                             <div class="tl-heading">Early Finish Requested</div>
-                            <div class="tl-meta">{{ $fmt($shift->early_end_requested_at) }} · pending</div>
+                            <div class="tl-meta"><time class="tl-ts-full" data-ts="{{ $iso($shift->early_end_requested_at) }}">{{ $fmt($shift->early_end_requested_at) }}</time> · pending</div>
                             @if (!empty($req['reason']) || !empty($req['note']))
                                 <div class="tl-card">
                                     @if (!empty($req['reason']))<div>Reason: {{ $req['reason'] }}</div>@endif
@@ -234,13 +260,19 @@
                         <div class="tl-body">
                             <div class="tl-heading">{{ $meta['label'] }}</div>
                             <div class="tl-meta">
-                                {{ $time($event->server_received_at ?? $event->created_at) }} · server timestamp · {{ $event->event_type }}
+                                <time class="tl-ts" data-ts="{{ $iso($event->server_received_at ?? $event->created_at) }}">{{ $time($event->server_received_at ?? $event->created_at) }}</time> · server time · {{ $event->event_type }}
                             </div>
                             @if (!empty($payload))
                                 <div class="tl-card">
                                     @foreach ($payload as $k => $v)
                                         @php $v = is_bool($v) ? ($v ? 'yes' : 'no') : (is_array($v) ? json_encode($v) : $v); @endphp
-                                        <div>{{ \Illuminate\Support\Str::headline($k) }}: {{ $v }}</div>
+                                        <div>{{ \Illuminate\Support\Str::headline($k) }}:
+                                            @if ($isTs($v))
+                                                <time class="tl-ts-full" data-ts="{{ $iso($v) }}">{{ $fmt($v) }}</time>
+                                            @else
+                                                {{ $v }}
+                                            @endif
+                                        </div>
                                     @endforeach
                                 </div>
                             @endif
@@ -278,10 +310,10 @@
             <div class="sum-row"><span class="sum-label">Reference</span><span class="sum-val">#{{ $shift->reference ?? '—' }}</span></div>
             <div class="sum-row"><span class="sum-label">Guard</span><span class="sum-val">{{ $guardName }}</span></div>
             <div class="sum-row"><span class="sum-label">Site</span><span class="sum-val">{{ $shift->site->name ?? '—' }}</span></div>
-            <div class="sum-row"><span class="sum-label">Scheduled</span><span class="sum-val">{{ $fmt($shift->scheduled_start) }}</span></div>
-            <div class="sum-row"><span class="sum-label">Sched. end</span><span class="sum-val">{{ $fmt($shift->scheduled_end) }}</span></div>
-            <div class="sum-row"><span class="sum-label">Actual start</span><span class="sum-val">{{ $fmt($shift->actual_start) }}</span></div>
-            <div class="sum-row"><span class="sum-label">Actual end</span><span class="sum-val">{{ $fmt($shift->actual_end) }}</span></div>
+            <div class="sum-row"><span class="sum-label">Scheduled</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->scheduled_start) }}">{{ $fmt($shift->scheduled_start) }}</time></span></div>
+            <div class="sum-row"><span class="sum-label">Sched. end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->scheduled_end) }}">{{ $fmt($shift->scheduled_end) }}</time></span></div>
+            <div class="sum-row"><span class="sum-label">Actual start</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->actual_start) }}">{{ $fmt($shift->actual_start) }}</time></span></div>
+            <div class="sum-row"><span class="sum-label">Actual end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->actual_end) }}">{{ $fmt($shift->actual_end) }}</time></span></div>
         </div>
 
         <div class="panel">
@@ -290,7 +322,7 @@
                 <div class="sum-row">
                     <span class="sum-label">WTR duration</span>
                     <span class="sum-val">
-                        {{ $summary['shift_duration']['actual_hours'] ? round($summary['shift_duration']['actual_hours'], 2) . 'h' : '—' }}
+                        {{ isset($summary['shift_duration']['actual_hours']) ? $hm($summary['shift_duration']['actual_hours']) : '—' }}
                         (limit 16h)
                     </span>
                 </div>
@@ -306,6 +338,12 @@
                     <span class="sum-label">Ended on time</span>
                     <span class="sum-val">{{ ($summary['attendance']['ended_on_time'] ?? false) ? '✓ Yes' : 'No' }}</span>
                 </div>
+                @if ($endTypeLabel)
+                    <div class="sum-row">
+                        <span class="sum-label">End type</span>
+                        <span class="sum-val" style="color: {{ $endTypeColor }};">{{ $endTypeLabel }}</span>
+                    </div>
+                @endif
             @else
                 <div class="placeholder-note">
                     The compliance summary is generated when the shift is ended. It will show
@@ -387,6 +425,37 @@
             }
         });
     });
+})();
+
+// ── Local-timezone rendering for all <time data-ts="..."> elements ──────
+// server_received_at is stored as UTC. PHP outputs it as a clean ISO-8601
+// UTC string (data-ts). JS converts to the admin's browser timezone, so
+// times match what the shifts calendar already shows.
+(function () {
+    var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function pad(n) { return n.toString().padStart(2, '0'); }
+    function hr12(d) { var h = d.getHours() % 12; return h === 0 ? 12 : h; }
+    function ampm(d) { return d.getHours() >= 12 ? 'PM' : 'AM'; }
+
+    function fmtTime(d)   { return hr12(d) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + ' ' + ampm(d); }
+    function fmtHHMM(d)   { return hr12(d) + ':' + pad(d.getMinutes()) + ' ' + ampm(d); }
+    function fmtDate(d)   { return pad(d.getDate()) + ' ' + MONTHS[d.getMonth()] + ' ' + d.getFullYear(); }
+    function fmtFull(d)   { return fmtDate(d) + ' · ' + fmtHHMM(d); }
+
+    function apply(selector, fn) {
+        document.querySelectorAll(selector).forEach(function (el) {
+            var d = new Date(el.dataset.ts);
+            if (!el.dataset.ts || isNaN(d)) return;
+            el.textContent = fn(d);
+            el.title = 'UTC: ' + el.dataset.ts;
+        });
+    }
+
+    apply('time.tl-ts[data-ts]',      fmtTime);   // audit log events — h:mm:ss AM/PM
+    apply('time.tl-ts-hhmm[data-ts]', fmtHHMM);   // header time range — h:mm AM/PM
+    apply('time.tl-ts-date[data-ts]', fmtDate);   // header date — DD MMM YYYY
+    apply('time.tl-ts-full[data-ts]', fmtFull);   // side panel + fallback row — DD MMM YYYY · h:mm AM/PM
 })();
 </script>
 @endsection
