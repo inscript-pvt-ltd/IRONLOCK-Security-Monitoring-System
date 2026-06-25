@@ -47,6 +47,9 @@ class Guard extends Authenticatable
         'sia_licence_type',
         'device_identifier',
         'device_name',
+        'hmac_secret',
+        'push_token',
+        'push_token_platform',
         'hire_date',
         'employment_status',
         'status',
@@ -55,10 +58,16 @@ class Guard extends Authenticatable
 
     /**
      * The attributes that should be hidden for serialization.
+     *
+     * hmac_secret is a shared symmetric key — it must never leak through any
+     * serialized payload (it is delivered to the app exactly once, explicitly,
+     * in the login response).
      */
     protected $hidden = [
         'password',
         'active_session_token_id',
+        'hmac_secret',
+        'push_token',
     ];
 
     /**

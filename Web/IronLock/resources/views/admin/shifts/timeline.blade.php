@@ -24,6 +24,19 @@
         'EARLY_END_REQUEST_APPROVED'  => ['label' => 'Early Finish Request Approved', 'tone' => 'ok'],
         'EARLY_END_REQUEST_REJECTED'  => ['label' => 'Early Finish Request Rejected', 'tone' => 'alert'],
         'SHIFT_AUTO_CLOSED'           => ['label' => 'Auto-Closed (overdue)',         'tone' => 'alert'],
+        // Photo verification (Phase 4)
+        'PHOTO_REQUEST'                 => ['label' => 'Photo Requested',               'tone' => 'ok'],
+        'PHOTO_SUBMITTED'               => ['label' => 'Photo Submitted',              'tone' => 'ok'],
+        'PHOTO_REVIEWED'                => ['label' => 'Photo Reviewed',               'tone' => 'ok'],
+        'PHOTO_TIMEOUT'                 => ['label' => 'Photo Timed Out',              'tone' => 'alert'],
+        'TIMELINE_ANOMALY'              => ['label' => 'Photo Timeline Anomaly',       'tone' => 'alert'],
+        'CLOCK_MANIPULATION_SUSPECTED'  => ['label' => 'Clock Manipulation Suspected', 'tone' => 'alert'],
+        'NTP_UNAVAILABLE'               => ['label' => 'NTP Unavailable',              'tone' => 'warn'],
+        'DELAYED_UPLOAD'                => ['label' => 'Delayed Photo Upload',         'tone' => 'warn'],
+        // Wakefulness verification (Phase 5)
+        'WAKEFULNESS_CHALLENGE'         => ['label' => 'Wakefulness Challenge',        'tone' => 'ok'],
+        'WAKEFULNESS_CONFIRMED'         => ['label' => 'Wakefulness Confirmed',        'tone' => 'ok'],
+        'WAKEFULNESS_FAILED'            => ['label' => 'Wakefulness Failed',           'tone' => 'alert'],
     ];
 
     $summary = is_array($shift->compliance_summary) ? $shift->compliance_summary : null;
@@ -41,7 +54,19 @@
 <style>
     .detail-grid { display: flex; gap: 16px; align-items: flex-start; }
     .detail-main { flex: 1; min-width: 0; }
-    .detail-side { width: 260px; flex-shrink: 0; }
+    .detail-side {
+        width: 260px; flex-shrink: 0;
+        /* The scrolling region in this layout is .content (the body is
+           overflow:hidden, height 100vh - topbar), so sticky is measured
+           against that — not the window. Pin to the top of the scroll area;
+           cap the height to what's actually visible there (viewport minus the
+           topbar and the content's 16px top/bottom padding) and let the panel
+           scroll internally if a long compliance summary overflows it. */
+        position: sticky; top: 0;
+        align-self: flex-start;
+        max-height: calc(100vh - var(--header-h) - 32px);
+        overflow-y: auto;
+    }
 
     /* ── Header summary ─────────────────────────────── */
     .detail-head {
@@ -92,6 +117,14 @@
         font-size: 10px; font-weight: bold; text-transform: uppercase;
         letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 14px;
     }
+
+    /* Jump links in the timeline header (top-right) */
+    .tl-jump { display: flex; gap: 14px; flex-shrink: 0; }
+    .tl-jump a {
+        font-size: 11px; color: var(--text-secondary);
+        text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+    }
+    .tl-jump a:hover { color: var(--premium-gold); }
 
     /* ── Timeline ───────────────────────────────────── */
     .tl { position: relative; }
@@ -155,9 +188,128 @@
     }
     .placeholder-note strong { color: var(--text-secondary); }
 
+    /* ── Photo verification ─────────────────────────── */
+    .panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .panel-head .panel-title { margin-bottom: 0; flex: 1; }
+    .btn-request-photo {
+        font-size: 11px; font-weight: bold; padding: 6px 14px; border-radius: 4px;
+        cursor: pointer; background: transparent; border: 1px solid var(--premium-gold);
+        color: var(--premium-gold); transition: all 0.2s ease;
+    }
+    .btn-request-photo:hover:not(:disabled) { background: var(--premium-gold); color: #1a1407; }
+    .btn-request-photo:disabled { opacity: 0.5; cursor: default; }
+
+    .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+    .photo-card {
+        background: var(--bg-dark); border: 1px solid var(--border-dark);
+        border-radius: 4px; overflow: hidden; display: flex; flex-direction: column;
+    }
+    .photo-thumb {
+        width: 100%; aspect-ratio: 3/4; object-fit: cover; display: block;
+        background: var(--surface-dark); cursor: pointer;
+    }
+    .photo-thumb-empty {
+        width: 100%; aspect-ratio: 3/4; display: flex; align-items: center; justify-content: center;
+        background: var(--surface-dark); color: var(--text-muted); font-size: 10px; text-align: center; padding: 8px;
+    }
+    .photo-body { padding: 8px 9px; font-size: 10px; color: var(--text-secondary); line-height: 1.5; }
+    .photo-badge {
+        display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 9px;
+        font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid;
+    }
+    .photo-badge.validated { color: var(--success-green); border-color: var(--success-green); }
+    .photo-badge.flagged   { color: var(--warning-amber);  border-color: var(--warning-amber); }
+    .photo-badge.pending   { color: var(--text-muted);     border-color: var(--border-dark); }
+    .photo-badge.rejected,
+    .photo-badge.anomaly,
+    .photo-badge.timeout   { color: var(--error-red);      border-color: var(--error-red); }
+    .photo-flag {
+        display: block; color: var(--error-red); font-size: 9px; margin-top: 3px; word-break: break-word;
+    }
+    .photo-meta { color: var(--text-muted); margin-top: 4px; }
+
+    /* ── Photo review (admin decision) ──────────────── */
+    .photo-review-row { margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .review-badge {
+        display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 9px;
+        font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid;
+    }
+    .review-badge.approved { color: var(--success-green); border-color: var(--success-green); }
+    .review-badge.rejected { color: var(--error-red);     border-color: var(--error-red); }
+    .review-badge.unreviewed { color: var(--text-muted);  border-color: var(--border-dark); }
+    .btn-review {
+        font-size: 9px; font-weight: bold; padding: 3px 9px; border-radius: 4px; cursor: pointer;
+        background: transparent; border: 1px solid var(--premium-gold); color: var(--premium-gold);
+        transition: all 0.2s ease;
+    }
+    .btn-review:hover:not(:disabled) { background: var(--premium-gold); color: #1a1407; }
+    .btn-review:disabled { opacity: 0.5; cursor: default; }
+    .review-note-line { color: var(--text-muted); font-size: 9px; margin-top: 3px; word-break: break-word; }
+
+    /* Review modal */
+    .review-modal-overlay {
+        display: none; position: fixed; inset: 0; z-index: 500;
+        background: rgba(0,0,0,0.6); align-items: center; justify-content: center;
+    }
+    .review-modal-overlay.open { display: flex; }
+    .review-modal {
+        width: 380px; max-width: calc(100vw - 32px);
+        background: var(--surface-dark); border: 1.5px solid var(--border-dark);
+        border-radius: 8px; padding: 18px; box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
+    .review-modal h3 { font-size: 14px; color: var(--text-primary); margin-bottom: 4px; }
+    .review-modal-sub { font-size: 11px; color: var(--text-muted); margin-bottom: 14px; }
+    .review-modal label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    .review-modal textarea {
+        width: 100%; margin-top: 6px; background: var(--bg-dark); color: var(--text-primary);
+        border: 1px solid var(--border-dark); border-radius: 4px; padding: 8px; font-size: 12px;
+        font-family: inherit; resize: vertical; min-height: 70px;
+    }
+    .review-modal-actions { display: flex; gap: 8px; margin-top: 16px; }
+    .review-modal-actions .tl-btn { flex: 1; }
+    .review-modal-cancel {
+        font-size: 11px; color: var(--text-secondary); background: transparent;
+        border: 1px solid var(--border-dark); border-radius: 4px; padding: 6px 16px; cursor: pointer;
+    }
+    .review-modal-cancel:hover { border-color: var(--premium-gold); color: var(--premium-gold); }
+
+    /* ── Wakefulness verification ───────────────────── */
+    .wake-warning {
+        display: flex; align-items: center; gap: 10px;
+        font-size: 11px; font-weight: bold; color: var(--error-red);
+        border: 1px solid var(--error-red); border-radius: 4px;
+        padding: 8px 10px; margin-bottom: 12px;
+        background: rgba(239, 68, 68, 0.08);
+    }
+    .wake-warning > span { flex: 1; }
+    .wake-warning-close {
+        flex-shrink: 0; background: none; border: none; cursor: pointer;
+        color: var(--error-red); font-size: 16px; line-height: 1;
+        padding: 0 2px; opacity: 0.7; transition: opacity 0.15s;
+    }
+    .wake-warning-close:hover { opacity: 1; }
+    .wake-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .wake-table th {
+        text-align: left; color: var(--text-muted); font-weight: bold;
+        text-transform: uppercase; letter-spacing: 0.04em; font-size: 9px;
+        padding: 6px 8px; border-bottom: 1px solid var(--border-dark);
+    }
+    .wake-table td {
+        padding: 7px 8px; border-bottom: 1px solid var(--border-dark);
+        color: var(--text-secondary);
+    }
+    .wake-table tr:last-child td { border-bottom: none; }
+    .wake-badge {
+        display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 9px;
+        font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid;
+    }
+    .wake-badge.confirmed { color: var(--success-green); border-color: var(--success-green); }
+    .wake-badge.failed    { color: var(--error-red);     border-color: var(--error-red); }
+    .wake-badge.pending   { color: var(--text-muted);    border-color: var(--border-dark); }
+
     @media (max-width: 900px) {
         .detail-grid { flex-direction: column; }
-        .detail-side { width: 100%; }
+        .detail-side { width: 100%; position: static; max-height: none; overflow: visible; }
     }
 </style>
 @endsection
@@ -215,7 +367,13 @@
 <div class="detail-grid">
     <div class="detail-main">
         <div class="panel">
-            <div class="panel-title">Timeline — Append-only audit log</div>
+            <div class="panel-head">
+                <div class="panel-title">Timeline — Append-only audit log</div>
+                <nav class="tl-jump">
+                    <a href="#panel-photo" data-jump="panel-photo">Photo verification</a>
+                    <a href="#panel-wakefulness" data-jump="panel-wakefulness">Wakefulness verification</a>
+                </nav>
+            </div>
             <div class="tl">
                 {{-- Fallback: the request is pending but its audit event is missing
                      (best-effort logging can fail) — still let the supervisor act.
@@ -293,14 +451,121 @@
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-title">Monitoring Evidence</div>
-            <div class="placeholder-note">
-                <strong>Coming in later phases.</strong> GPS pings, wakefulness checks, photo
-                verification and zone-exit alerts will appear in this timeline once those
-                features are built (roadmap phases 3.3–6). Today the timeline shows the shift
-                lifecycle and supervisor actions recorded in the audit log above.
+        <div class="panel" id="panel-photo">
+            <div class="panel-head">
+                <div class="panel-title">Photo Verification</div>
+                @if ($shift->status === 'active')
+                    <button type="button" id="btn-request-photo" class="btn-request-photo" data-shift-id="{{ $shift->id }}">
+                        📷 Request Photo
+                    </button>
+                @endif
             </div>
+
+            {{-- Badge reflects the request outcome: a fulfilled request shows the
+                 evidence's derived status (VALIDATED/FLAGGED); an unfulfilled one
+                 shows the request status (PENDING/TIMEOUT/ANOMALY). --}}
+            @if ($photoRequests->isEmpty())
+                <div class="placeholder-note">
+                    No photo checks have been requested for this shift yet.
+                    @if ($shift->status === 'active')Use “Request Photo” above to ask the guard for a live photo now.@endif
+                </div>
+            @else
+                <div class="photo-grid">
+                    @foreach ($photoRequests as $pr)
+                        @php $badge = strtolower($pr['evidence_status'] ?? $pr['status'] ?? 'pending'); @endphp
+                        <div class="photo-card">
+                            @if (!empty($pr['view_url']))
+                                <img class="photo-thumb" src="{{ $pr['view_url'] }}" alt="Verification photo"
+                                     onclick="window.open(this.src, '_blank')" loading="lazy">
+                            @else
+                                <div class="photo-thumb-empty">
+                                    {{ $pr['status'] === 'PENDING' ? 'Awaiting response…' : 'No image' }}
+                                </div>
+                            @endif
+                            <div class="photo-body">
+                                <span class="photo-badge {{ $badge }}">{{ str_replace('_', ' ', $badge) }}</span>
+                                <div class="photo-meta">
+                                    {{ ucfirst($pr['request_type'] ?? 'manual') }} ·
+                                    <time class="tl-ts-full" data-ts="{{ $iso($pr['submitted_at'] ?? $pr['requested_at']) }}">{{ $fmt($pr['submitted_at'] ?? $pr['requested_at']) }}</time>
+                                </div>
+                                @if (!empty($pr['gps_latitude']) && !empty($pr['gps_longitude']))
+                                    <div class="photo-meta">📍 {{ number_format($pr['gps_latitude'], 5) }}, {{ number_format($pr['gps_longitude'], 5) }}</div>
+                                @endif
+                                @foreach ($pr['flags'] as $flag)
+                                    <span class="photo-flag">⚠ {{ str_replace('_', ' ', $flag) }}</span>
+                                @endforeach
+
+                                {{-- Admin review (approve/reject). Only an uploaded
+                                     photo can be reviewed; once reviewed the badge
+                                     replaces the button. --}}
+                                @if (!empty($pr['evidence_id']))
+                                    <div class="photo-review-row">
+                                        @if ($pr['review_decision'])
+                                            <span class="review-badge {{ strtolower($pr['review_decision']) }}">{{ $pr['review_decision'] }}</span>
+                                            <span class="photo-meta">reviewed <time class="tl-ts-full" data-ts="{{ $iso($pr['reviewed_at']) }}">{{ $fmt($pr['reviewed_at']) }}</time></span>
+                                        @else
+                                            <span class="review-badge unreviewed">Unreviewed</span>
+                                            <button type="button" class="btn-review"
+                                                    data-review-url="{{ $pr['review_url'] }}">Review</button>
+                                        @endif
+                                    </div>
+                                    @if (!empty($pr['review_note']))
+                                        <div class="review-note-line">Note: {{ $pr['review_note'] }}</div>
+                                    @endif
+                                @endif
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+            @endif
+        </div>
+
+        <div class="panel" id="panel-wakefulness">
+            <div class="panel-head">
+                <div class="panel-title">Wakefulness Verification</div>
+                @if ($shift->status === 'active')
+                    <button type="button" id="btn-request-wakefulness" class="btn-request-photo" data-shift-id="{{ $shift->id }}">
+                        🛌 Request Wakefulness Check
+                    </button>
+                @endif
+            </div>
+
+            {{-- Each row is one code-challenge. A null result is still pending
+                 (awaiting the guard or the timeout sweep); CONFIRMED/FAILED are
+                 the recorded outcomes. A FAILED check also raises a CRITICAL
+                 GUARD_UNRESPONSIVE alert and surfaces a welfare-check warning. --}}
+            @if ($wakefulnessChecks->isEmpty())
+                <div class="placeholder-note">
+                    No wakefulness checks have been issued for this shift yet.
+                    Challenges fire automatically on a randomised schedule while the guard is on duty.
+                    @if ($shift->status === 'active')Use “Request Wakefulness Check” above to challenge the guard now.@endif
+                </div>
+            @else
+                @if ($wakefulnessChecks->contains(fn ($c) => $c['result'] === 'FAILED'))
+                    <div class="wake-warning">
+                        <span>⚠ Unresponsive — Welfare Check Required (a wakefulness check failed)</span>
+                        <button type="button" class="wake-warning-close" aria-label="Dismiss" title="Dismiss" onclick="this.closest('.wake-warning').remove()">&times;</button>
+                    </div>
+                @endif
+                <table class="wake-table">
+                    <thead>
+                        <tr><th>Result</th><th>Source</th><th>Mode</th><th>Challenged</th><th>Responded</th><th>Time</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach ($wakefulnessChecks as $wc)
+                            @php $badge = strtolower($wc['result'] ?? 'pending'); @endphp
+                            <tr>
+                                <td><span class="wake-badge {{ $badge }}">{{ $wc['result'] ?? 'PENDING' }}</span></td>
+                                <td>{{ ucfirst($wc['request_type'] ?? 'scheduled') }}</td>
+                                <td>{{ $wc['mode'] }}</td>
+                                <td><time class="tl-ts-full" data-ts="{{ $iso($wc['scheduled_at']) }}">{{ $fmt($wc['scheduled_at']) }}</time></td>
+                                <td><time class="tl-ts-full" data-ts="{{ $iso($wc['responded_at']) }}">{{ $fmt($wc['responded_at']) }}</time></td>
+                                <td>{{ $wc['response_time_seconds'] !== null ? $wc['response_time_seconds'] . 's' : '—' }}</td>
+                            </tr>
+                        @endforeach
+                    </tbody>
+                </table>
+            @endif
         </div>
     </div>
 
@@ -351,6 +616,48 @@
                     photo results.
                 </div>
             @endif
+
+            {{-- Photo verification tally — always shown (computed live, so it
+                 stays current even when reviews happen after the shift ends). --}}
+            <div class="panel-title" style="margin-top:16px;">Photo Verification</div>
+            @if (($photoSummary['total'] ?? 0) > 0)
+                <div class="sum-row"><span class="sum-label">Requests</span><span class="sum-val">{{ $photoSummary['total'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Fulfilled</span><span class="sum-val">{{ $photoSummary['fulfilled'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Reviewed</span><span class="sum-val">{{ $photoSummary['reviewed'] }} / {{ $photoSummary['fulfilled'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Approved</span><span class="sum-val" style="color: var(--success-green);">{{ $photoSummary['approved'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Rejected</span><span class="sum-val" style="color: var(--error-red);">{{ $photoSummary['rejected'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Awaiting review</span><span class="sum-val">{{ $photoSummary['unreviewed'] }}</span></div>
+            @else
+                <div class="placeholder-note">No photos have been submitted for this shift.</div>
+            @endif
+
+            {{-- Wakefulness verification tally — always shown (computed live, so a
+                 pending check that resolves via the timeout sweep stays current).
+                 No review step: the result is the server's own CONFIRMED/FAILED. --}}
+            <div class="panel-title" style="margin-top:16px;">Wakefulness Verification</div>
+            @if (($wakefulnessSummary['total'] ?? 0) > 0)
+                <div class="sum-row"><span class="sum-label">Challenges</span><span class="sum-val">{{ $wakefulnessSummary['total'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Confirmed</span><span class="sum-val" style="color: var(--success-green);">{{ $wakefulnessSummary['confirmed'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Failed</span><span class="sum-val" style="color: var(--error-red);">{{ $wakefulnessSummary['failed'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Pending</span><span class="sum-val">{{ $wakefulnessSummary['pending'] }}</span></div>
+            @else
+                <div class="placeholder-note">No wakefulness checks have been issued for this shift.</div>
+            @endif
+        </div>
+    </div>
+</div>
+
+{{-- Review modal — approve/reject a single photo with an optional note --}}
+<div class="review-modal-overlay" id="review-modal-overlay">
+    <div class="review-modal">
+        <h3>Review Photo</h3>
+        <div class="review-modal-sub">Approve or reject this verification photo. The guard is notified of the outcome.</div>
+        <label for="review-note">Note (optional)</label>
+        <textarea id="review-note" maxlength="500" placeholder="Add context for this decision…"></textarea>
+        <div class="review-modal-actions">
+            <button type="button" class="tl-btn tl-btn-approve" data-decision="approve">Approve</button>
+            <button type="button" class="tl-btn tl-btn-reject" data-decision="reject">Reject</button>
+            <button type="button" class="review-modal-cancel" id="review-modal-cancel">Cancel</button>
         </div>
     </div>
 </div>
@@ -423,6 +730,179 @@
                 alert('Something went wrong. Please try again.');
                 btns.forEach(function (b) { b.disabled = false; });
             }
+        });
+    });
+})();
+
+// ── Request a live verification photo ───────────────────────────────
+// Issues a fresh nonce + request server-side and (best-effort) pushes it
+// to the guard. The guard has 90s to respond before it times out. We
+// reload after a short delay so any immediate PHOTO_REQUEST event shows.
+(function () {
+    var btn = document.getElementById('btn-request-photo');
+    if (!btn) return;
+
+    var token = document.querySelector('meta[name="csrf-token"]');
+    token = token ? token.content : '';
+
+    btn.addEventListener('click', async function () {
+        var shiftId = btn.dataset.shiftId;
+        var original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Requesting…';
+
+        try {
+            var res = await fetch('/admin/shifts/' + shiftId + '/request-photo', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': token
+                }
+            });
+            var data = await res.json();
+
+            if (!data.success) {
+                alert(data.error || 'Unable to request a photo.');
+                btn.disabled = false;
+                btn.textContent = original;
+                return;
+            }
+
+            btn.textContent = 'Requested ✓';
+            setTimeout(function () { window.location.reload(); }, 1200);
+        } catch (e) {
+            console.error('Photo request error:', e);
+            alert('Something went wrong. Please try again.');
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    });
+})();
+
+// ── Request a wakefulness code-challenge ─────────────────────────────
+// Dispatches an ONLINE check server-side and (best-effort) pushes it to the
+// guard, who must transcribe the code within the response window before it
+// times out and raises a CRITICAL alert. Reload after a short delay so the
+// new WAKEFULNESS_CHALLENGE event + pending row show.
+(function () {
+    var btn = document.getElementById('btn-request-wakefulness');
+    if (!btn) return;
+
+    var token = document.querySelector('meta[name="csrf-token"]');
+    token = token ? token.content : '';
+
+    btn.addEventListener('click', async function () {
+        var shiftId = btn.dataset.shiftId;
+        var original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Requesting…';
+
+        try {
+            var res = await fetch('/admin/shifts/' + shiftId + '/request-wakefulness', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': token
+                }
+            });
+            var data = await res.json();
+
+            if (!data.success) {
+                alert(data.error || 'Unable to request a wakefulness check.');
+                btn.disabled = false;
+                btn.textContent = original;
+                return;
+            }
+
+            btn.textContent = 'Requested ✓';
+            setTimeout(function () { window.location.reload(); }, 1200);
+        } catch (e) {
+            console.error('Wakefulness request error:', e);
+            alert('Something went wrong. Please try again.');
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    });
+})();
+
+// ── Review a photo (approve / reject + optional note) ────────────────
+// Opens a modal for the clicked photo, POSTs the decision, and reloads so
+// the badge + compliance tally reflect it. The server pushes the outcome
+// to the guard's app (the app also polls the reviews endpoint).
+(function () {
+    var overlay = document.getElementById('review-modal-overlay');
+    if (!overlay) return;
+
+    var noteEl = document.getElementById('review-note');
+    var cancelBtn = document.getElementById('review-modal-cancel');
+    var decisionBtns = overlay.querySelectorAll('.tl-btn[data-decision]');
+    var token = document.querySelector('meta[name="csrf-token"]');
+    token = token ? token.content : '';
+    var activeUrl = null;
+
+    function open(url) {
+        activeUrl = url;
+        noteEl.value = '';
+        overlay.classList.add('open');
+        noteEl.focus();
+    }
+    function close() {
+        overlay.classList.remove('open');
+        activeUrl = null;
+        decisionBtns.forEach(function (b) { b.disabled = false; });
+    }
+
+    document.querySelectorAll('.btn-review[data-review-url]').forEach(function (btn) {
+        btn.addEventListener('click', function () { open(btn.dataset.reviewUrl); });
+    });
+
+    cancelBtn.addEventListener('click', close);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+
+    decisionBtns.forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+            if (!activeUrl) return;
+            var decision = btn.dataset.decision; // 'approve' | 'reject'
+            decisionBtns.forEach(function (b) { b.disabled = true; });
+
+            try {
+                var res = await fetch(activeUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': token
+                    },
+                    body: JSON.stringify({ decision: decision, note: noteEl.value || null })
+                });
+                var data = await res.json();
+
+                if (!data.success) {
+                    alert(data.error || 'Unable to record the review.');
+                    decisionBtns.forEach(function (b) { b.disabled = false; });
+                    return;
+                }
+                window.location.reload();
+            } catch (e) {
+                console.error('Photo review error:', e);
+                alert('Something went wrong. Please try again.');
+                decisionBtns.forEach(function (b) { b.disabled = false; });
+            }
+        });
+    });
+})();
+
+// ── Timeline header jump links → smooth-scroll to a section ──────────
+// The scrolling region is .content (not the window), but scrollIntoView
+// walks to the nearest scrollable ancestor, so it scrolls that correctly.
+(function () {
+    document.querySelectorAll('.tl-jump a[data-jump]').forEach(function (link) {
+        link.addEventListener('click', function (e) {
+            e.preventDefault();
+            var target = document.getElementById(link.dataset.jump);
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
     });
 })();

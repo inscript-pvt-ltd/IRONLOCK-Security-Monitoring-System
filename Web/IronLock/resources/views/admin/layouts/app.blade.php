@@ -619,7 +619,7 @@
             <span>Dashboard</span>
         </a>
 
-        <a href="#" class="nav-item">
+        <a href="{{ route('admin.live-map.index') }}" class="nav-item {{ request()->routeIs('admin.live-map.*') ? 'active' : '' }}">
             {{-- Live Map — map pin --}}
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
@@ -628,7 +628,7 @@
             <span>Live Map</span>
         </a>
 
-        <a href="#" class="nav-item">
+        <a href="{{ route('admin.alerts.index') }}" class="nav-item {{ request()->routeIs('admin.alerts.*') ? 'active' : '' }}">
             {{-- Alerts — warning triangle --}}
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
@@ -636,7 +636,7 @@
                 <line x1="12" y1="17" x2="12.01" y2="17"></line>
             </svg>
             <span>Alerts</span>
-            <span class="nav-badge">4</span>
+            <span class="nav-badge" id="nav-alert-badge" style="display:none;">0</span>
         </a>
 
         <a href="{{ route('admin.shifts.index') }}" class="nav-item {{ request()->routeIs('admin.shifts.*') ? 'active' : '' }}">
@@ -708,6 +708,20 @@
             @yield('topbar-actions')
             <div class="topbar-filter">Site: All ▼</div>
             <div class="topbar-filter">Date: Today ▼</div>
+
+            <!-- Critical-alert sound toggle -->
+            <button type="button" class="notif-bell" id="alert-mute-btn" onclick="toggleAlertMute()" title="Critical alert sound" aria-label="Toggle critical alert sound" style="margin-right:4px;">
+                <svg id="alert-sound-on" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+                </svg>
+                <svg id="alert-sound-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <line x1="23" y1="9" x2="17" y2="15"></line>
+                    <line x1="17" y1="9" x2="23" y2="15"></line>
+                </svg>
+            </button>
 
             <!-- Notifications -->
             <div class="notif-wrap">
@@ -895,6 +909,96 @@
 
             load();
             setInterval(load, 30000);
+        })();
+
+        // ── Sidebar "Alerts" badge + global critical-alert sound ───────────
+        // Keeps the open-alert count on the nav in sync on every admin page, and
+        // sounds an audible cue when a *new* CRITICAL alert appears between polls
+        // (roadmap §6.2 "Auditory alerts for critical events"). The Alert Feed
+        // page also calls window.setNavAlertBadge() right after an acknowledge so
+        // the badge drops without waiting for the next poll.
+        (function () {
+            var badge = document.getElementById('nav-alert-badge');
+            var muteBtn = document.getElementById('alert-mute-btn');
+            var iconOn = document.getElementById('alert-sound-on');
+            var iconOff = document.getElementById('alert-sound-off');
+
+            window.setNavAlertBadge = function (count) {
+                if (!badge) return;
+                if (count > 0) {
+                    badge.textContent = count > 99 ? '99+' : count;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+            };
+
+            // Mute state persists per browser.
+            var muted = localStorage.getItem('ironlock_alert_muted') === '1';
+            function paintMute() {
+                if (!iconOn || !iconOff) return;
+                iconOn.style.display = muted ? 'none' : '';
+                iconOff.style.display = muted ? '' : 'none';
+                if (muteBtn) muteBtn.title = muted ? 'Critical alert sound: OFF' : 'Critical alert sound: ON';
+            }
+            paintMute();
+            window.toggleAlertMute = function () {
+                muted = !muted;
+                localStorage.setItem('ironlock_alert_muted', muted ? '1' : '0');
+                paintMute();
+                if (!muted) { ensureAudio(); beep(); } // confirm it's audible
+            };
+
+            // Web Audio — synthesised two-tone cue, no asset. Autoplay policy
+            // means the context must be unlocked by a user gesture first.
+            var audioCtx = null;
+            function ensureAudio() {
+                try {
+                    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    if (audioCtx.state === 'suspended') audioCtx.resume();
+                } catch (e) { /* no audio available */ }
+            }
+            document.addEventListener('click', ensureAudio);
+
+            function tone(freq, start, dur) {
+                var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+                o.connect(g); g.connect(audioCtx.destination);
+                o.type = 'sine'; o.frequency.value = freq;
+                var t = audioCtx.currentTime + start;
+                g.gain.setValueAtTime(0.0001, t);
+                g.gain.exponentialRampToValueAtTime(0.32, t + 0.02);
+                g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+                o.start(t); o.stop(t + dur + 0.02);
+            }
+            function beep() {
+                if (muted || !audioCtx) return;
+                tone(880, 0, 0.18);
+                tone(660, 0.22, 0.26);
+            }
+
+            // null = baseline not set yet → don't sound for alerts already open
+            // when the page loaded; only ring for ones that appear afterwards.
+            var seenCritical = null;
+
+            function loadCount() {
+                fetch('{{ route('admin.alerts.count') }}', { headers: { 'Accept': 'application/json' } })
+                    .then(function (r) { return r.ok ? r.json() : null; })
+                    .then(function (d) {
+                        if (!d || !d.success) return;
+                        window.setNavAlertBadge(d.count);
+
+                        var ids = d.critical_ids || [];
+                        if (seenCritical !== null &&
+                            ids.some(function (id) { return seenCritical.indexOf(id) === -1; })) {
+                            beep();
+                        }
+                        seenCritical = ids;
+                    })
+                    .catch(function () { /* transient — keep last good state */ });
+            }
+
+            loadCount();
+            setInterval(loadCount, 15000);
         })();
     </script>
     @yield('scripts')

@@ -2,7 +2,6 @@
 
 use App\Http\Controllers\Mobile\AuthController;
 use App\Http\Controllers\Mobile\ShiftController;
-use App\Support\Mobile\MobileResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -43,15 +42,27 @@ Route::prefix('mobile/v1')->middleware(\App\Http\Middleware\LogMobileApiActivity
         Route::post('shifts/{id}/early-end-request', [ShiftController::class, 'earlyEndRequest']);
         Route::post('shifts/{id}/end', [ShiftController::class, 'end']);
 
-        // Reserved (Phase 3.3+) — shapes frozen in the contract (§6); these
-        // return 501 until implemented so the app can stub against them.
-        $notImplemented = fn () => MobileResponse::error(
-            'NOT_IMPLEMENTED',
-            'This feature is not available yet.',
-            501
-        );
-        Route::post('shifts/{id}/locations', $notImplemented);
-        Route::post('wakefulness/{checkId}/respond', $notImplemented);
-        Route::post('shifts/{id}/photos', $notImplemented);
+        // GPS live tracking (Phase 3.3, contract §6.1). Batch-capable ping
+        // endpoint; server runs the geofence check and UPSERTs the live row.
+        Route::post('shifts/{id}/locations', [\App\Http\Controllers\Mobile\GPSController::class, 'ping']);
+
+        // Photo verification (Phase 4, contract §6.3–6.5). Nonce prefetch for
+        // the offline pool, pending-request discovery, signed photo upload, and
+        // push-token registration.
+        Route::post('shifts/{id}/nonces/prefetch', [\App\Http\Controllers\Mobile\NonceController::class, 'prefetch']);
+        Route::get('shifts/{id}/photos/pending', [\App\Http\Controllers\Mobile\PhotoController::class, 'pending']);
+        Route::post('shifts/{id}/photos', [\App\Http\Controllers\Mobile\PhotoController::class, 'upload']);
+        // Admin review outcomes (approve/reject) for this shift's photos. Also
+        // pushed best-effort via FCM PHOTO_REVIEWED; this poll is the fallback.
+        Route::get('shifts/{id}/photos/reviews', [\App\Http\Controllers\Mobile\PhotoController::class, 'reviews']);
+        Route::post('devices/push-token', [\App\Http\Controllers\Mobile\DeviceController::class, 'registerPushToken']);
+
+        // Wakefulness verification (Phase 5, contract §6.2). Answer a dispatched
+        // code-challenge; the server is the sole authority on pass/fail.
+        Route::post('wakefulness/{checkId}/respond', [\App\Http\Controllers\Mobile\WakefulnessController::class, 'respond']);
+
+        // Push-delivery receipt (Phase 6). The app confirms an online challenge
+        // push arrived so the sweep won't false-alarm a dropped push.
+        Route::post('wakefulness/{checkId}/received', [\App\Http\Controllers\Mobile\WakefulnessController::class, 'received']);
     });
 });

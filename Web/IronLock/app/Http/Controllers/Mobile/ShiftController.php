@@ -123,6 +123,18 @@ class ShiftController extends Controller
                 'actual_start' => optional($shift->actual_start)->toISOString(),
                 'can_end' => $shift->canEnd(),
             ],
+            // Wakefulness provisioning (Phase 5, contract §5.6). Delivered ONCE
+            // at start, HTTPS-only: the decrypted offline TOTP seed + parameters
+            // so the app can compute offline challenge codes, and the randomised
+            // challenge schedule so it can fire matching offline local
+            // notifications at the same times the server pushes online ones.
+            'wakefulness' => [
+                'totp_seed' => $shift->totp_seed,
+                'totp_period_seconds' => (int) config('ironlock.totp_period_seconds', 30),
+                'totp_digits' => (int) config('ironlock.totp_digits', 4),
+                'response_seconds' => (int) config('ironlock.wakefulness_response_seconds', 60),
+                'schedule' => $shift->wakefulness_schedule ?? [],
+            ],
         ]);
     }
 

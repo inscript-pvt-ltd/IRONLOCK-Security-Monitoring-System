@@ -24,6 +24,23 @@ Route::prefix('admin')->name('admin.')->group(function () {
         // the bell in the admin layout on every page.
         Route::get('notifications', [App\Http\Controllers\Admin\DashboardController::class, 'notifications'])->name('notifications');
 
+        // Live guard positions — polled every 15s by the dashboard map (Phase 3.3).
+        Route::get('live-guards', [App\Http\Controllers\Admin\DashboardController::class, 'liveGuards'])->name('live-guards');
+
+        // Live Map page (Phase 6 · D-08) — full-screen ops map; reuses live-guards.
+        Route::get('live-map', [App\Http\Controllers\Admin\LiveMapController::class, 'index'])->name('live-map.index');
+
+        // Alert Feed (Phase 6 · D-03). Static/action routes before the {alert}
+        // parameter so `list`/`count` aren't swallowed by route-model binding.
+        Route::get('alerts', [App\Http\Controllers\Admin\AlertController::class, 'index'])->name('alerts.index');
+        Route::get('alerts/list', [App\Http\Controllers\Admin\AlertController::class, 'list'])->name('alerts.list');
+        Route::get('alerts/count', [App\Http\Controllers\Admin\AlertController::class, 'count'])->name('alerts.count');
+        // Bulk-acknowledge must be declared before the {alert} catch-all so the
+        // literal segment isn't captured as an alert id.
+        Route::post('alerts/bulk-acknowledge', [App\Http\Controllers\Admin\AlertController::class, 'bulkAcknowledge'])->name('alerts.bulkAcknowledge');
+        Route::post('alerts/{alert}/acknowledge', [App\Http\Controllers\Admin\AlertController::class, 'acknowledge'])->name('alerts.acknowledge');
+        Route::get('alerts/{alert}', [App\Http\Controllers\Admin\AlertController::class, 'show'])->name('alerts.show');
+
         // Guard Management routes - D-05 Wireframe with Drawer UI
         Route::get('guards', [App\Http\Controllers\Admin\GuardController::class, 'index'])->name('guards.index');
         Route::get('guards/list', [App\Http\Controllers\Admin\GuardController::class, 'list'])->name('guards.list'); // Must be before parameterized routes
@@ -68,6 +85,19 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::patch('shifts/{shift}/resolve', [App\Http\Controllers\Admin\ShiftController::class, 'resolve'])->name('shifts.resolve');
         Route::patch('shifts/{shift}/early-end/approve', [App\Http\Controllers\Admin\ShiftController::class, 'approveEarlyEnd'])->name('shifts.early-end.approve');
         Route::patch('shifts/{shift}/early-end/reject', [App\Http\Controllers\Admin\ShiftController::class, 'rejectEarlyEnd'])->name('shifts.early-end.reject');
+
+        // Photo verification (Phase 4): manually request a live photo from the
+        // guard on an active shift, and view stored evidence (admin-gated; the
+        // file is never publicly served).
+        Route::post('shifts/{shift}/request-photo', [App\Http\Controllers\Admin\ShiftController::class, 'requestPhoto'])->name('shifts.request-photo');
+        // Wakefulness verification (Phase 5): manually challenge the guard on an
+        // active shift with a live code-challenge (pushed to the app, same as a
+        // scheduled challenge). No admin review — the result is auto CONFIRMED/FAILED.
+        Route::post('shifts/{shift}/request-wakefulness', [App\Http\Controllers\Admin\ShiftController::class, 'requestWakefulness'])->name('shifts.request-wakefulness');
+        Route::get('photos/{evidence}/view', [App\Http\Controllers\Admin\ShiftController::class, 'viewPhoto'])->name('photos.view');
+        // Record an admin's manual review (approve/reject) of a stored photo. The
+        // decision feeds the compliance summary and is pushed/polled to the guard.
+        Route::post('photos/{evidence}/review', [App\Http\Controllers\Admin\ShiftController::class, 'reviewPhoto'])->name('photos.review');
 
         // API status endpoint
         Route::get('status', function () {

@@ -94,6 +94,9 @@ class AuthController extends Controller
             'access_token' => $tokens['access_token'],
             'refresh_token' => $tokens['refresh_token'],
             'expires_at' => $tokens['expires_at']->toISOString(),
+            // Shared HMAC key for signing photo-upload payloads (spec §12.5).
+            // Delivered once here; store it in the device secure keychain.
+            'hmac_secret' => $this->authService->ensureHmacSecret($guard),
             'guard' => $this->guardPayload($guard),
         ]);
     }

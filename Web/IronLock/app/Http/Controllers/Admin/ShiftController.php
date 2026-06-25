@@ -3,12 +3,20 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Domains\Admins\Models\Admin;
 use App\Domains\Shifts\Models\Shift;
 use App\Domains\Shifts\Models\ShiftEvent;
 use App\Domains\Guards\Models\Guard;
 use App\Domains\Sites\Models\Site;
 use App\Domains\Geofences\Models\Geofence;
 use App\Domains\Shifts\Models\WorkingTimeOverride;
+use App\Domains\Photos\Models\PhotoEvidence;
+use App\Domains\Photos\Models\PhotoRequest;
+use App\Domains\Photos\Models\PhotoReview;
+use App\Domains\Photos\Services\PhotoVerificationService;
+use App\Domains\Notifications\Services\PhotoPushNotifier;
+use App\Domains\Wakefulness\Models\WakefulnessCheck;
+use App\Domains\Wakefulness\Services\WakefulnessService;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -246,7 +254,76 @@ class ShiftController extends Controller
                 ->orderByDesc('created_at')
                 ->get();
 
-            return view('admin.shifts.timeline', compact('shift', 'events'));
+            // Photo verification (Phase 4): all requests for this shift, newest
+            // first, each with its stored evidence. The image itself is served
+            // only through an admin-authenticated route (viewPhoto) — the file
+            // is never publicly accessible and no raw path leaks into the page.
+            $photoRequests = PhotoRequest::with('evidence.review')
+                ->where('shift_id', $shift->id)
+                ->orderByDesc('requested_at')
+                ->get()
+                ->map(function (PhotoRequest $r) {
+                    $evidence = $r->evidence;
+                    $review = $evidence?->review;
+                    return [
+                        'status' => $r->status,
+                        'request_type' => $r->request_type,
+                        'requested_at' => $r->requested_at,
+                        'submitted_at' => $r->submitted_at,
+                        'evidence_id' => $evidence?->id,
+                        'evidence_status' => $evidence?->status(),
+                        'flags' => $evidence?->flags ?? [],
+                        'gps_latitude' => $evidence?->gps_latitude,
+                        'gps_longitude' => $evidence?->gps_longitude,
+                        'captured_at' => $evidence?->captured_at,
+                        'view_url' => $evidence ? route('admin.photos.view', $evidence->id) : null,
+                        // Review state — drives the Review button / decision badge.
+                        'review_url' => $evidence ? route('admin.photos.review', $evidence->id) : null,
+                        'can_review' => $evidence !== null && $review === null,
+                        'review_decision' => $review?->decision,        // APPROVED | REJECTED | null
+                        'review_note' => $review?->note,
+                        'reviewed_at' => $review?->reviewed_at,
+                    ];
+                });
+
+            // Photo-review tally for the Compliance Summary panel — computed live
+            // (reviews can be recorded after the shift ends, so the stored
+            // compliance snapshot may lag; the panel always shows current state).
+            $photoSummary = [
+                'total' => $photoRequests->count(),
+                'fulfilled' => $photoRequests->where('status', PhotoRequest::STATUS_FULFILLED)->count(),
+                'reviewed' => $photoRequests->whereNotNull('review_decision')->count(),
+                'approved' => $photoRequests->where('review_decision', PhotoReview::DECISION_APPROVED)->count(),
+                'rejected' => $photoRequests->where('review_decision', PhotoReview::DECISION_REJECTED)->count(),
+            ];
+            $photoSummary['unreviewed'] = max(0, $photoSummary['fulfilled'] - $photoSummary['reviewed']);
+
+            // Wakefulness verification (Phase 5): every code-challenge for this
+            // shift, newest first. A null result is the still-pending state; the
+            // view shows CONFIRMED / FAILED / PENDING with the response time.
+            $wakefulnessChecks = WakefulnessCheck::where('shift_id', $shift->id)
+                ->orderByDesc('scheduled_at')
+                ->get()
+                ->map(fn (WakefulnessCheck $c) => [
+                    'mode' => $c->online_or_offline,
+                    'request_type' => $c->request_type, // manual | scheduled
+                    'result' => $c->result,            // CONFIRMED | FAILED | null
+                    'scheduled_at' => $c->scheduled_at,
+                    'responded_at' => $c->responded_at,
+                    'response_time_seconds' => $c->response_time_seconds,
+                ]);
+
+            // Wakefulness tally for the Compliance Summary panel — computed live
+            // (a pending check can resolve via the timeout sweep after this load).
+            // No review step here: the result is the server's own CONFIRMED/FAILED.
+            $wakefulnessSummary = [
+                'total' => $wakefulnessChecks->count(),
+                'confirmed' => $wakefulnessChecks->where('result', WakefulnessCheck::RESULT_CONFIRMED)->count(),
+                'failed' => $wakefulnessChecks->where('result', WakefulnessCheck::RESULT_FAILED)->count(),
+                'pending' => $wakefulnessChecks->whereNull('result')->count(),
+            ];
+
+            return view('admin.shifts.timeline', compact('shift', 'events', 'photoRequests', 'photoSummary', 'wakefulnessChecks', 'wakefulnessSummary'));
         } catch (ModelNotFoundException $e) {
             return redirect()
                 ->route('admin.shifts.index')
@@ -256,6 +333,216 @@ class ShiftController extends Controller
             return redirect()
                 ->route('admin.shifts.index')
                 ->with('error', 'Unable to load the shift timeline. Please try again.');
+        }
+    }
+
+    /**
+     * Manually request a live verification photo from the guard on an active
+     * shift (spec §8). Issues a fresh ONLINE nonce, records the request and
+     * fires the best-effort push. Only meaningful while the guard is on duty.
+     */
+    public function requestPhoto(string $id): JsonResponse
+    {
+        \Log::info('Admin Photo Request', ['shift_id' => $id]);
+
+        try {
+            $shift = Shift::with('assignedGuard')->findOrFail($id);
+
+            if ($shift->status !== Shift::STATUS_ACTIVE) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'A photo can only be requested while the shift is active.',
+                ], 422);
+            }
+
+            if (!$shift->assignedGuard) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This shift has no assigned guard.',
+                ], 422);
+            }
+
+            $admin = Admin::find($this->currentAdminId());
+
+            $request = app(PhotoVerificationService::class)
+                ->createRequest($shift, $admin, PhotoRequest::TYPE_MANUAL);
+
+            \Log::info('Admin Photo Request Created', [
+                'shift_id'   => $id,
+                'request_id' => $request->id,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Photo request sent. The guard has 90 seconds to respond.',
+                'request_id' => $request->id,
+            ]);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['success' => false, 'error' => 'Shift not found.'], 404);
+        } catch (\Throwable $e) {
+            Log::error('Error requesting photo', ['shift_id' => $id, 'exception' => $e]);
+            return response()->json(['success' => false, 'error' => 'Unable to request a photo. Please try again.'], 500);
+        }
+    }
+
+    /**
+     * Manually issue a live wakefulness code-challenge to the guard on an active
+     * shift (spec §9). Dispatches an ONLINE check (random code + best-effort
+     * push) — identical to a scheduled challenge, so the app handles it via the
+     * existing WAKEFULNESS_CHALLENGE flow and the timeout sweep is the backstop.
+     * There is no admin review: the result is the server's own CONFIRMED/FAILED.
+     */
+    public function requestWakefulness(string $id): JsonResponse
+    {
+        try {
+            $shift = Shift::with('assignedGuard')->findOrFail($id);
+
+            if ($shift->status !== Shift::STATUS_ACTIVE) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'A wakefulness check can only be requested while the shift is active.',
+                ], 422);
+            }
+
+            if (!$shift->assignedGuard) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This shift has no assigned guard.',
+                ], 422);
+            }
+
+            $check = app(WakefulnessService::class)
+                ->dispatchOnlineCheck($shift, WakefulnessCheck::TYPE_MANUAL);
+
+            if (!$check) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'Unable to issue a wakefulness check for this shift.',
+                ], 422);
+            }
+
+            $seconds = (int) config('ironlock.wakefulness_response_seconds', 60);
+
+            return response()->json([
+                'success' => true,
+                'message' => "Wakefulness check sent. The guard has {$seconds} seconds to respond.",
+                'check_id' => $check->id,
+            ]);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['success' => false, 'error' => 'Shift not found.'], 404);
+        } catch (\Throwable $e) {
+            Log::error('Error requesting wakefulness check', ['shift_id' => $id, 'exception' => $e]);
+            return response()->json(['success' => false, 'error' => 'Unable to request a wakefulness check. Please try again.'], 500);
+        }
+    }
+
+    /**
+     * Stream a stored evidence photo to an authenticated admin. The file lives
+     * on the private `photos` disk and is never publicly served — this route is
+     * the only way to view it, and it sits behind the admin auth middleware.
+     */
+    public function viewPhoto(string $evidence)
+    {
+        $photo = PhotoEvidence::find($evidence);
+
+        if (!$photo || empty($photo->file_path) || !\Illuminate\Support\Facades\Storage::disk('photos')->exists($photo->file_path)) {
+            abort(404);
+        }
+
+        return \Illuminate\Support\Facades\Storage::disk('photos')->response($photo->file_path);
+    }
+
+    /**
+     * Record an admin's manual review of a stored verification photo.
+     *
+     * The supervisor approves or rejects the photo (with an optional note) after
+     * viewing it. The decision is written once to an immutable photo_reviews row
+     * (idempotent — a photo can't be re-reviewed), audited on the shift
+     * timeline, folded into the compliance summary, and pushed best-effort to
+     * the guard's app (the guard also polls GET /shifts/{id}/photos/reviews).
+     */
+    public function reviewPhoto(Request $request, string $evidence): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'decision' => 'required|in:approve,reject',
+            'note' => 'nullable|string|max:500',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $photo = PhotoEvidence::with(['photoRequest.shift', 'photoRequest.assignedGuard', 'review'])
+                ->find($evidence);
+
+            if (!$photo) {
+                return response()->json(['success' => false, 'error' => 'Photo evidence not found.'], 404);
+            }
+
+            // Idempotent like alert acknowledgement: a photo is reviewed once.
+            if ($photo->review) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This photo has already been reviewed.',
+                ], 422);
+            }
+
+            $pr = $photo->photoRequest;
+            if (!$pr) {
+                return response()->json(['success' => false, 'error' => 'This photo is not linked to a request.'], 422);
+            }
+
+            $decision = $request->input('decision') === 'approve'
+                ? PhotoReview::DECISION_APPROVED
+                : PhotoReview::DECISION_REJECTED;
+            $note = $request->input('note');
+            $now = Carbon::now();
+
+            DB::beginTransaction();
+            try {
+                $review = PhotoReview::create([
+                    'photo_evidence_id' => $photo->id,
+                    'photo_request_id' => $pr->id,
+                    'shift_id' => $pr->shift_id,
+                    'guard_id' => $pr->guard_id,
+                    'reviewed_by' => $this->currentAdminId(),
+                    'decision' => $decision,
+                    'note' => $note,
+                    'reviewed_at' => $now,
+                    'server_received_at' => $now,
+                ]);
+
+                if ($pr->shift) {
+                    $this->logShiftEvent($pr->shift, 'PHOTO_REVIEWED', [
+                        'request_id' => $pr->id,
+                        'evidence_id' => $photo->id,
+                        'decision' => $decision,
+                        'note' => $note,
+                        'reviewed_by' => $this->currentAdminId(),
+                    ]);
+                }
+
+                DB::commit();
+            } catch (\Throwable $e) {
+                DB::rollBack();
+                throw $e;
+            }
+
+            // Best-effort: tell the guard's app the outcome immediately. The
+            // mobile reviews poll is the reliable fallback if the push is lost.
+            if ($pr->assignedGuard) {
+                app(PhotoPushNotifier::class)->notifyReviewed($pr->assignedGuard, $review);
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Photo review recorded.',
+                'decision' => $decision,
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('Error reviewing photo', ['evidence_id' => $evidence, 'exception' => $e]);
+            return response()->json(['success' => false, 'error' => 'Unable to record the review. Please try again.'], 500);
         }
     }
 
@@ -494,9 +781,9 @@ class ShiftController extends Controller
             DB::beginTransaction();
             try {
                 foreach ([
-                    'shift_events', 'working_time_overrides', 'nonces', 'photo_requests',
-                    'wakefulness_checks', 'alerts', 'reports', 'guard_locations',
-                    'offline_sync_queue',
+                    'shift_events', 'working_time_overrides', 'nonces', 'photo_reviews',
+                    'photo_requests', 'wakefulness_checks', 'alerts', 'reports',
+                    'guard_locations', 'offline_sync_queue',
                 ] as $childTable) {
                     DB::table($childTable)->where('shift_id', $shift->id)->delete();
                 }
