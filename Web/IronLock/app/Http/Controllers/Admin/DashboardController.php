@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Domains\Admins\Models\Admin;
+use App\Domains\Alerts\Models\Alert;
+use App\Domains\Alerts\Services\AlertService;
+use App\Domains\GPS\Models\GuardLocation;
 use App\Domains\Guards\Models\Guard;
 use App\Domains\Shifts\Models\Shift;
+use App\Domains\Wakefulness\Models\WakefulnessCheck;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
@@ -28,18 +30,29 @@ class DashboardController extends Controller
                 ->with('error', 'Your session has expired. Please log in again.');
         }
 
-        // Get dashboard statistics
-        $stats = $this->getDashboardStats();
+        // Dashboard data — all backed by real queries (Phase 3.3). A failure in
+        // any one section (e.g. transient DB error) is logged and degraded to a
+        // safe default so the page still renders rather than returning a 500.
+        try {
+            $stats = $this->getDashboardStats();
+        } catch (\Throwable $e) {
+            report($e);
+            $stats = ['active_guards' => 0, 'critical_alerts' => 0, 'comms_interrupted' => 0, 'pending_acks' => 0];
+        }
 
-        // Get recent alerts (mocked for now)
-        $recentAlerts = $this->getRecentAlerts();
+        try {
+            $alerts = $this->getRecentAlerts();
+        } catch (\Throwable $e) {
+            report($e);
+            $alerts = [];
+        }
 
-        // Get active guards
-        $activeGuards = $this->getActiveGuards();
-
-        // Get alerts and active guards with proper data structure
-        $alerts = $this->getRecentAlerts();
-        $active_guards = $this->getActiveGuards();
+        try {
+            $active_guards = $this->getActiveGuards();
+        } catch (\Throwable $e) {
+            report($e);
+            $active_guards = [];
+        }
 
         return view('admin.dashboard.index', compact(
             'admin',
@@ -139,101 +152,175 @@ class DashboardController extends Controller
     }
 
     /**
-     * Get dashboard statistics.
+     * Live guard positions for the dashboard map — polled every 15s.
+     *
+     * Returns one entry per active shift with its guard's last-known location,
+     * derived zone status (INSIDE_ZONE / OUTSIDE_ZONE / COMMS_INTERRUPTED) and
+     * the site's geofence polygon for rendering. A guard with no ping yet has
+     * null coordinates; a guard whose last ping is stale (> 30s) is flagged
+     * comms_interrupted rather than placed inside/outside.
+     *
+     * Shared by the dashboard mini-map and the full Live Map page (D-08); the
+     * latter's marker side-panel also reads the shift reference/start, the
+     * wakefulness welfare tally, and whether the guard has an open alert
+     * (driving the "bold pin = unresponsive" styling + the Open Alert button).
+     */
+    public function liveGuards(): JsonResponse
+    {
+        $shifts = Shift::with(['assignedGuard', 'site', 'geofence'])
+            ->where('status', Shift::STATUS_ACTIVE)
+            ->get();
+
+        $locations = GuardLocation::whereIn('guard_id', $shifts->pluck('guard_id'))
+            ->get()
+            ->keyBy('guard_id');
+
+        // Wakefulness welfare tally per active shift (one grouped query, no N+1).
+        $wakeTallies = WakefulnessCheck::whereIn('shift_id', $shifts->pluck('id'))
+            ->selectRaw(
+                "shift_id,
+                 SUM(result = ?) AS confirmed,
+                 SUM(result = ?) AS failed,
+                 COUNT(*) AS total",
+                [WakefulnessCheck::RESULT_CONFIRMED, WakefulnessCheck::RESULT_FAILED]
+            )
+            ->groupBy('shift_id')
+            ->get()
+            ->keyBy('shift_id');
+
+        // Guards currently carrying an open alert → rendered with a bold pin and
+        // offered an "Open Alert" deep link on the Live Map side panel.
+        $openAlertGuardIds = Alert::whereIn('guard_id', $shifts->pluck('guard_id'))
+            ->where('status', 'OPEN')
+            ->pluck('guard_id')
+            ->flip();
+
+        $guards = $shifts->map(function (Shift $shift) use ($locations, $wakeTallies, $openAlertGuardIds) {
+            $location = $locations->get($shift->guard_id);
+            $guard = $shift->assignedGuard;
+            $comms = !$location || $location->isCommsInterrupted();
+            $tally = $wakeTallies->get($shift->id);
+
+            $zoneStatus = $comms ? 'COMMS_INTERRUPTED' : ($location->zone_status ?? 'UNKNOWN');
+
+            return [
+                'guard_id' => $shift->guard_id,
+                'guard_name' => $guard ? trim($guard->first_name . ' ' . $guard->last_name) : 'Unknown',
+                'shift_id' => $shift->id,
+                'shift_reference' => $shift->reference,
+                'shift_started_at' => $shift->actual_start?->toISOString(),
+                'site_id' => $shift->site_id,
+                'site_name' => $shift->site?->name ?? '',
+                'latitude' => $location ? (float) $location->latitude : null,
+                'longitude' => $location ? (float) $location->longitude : null,
+                'battery_level' => $location?->battery_level,
+                'zone_status' => $zoneStatus,
+                'comms_interrupted' => $comms,
+                'has_open_alert' => $openAlertGuardIds->has($shift->guard_id),
+                'wakefulness' => [
+                    'confirmed' => (int) ($tally->confirmed ?? 0),
+                    'failed' => (int) ($tally->failed ?? 0),
+                    'total' => (int) ($tally->total ?? 0),
+                ],
+                'last_seen_at' => $location?->updated_at?->toISOString(),
+                'last_seen_human' => $location?->updated_at?->diffForHumans() ?? 'Never',
+                'geofence_coordinates' => $shift->geofence?->getPolygonCoordinates(),
+            ];
+        })->values();
+
+        return response()->json(['success' => true, 'data' => ['guards' => $guards]]);
+    }
+
+    /**
+     * Dashboard KPI counts (Phase 3.3 — real data).
+     *
+     * `comms_interrupted` MUST use the same definition as the active-guards
+     * table (getActiveGuards): a guard on an ACTIVE shift whose live location is
+     * missing or stale. Counting stale `guard_locations` rows directly would be
+     * wrong both ways — that table keeps one permanent row per guard (no
+     * history, never deleted), so it would count guards from long-ended shifts
+     * AND miss active guards who haven't pinged yet (no row at all).
      */
     private function getDashboardStats(): array
     {
+        $activeGuardIds = Shift::where('status', Shift::STATUS_ACTIVE)->pluck('guard_id');
+
+        $liveLocations = GuardLocation::whereIn('guard_id', $activeGuardIds)
+            ->get()
+            ->keyBy('guard_id');
+
+        $commsInterrupted = $activeGuardIds->filter(function ($guardId) use ($liveLocations) {
+            $location = $liveLocations->get($guardId);
+            return !$location || $location->isCommsInterrupted();
+        })->count();
+
         return [
+            // Employed guards on the roster (employment_status = active). This is
+            // a headcount of the workforce, NOT how many are currently on duty —
+            // the live map and the active-guards table below show who is on an
+            // active shift right now.
             'active_guards' => Guard::where('employment_status', 'active')->count(),
-            'critical_alerts' => 2, // Mocked for now
-            'comms_interrupted' => 1, // Mocked for now
-            'pending_acks' => 4, // Mocked for now
+            'critical_alerts' => Alert::where('status', 'OPEN')->where('severity', 'CRITICAL')->count(),
+            // Active guards whose live position is missing or older than the comms timeout.
+            'comms_interrupted' => $commsInterrupted,
+            // Open (unacknowledged) alerts awaiting a supervisor.
+            'pending_acks' => Alert::where('status', 'OPEN')->count(),
         ];
     }
 
     /**
-     * Get recent alerts (mocked for Phase 2).
+     * Open alerts for the dashboard, delegated to the alert service.
      */
     private function getRecentAlerts(): array
     {
-        return [
-            [
-                'id' => 'alert-1',
-                'type' => 'GUARD_UNRESPONSIVE',
-                'severity' => 'CRITICAL',
-                'guard_name' => 'Guard B',
-                'site_name' => 'Site A',
-                'title' => 'Wakefulness failed — no response',
-                'age' => '4m ago'
-            ],
-            [
-                'id' => 'alert-2',
-                'type' => 'ZONE_EXIT',
-                'severity' => 'CRITICAL',
-                'guard_name' => 'Guard C',
-                'site_name' => 'North Bay',
-                'title' => 'Guard outside geofence > grace period (5 min)',
-                'age' => '8m ago'
-            ],
-            [
-                'id' => 'alert-3',
-                'type' => 'PHOTO_TIMEOUT',
-                'severity' => 'WARNING',
-                'guard_name' => 'Mary Tang',
-                'site_name' => 'North Bay',
-                'title' => '90s response window expired',
-                'age' => '2m ago'
-            ],
-            [
-                'id' => 'alert-4',
-                'type' => 'CLOCK_MANIPULATION_SUSPECTED',
-                'severity' => 'WARNING',
-                'guard_name' => 'Chris K',
-                'site_name' => 'East Court',
-                'title' => 'NTP/EXIF delta > 30s threshold',
-                'age' => '15m ago'
-            ]
-        ];
+        return app(AlertService::class)->getActiveAlerts();
     }
 
     /**
-     * Get active guards (mocked for Phase 2).
+     * Active guards with their live zone status for the dashboard table.
      */
     private function getActiveGuards(): array
     {
-        return [
-            [
-                'id' => 'guard-1',
-                'name' => 'John Smith',
-                'site_name' => 'Westfield A',
-                'zone_status_class' => 'inside',
-                'zone_status_text' => '✓ Inside Zone',
-                'last_gps' => '8s ago'
-            ],
-            [
-                'id' => 'guard-2',
-                'name' => 'Mary Tang',
-                'site_name' => 'North Bay',
-                'zone_status_class' => 'outside',
-                'zone_status_text' => '⚠ Outside Zone · grace: 2:14',
-                'last_gps' => '22s ago'
-            ],
-            [
-                'id' => 'guard-3',
-                'name' => 'Guard B',
-                'site_name' => 'Site A',
-                'zone_status_class' => 'unresponsive',
-                'zone_status_text' => '✗ Unresponsive',
-                'last_gps' => '4m ago'
-            ],
-            [
-                'id' => 'guard-4',
-                'name' => 'Chris K',
-                'site_name' => 'East Court',
-                'zone_status_class' => 'interrupted',
-                'zone_status_text' => '⊘ Comms Interrupted',
-                'last_gps' => '12m ago'
-            ]
-        ];
+        $shifts = Shift::with(['assignedGuard', 'site'])
+            ->where('status', Shift::STATUS_ACTIVE)
+            ->get();
+
+        $locations = GuardLocation::whereIn('guard_id', $shifts->pluck('guard_id'))
+            ->get()
+            ->keyBy('guard_id');
+
+        // Shifts whose guard currently has an open zone-exit alert.
+        $alertedShiftIds = Alert::whereIn('shift_id', $shifts->pluck('id'))
+            ->where('type', 'ZONE_EXIT')
+            ->where('status', 'OPEN')
+            ->pluck('shift_id')
+            ->flip();
+
+        return $shifts->map(function (Shift $shift) use ($locations, $alertedShiftIds) {
+            $location = $locations->get($shift->guard_id);
+            $guard = $shift->assignedGuard;
+
+            if (!$location || $location->isCommsInterrupted()) {
+                $statusClass = 'interrupted';
+                $statusText = '⊘ Comms Interrupted';
+            } elseif ($location->zone_status === 'OUTSIDE_ZONE') {
+                $hasAlert = $alertedShiftIds->has($shift->id);
+                $statusClass = $hasAlert ? 'unresponsive' : 'outside';
+                $statusText = $hasAlert ? '✗ Zone Exit Alert' : '⚠ Outside Zone';
+            } else {
+                $statusClass = 'inside';
+                $statusText = '✓ Inside Zone';
+            }
+
+            return [
+                'id' => $shift->guard_id,
+                'shift_id' => $shift->id,
+                'name' => $guard ? trim($guard->first_name . ' ' . $guard->last_name) : 'Unknown',
+                'site_name' => $shift->site?->name ?? 'No Site',
+                'zone_status_class' => $statusClass,
+                'zone_status_text' => $statusText,
+                'last_gps' => $location?->updated_at ? $location->updated_at->diffForHumans() : 'Never',
+            ];
+        })->values()->toArray();
     }
 }

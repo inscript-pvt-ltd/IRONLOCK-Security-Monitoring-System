@@ -141,6 +141,26 @@ class AuthService
     }
 
     /**
+     * Ensure the guard has a per-guard HMAC secret and return it (raw).
+     *
+     * This is the shared symmetric key the app uses to sign photo-upload
+     * payloads (spec §12.5); the server recomputes the HMAC with the same key.
+     * It is generated once on first login and persisted raw (it must be
+     * reproducible on both sides), hidden from serialization on the model, and
+     * returned to the app exactly once here so it can be stored in the device
+     * keychain. Returned on every login so a re-installed app can re-cache it.
+     */
+    public function ensureHmacSecret(Guard $guard): string
+    {
+        if (empty($guard->hmac_secret)) {
+            $guard->forceFill(['hmac_secret' => bin2hex(random_bytes(32))]);
+            $guard->save();
+        }
+
+        return $guard->hmac_secret;
+    }
+
+    /**
      * Mint a new access token for an existing, validated session (refresh
      * flow). Rolls the session's stored access-token hash + expiry forward so
      * the new access token passes GuardAuth; the refresh token is unchanged.

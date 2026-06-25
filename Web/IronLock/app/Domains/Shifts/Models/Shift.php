@@ -76,6 +76,7 @@ class Shift extends Model
         'early_end_decided_by',
         'resolved_at',
         'totp_seed',
+        'wakefulness_schedule',
         'status',
         'started_by',
         'ended_by',
@@ -113,6 +114,10 @@ class Shift extends Model
             'early_end_decided_at' => 'datetime',
             'resolved_at' => 'datetime',
             'compliance_summary' => 'array',
+            // Decrypted transparently on read; the column stores ciphertext so a
+            // DB leak never exposes the offline TOTP seed (spec §9.4).
+            'totp_seed' => 'encrypted',
+            'wakefulness_schedule' => 'array',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
@@ -453,6 +458,12 @@ class Shift extends Model
 
     /**
      * Start the shift.
+     *
+     * Provisions the wakefulness machinery at start time (spec §9.4.1): a
+     * per-shift TOTP seed (so the app can compute offline challenge codes) and a
+     * randomised challenge schedule (so the app can fire matching offline local
+     * notifications, and the server dispatcher knows when to push online ones).
+     * Both are generated once and never regenerated on a restart.
      */
     public function start(?string $startedBy = null): bool
     {
@@ -460,13 +471,56 @@ class Shift extends Model
             return false;
         }
 
-        $this->update([
+        $startAt = Carbon::now();
+
+        $attributes = [
             'status' => self::STATUS_ACTIVE,
-            'actual_start' => Carbon::now(),
-            'started_by' => $startedBy ?? 'mobile_app'
-        ]);
+            'actual_start' => $startAt,
+            'started_by' => $startedBy ?? 'mobile_app',
+        ];
+
+        // Provision once. A seed/schedule already on file (e.g. a re-opened
+        // shift) is kept so previously-delivered offline codes stay valid.
+        if (empty($this->totp_seed)) {
+            $attributes['totp_seed'] = \App\Domains\Wakefulness\Support\Totp::generateSecret();
+        }
+        if (empty($this->wakefulness_schedule)) {
+            $attributes['wakefulness_schedule'] = $this->buildWakefulnessSchedule($startAt);
+        }
+
+        $this->update($attributes);
 
         return true;
+    }
+
+    /**
+     * Build the randomised wakefulness challenge schedule for the live portion
+     * of the shift: marks spaced a random 30–45 min apart (config-driven),
+     * starting one gap after `$from` and stopping at scheduled_end. Returns an
+     * array of ISO-8601 UTC timestamps — the single source of truth shared by
+     * the server dispatcher and the app's offline notifications.
+     */
+    public function buildWakefulnessSchedule(Carbon $from): array
+    {
+        $minGap = (int) config('ironlock.wakefulness_min_gap_minutes', 30);
+        $maxGap = (int) config('ironlock.wakefulness_max_gap_minutes', 45);
+        if ($maxGap < $minGap) {
+            $maxGap = $minGap;
+        }
+
+        $end = $this->scheduled_end ? $this->scheduled_end->copy() : $from->copy()->addHours(8);
+
+        $schedule = [];
+        $cursor = $from->copy()->addMinutes(random_int($minGap, $maxGap));
+
+        // Cap the count so a misconfigured (e.g. multi-day) shift can't generate
+        // an unbounded array; a normal shift produces well under this.
+        while ($cursor->lessThan($end) && count($schedule) < 64) {
+            $schedule[] = $cursor->copy()->utc()->format('Y-m-d\TH:i:s\Z');
+            $cursor->addMinutes(random_int($minGap, $maxGap));
+        }
+
+        return $schedule;
     }
 
     /**
@@ -787,10 +841,45 @@ class Shift extends Model
                 'started_on_time' => $this->actual_start && $this->actual_start <= $this->scheduled_start->addMinutes(15),
                 'ended_on_time' => $this->actual_end && $this->actual_end >= $this->scheduled_end->subMinutes(15)
             ],
+            // Photo verification tally at end-of-shift. Reviews recorded after
+            // this snapshot are reflected live on the timeline; the report keeps
+            // this point-in-time record.
+            'photo_verification' => $this->photoVerificationTally(),
             'generated_at' => Carbon::now()->toISOString()
         ];
 
         return $summary;
+    }
+
+    /**
+     * Photo-verification counts for the compliance summary: how many requests
+     * were raised/fulfilled and how many fulfilled photos an admin has reviewed
+     * (approved / rejected). A snapshot at end-of-shift; the timeline recomputes
+     * it live for reviews recorded later.
+     */
+    public function photoVerificationTally(): array
+    {
+        $requests = \App\Domains\Photos\Models\PhotoRequest::where('shift_id', $this->id)->count();
+        $fulfilled = \App\Domains\Photos\Models\PhotoRequest::where('shift_id', $this->id)
+            ->where('status', \App\Domains\Photos\Models\PhotoRequest::STATUS_FULFILLED)
+            ->count();
+
+        $approved = \App\Domains\Photos\Models\PhotoReview::where('shift_id', $this->id)
+            ->where('decision', \App\Domains\Photos\Models\PhotoReview::DECISION_APPROVED)
+            ->count();
+        $rejected = \App\Domains\Photos\Models\PhotoReview::where('shift_id', $this->id)
+            ->where('decision', \App\Domains\Photos\Models\PhotoReview::DECISION_REJECTED)
+            ->count();
+        $reviewed = $approved + $rejected;
+
+        return [
+            'requests' => $requests,
+            'fulfilled' => $fulfilled,
+            'reviewed' => $reviewed,
+            'approved' => $approved,
+            'rejected' => $rejected,
+            'unreviewed' => max(0, $fulfilled - $reviewed),
+        ];
     }
 
     /**

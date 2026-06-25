@@ -324,8 +324,8 @@
         color: var(--text-muted); text-align: center; cursor: default;
     }
 
-    /* attribution */
-    .maplibregl-ctrl-attrib { font-size: 9px; }
+    .maplibregl-ctrl-attrib,
+    .maplibregl-ctrl-logo { display: none !important; }
 
     .map-preview-content {
         flex: 1;
@@ -835,6 +835,7 @@
     let currentCircle = null; // { center:[lat,lng], radius }
     let drawingTool   = 'circle';
     let isDrawingMode   = false;
+    let cancelActiveDraw = null; // set while a polygon/circle draw is in progress; discards its in-progress points
     let radiusSaveTimer = null;
     let pickingLocation = false; // true while user is in pick-from-map mode
     let pickMarker      = null;  // draggable gold dot placed after picking
@@ -1357,12 +1358,27 @@
             dotMarkers = [];
             setSource('preview', emptyFC());
             isDrawingMode = false;
+            cancelActiveDraw = null;
             map.doubleClickZoom.enable();
             map.off('click', onClick);
             map.off('dblclick', onDblClick);
             resetToolButtons();
             saveGeofence('polygon', points);
         }
+
+        // Discard every point placed so far without saving — lets Clear reset an
+        // in-progress polygon so the admin can start drawing again.
+        cancelActiveDraw = function () {
+            dotMarkers.forEach(m => m.remove());
+            dotMarkers = [];
+            points = [];
+            setSource('preview', emptyFC());
+            isDrawingMode = false;
+            cancelActiveDraw = null;
+            map.doubleClickZoom.enable();
+            map.off('click', onClick);
+            map.off('dblclick', onDblClick);
+        };
 
         function onClick(e) {
             if (e.originalEvent.button !== 0) return; // left-click only
@@ -1409,11 +1425,20 @@
             });
             currentCircle = { center, radius };
             isDrawingMode = false;
+            cancelActiveDraw = null;
             map.off('click', onClick);
             resetToolButtons();
             saveGeofence('circle', { center, radius }, true);
             updateGeofenceStatus(null, 'Circle placed. Adjust the radius box to resize.');
         }
+
+        // Abort before the centre is dropped — lets Clear cancel circle drawing.
+        cancelActiveDraw = function () {
+            isDrawingMode = false;
+            cancelActiveDraw = null;
+            map.off('click', onClick);
+            setSource('preview', emptyFC());
+        };
 
         map.on('click', onClick);
         updateGeofenceStatus(null, 'Click once on the map to drop the circle centre.');
@@ -1437,6 +1462,19 @@
 
     function clearGeofence() {
         if (!currentSiteId) { updateGeofenceStatus(null, 'Select a site first, then clear its geofence'); return; }
+
+        // Mid-draw: Clear just discards the points placed so far (nothing is
+        // saved yet) and re-arms the same tool so the admin can draw again. It
+        // does NOT delete any geofence already stored on the server.
+        if (isDrawingMode && cancelActiveDraw) {
+            const tool = drawingTool;
+            cancelActiveDraw();
+            resetToolButtons();
+            if (tool === 'polygon') activatePolygonTool(); else activateCircleTool();
+            updateGeofenceStatus(null, 'Points cleared — draw again.');
+            return;
+        }
+
         const site = sites.find(s => s.id == currentSiteId);
         const hasSaved = site && site.geofences && site.geofences.length > 0;
         if (!hasSaved && !currentCircle) { updateGeofenceStatus(null, 'No geofence to clear for this site'); return; }

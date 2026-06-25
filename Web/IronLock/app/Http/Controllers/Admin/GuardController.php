@@ -443,17 +443,16 @@ class GuardController extends Controller
             'employment_status' => 'required|in:active,inactive,suspended',
         ];
 
-        // Password rules (required for new guards, optional for updates)
-        if (!$guardId) {
-            $rules['password'] = 'required|string|min:8|confirmed';
-        } else {
-            $rules['password'] = 'nullable|string|min:8|confirmed';
-        }
+        // Password rules — numeric-only (digits) so guards can enter it on a
+        // mobile numeric keypad. Required for new guards, optional for updates.
+        $passwordRule = ['string', 'min:8', 'confirmed', 'regex:/^[0-9]+$/'];
+        $rules['password'] = array_merge([$guardId ? 'nullable' : 'required'], $passwordRule);
 
         return Validator::make($request->all(), $rules, [
             'sia_licence_number.regex' => 'SIA licence number must be 8 digits',
             'username.regex' => 'Username can only contain letters, numbers, dots, underscores and hyphens',
             'sia_licence_expiry.after' => 'SIA licence must not be expired',
+            'password.regex' => 'Password must contain numbers only (0-9).',
         ]);
     }
 

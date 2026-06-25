@@ -657,11 +657,11 @@
 
         <div class="drawer-field" id="passwordField">
             <label class="drawer-label">Password</label>
-            <input type="password" class="drawer-input" id="password" name="password">
+            <input type="password" class="drawer-input" id="password" name="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password">
             <span class="field-error" id="error_password"></span>
-            <input type="password" class="drawer-input" id="password_confirmation" name="password_confirmation" placeholder="Confirm Password" style="margin-top: 6px;">
+            <input type="password" class="drawer-input" id="password_confirmation" name="password_confirmation" placeholder="Confirm Password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" style="margin-top: 6px;">
             <span class="field-error" id="error_password_confirmation"></span>
-            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">Leave blank to keep current password</div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">Numbers only, min 8 digits. Leave blank to keep current password.</div>
         </div>
 
         <div class="drawer-field">
@@ -1296,6 +1296,17 @@
             });
             input.addEventListener('change', function() {
                 clearFieldError(this.name);
+            });
+        });
+
+        // Password is numeric-only — strip any non-digit as the admin types so
+        // the field can never hold a value the server will reject.
+        ['password', 'password_confirmation'].forEach(id => {
+            const field = document.getElementById(id);
+            if (!field) return;
+            field.addEventListener('input', function() {
+                const digits = this.value.replace(/[^0-9]/g, '');
+                if (this.value !== digits) this.value = digits;
             });
         });
     });
