@@ -63,6 +63,16 @@ return [
             'throw' => false,
         ],
 
+        // Monthly evidence backup archives (ZIP) — private local disk, admin-only
+        // download. Cached archives for completed months live here and are purged
+        // by the retention cleanup. Never publicly served.
+        'backups' => [
+            'driver' => 'local',
+            'root' => storage_path('app/private/backups'),
+            'visibility' => 'private',
+            'throw' => false,
+        ],
+
     ],
 
     /*

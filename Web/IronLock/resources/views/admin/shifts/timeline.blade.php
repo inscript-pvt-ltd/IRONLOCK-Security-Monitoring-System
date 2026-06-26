@@ -227,6 +227,11 @@
         display: block; color: var(--error-red); font-size: 9px; margin-top: 3px; word-break: break-word;
     }
     .photo-meta { color: var(--text-muted); margin-top: 4px; }
+    .photo-seq {
+        display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 9px;
+        font-size: 9px; font-weight: bold; color: var(--text-muted);
+        border: 1px solid var(--border-dark);
+    }
 
     /* ── Photo review (admin decision) ──────────────── */
     .photo-review-row { margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -472,49 +477,63 @@
             @else
                 <div class="photo-grid">
                     @foreach ($photoRequests as $pr)
-                        @php $badge = strtolower($pr['evidence_status'] ?? $pr['status'] ?? 'pending'); @endphp
-                        <div class="photo-card">
-                            @if (!empty($pr['view_url']))
-                                <img class="photo-thumb" src="{{ $pr['view_url'] }}" alt="Verification photo"
-                                     onclick="window.open(this.src, '_blank')" loading="lazy">
-                            @else
+                        @if (empty($pr['evidences']))
+                            {{-- A request with no image yet (PENDING / TIMEOUT / ANOMALY). --}}
+                            @php $badge = strtolower($pr['status'] ?? 'pending'); @endphp
+                            <div class="photo-card">
                                 <div class="photo-thumb-empty">
                                     {{ $pr['status'] === 'PENDING' ? 'Awaiting response…' : 'No image' }}
                                 </div>
-                            @endif
-                            <div class="photo-body">
-                                <span class="photo-badge {{ $badge }}">{{ str_replace('_', ' ', $badge) }}</span>
-                                <div class="photo-meta">
-                                    {{ ucfirst($pr['request_type'] ?? 'manual') }} ·
-                                    <time class="tl-ts-full" data-ts="{{ $iso($pr['submitted_at'] ?? $pr['requested_at']) }}">{{ $fmt($pr['submitted_at'] ?? $pr['requested_at']) }}</time>
+                                <div class="photo-body">
+                                    <span class="photo-badge {{ $badge }}">{{ str_replace('_', ' ', $badge) }}</span>
+                                    <div class="photo-meta">
+                                        {{ ucfirst($pr['request_type'] ?? 'manual') }} ·
+                                        <time class="tl-ts-full" data-ts="{{ $iso($pr['requested_at']) }}">{{ $fmt($pr['requested_at']) }}</time>
+                                    </div>
                                 </div>
-                                @if (!empty($pr['gps_latitude']) && !empty($pr['gps_longitude']))
-                                    <div class="photo-meta">📍 {{ number_format($pr['gps_latitude'], 5) }}, {{ number_format($pr['gps_longitude'], 5) }}</div>
-                                @endif
-                                @foreach ($pr['flags'] as $flag)
-                                    <span class="photo-flag">⚠ {{ str_replace('_', ' ', $flag) }}</span>
-                                @endforeach
+                            </div>
+                        @else
+                            {{-- One card per uploaded image; a request may carry up to 5. --}}
+                            @foreach ($pr['evidences'] as $idx => $ev)
+                                @php $badge = strtolower($ev['evidence_status'] ?? 'validated'); @endphp
+                                <div class="photo-card">
+                                    <img class="photo-thumb" src="{{ $ev['view_url'] }}" alt="Verification photo"
+                                         onclick="window.open(this.src, '_blank')" loading="lazy">
+                                    <div class="photo-body">
+                                        <span class="photo-badge {{ $badge }}">{{ str_replace('_', ' ', $badge) }}</span>
+                                        @if (($pr['image_count'] ?? 1) > 1)
+                                            <span class="photo-seq">{{ $idx + 1 }} / {{ $pr['image_count'] }}</span>
+                                        @endif
+                                        <div class="photo-meta">
+                                            {{ ucfirst($pr['request_type'] ?? 'manual') }} ·
+                                            <time class="tl-ts-full" data-ts="{{ $iso($pr['submitted_at'] ?? $pr['requested_at']) }}">{{ $fmt($pr['submitted_at'] ?? $pr['requested_at']) }}</time>
+                                        </div>
+                                        @if (!empty($ev['gps_latitude']) && !empty($ev['gps_longitude']))
+                                            <div class="photo-meta">📍 {{ number_format($ev['gps_latitude'], 5) }}, {{ number_format($ev['gps_longitude'], 5) }}</div>
+                                        @endif
+                                        @foreach ($ev['flags'] as $flag)
+                                            <span class="photo-flag">⚠ {{ str_replace('_', ' ', $flag) }}</span>
+                                        @endforeach
 
-                                {{-- Admin review (approve/reject). Only an uploaded
-                                     photo can be reviewed; once reviewed the badge
-                                     replaces the button. --}}
-                                @if (!empty($pr['evidence_id']))
-                                    <div class="photo-review-row">
-                                        @if ($pr['review_decision'])
-                                            <span class="review-badge {{ strtolower($pr['review_decision']) }}">{{ $pr['review_decision'] }}</span>
-                                            <span class="photo-meta">reviewed <time class="tl-ts-full" data-ts="{{ $iso($pr['reviewed_at']) }}">{{ $fmt($pr['reviewed_at']) }}</time></span>
-                                        @else
-                                            <span class="review-badge unreviewed">Unreviewed</span>
-                                            <button type="button" class="btn-review"
-                                                    data-review-url="{{ $pr['review_url'] }}">Review</button>
+                                        {{-- Admin review (approve/reject) is per image; once
+                                             reviewed the badge replaces the button. --}}
+                                        <div class="photo-review-row">
+                                            @if ($ev['review_decision'])
+                                                <span class="review-badge {{ strtolower($ev['review_decision']) }}">{{ $ev['review_decision'] }}</span>
+                                                <span class="photo-meta">reviewed <time class="tl-ts-full" data-ts="{{ $iso($ev['reviewed_at']) }}">{{ $fmt($ev['reviewed_at']) }}</time></span>
+                                            @else
+                                                <span class="review-badge unreviewed">Unreviewed</span>
+                                                <button type="button" class="btn-review"
+                                                        data-review-url="{{ $ev['review_url'] }}">Review</button>
+                                            @endif
+                                        </div>
+                                        @if (!empty($ev['review_note']))
+                                            <div class="review-note-line">Note: {{ $ev['review_note'] }}</div>
                                         @endif
                                     </div>
-                                    @if (!empty($pr['review_note']))
-                                        <div class="review-note-line">Note: {{ $pr['review_note'] }}</div>
-                                    @endif
-                                @endif
-                            </div>
-                        </div>
+                                </div>
+                            @endforeach
+                        @endif
                     @endforeach
                 </div>
             @endif
@@ -623,7 +642,8 @@
             @if (($photoSummary['total'] ?? 0) > 0)
                 <div class="sum-row"><span class="sum-label">Requests</span><span class="sum-val">{{ $photoSummary['total'] }}</span></div>
                 <div class="sum-row"><span class="sum-label">Fulfilled</span><span class="sum-val">{{ $photoSummary['fulfilled'] }}</span></div>
-                <div class="sum-row"><span class="sum-label">Reviewed</span><span class="sum-val">{{ $photoSummary['reviewed'] }} / {{ $photoSummary['fulfilled'] }}</span></div>
+                <div class="sum-row"><span class="sum-label">Images</span><span class="sum-val">{{ $photoSummary['images'] ?? 0 }}</span></div>
+                <div class="sum-row"><span class="sum-label">Reviewed</span><span class="sum-val">{{ $photoSummary['reviewed'] }} / {{ $photoSummary['images'] ?? 0 }}</span></div>
                 <div class="sum-row"><span class="sum-label">Approved</span><span class="sum-val" style="color: var(--success-green);">{{ $photoSummary['approved'] }}</span></div>
                 <div class="sum-row"><span class="sum-label">Rejected</span><span class="sum-val" style="color: var(--error-red);">{{ $photoSummary['rejected'] }}</span></div>
                 <div class="sum-row"><span class="sum-label">Awaiting review</span><span class="sum-val">{{ $photoSummary['unreviewed'] }}</span></div>

@@ -37,3 +37,7 @@ Schedule::command('wakefulness:dispatch')->everyMinute()->withoutOverlapping();
 // window and raise a CRITICAL alert (spec §9.5). Runs every minute.
 // Overlap-protected.
 Schedule::command('wakefulness:timeout-sweep')->everyMinute()->withoutOverlapping();
+
+// Remove monthly evidence backups whose 30-day retention has elapsed (deletes
+// the backup record + cached ZIP only — never the original evidence). Daily.
+Schedule::command('ironlock:backups-cleanup')->dailyAt('03:30')->withoutOverlapping();

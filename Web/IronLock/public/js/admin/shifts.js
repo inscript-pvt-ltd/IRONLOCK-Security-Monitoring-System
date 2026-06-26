@@ -90,6 +90,12 @@ class ShiftCalendar {
             this.updateResolveGuardRow();
         });
 
+        // Generate a one-time SSO access link for the open shift.
+        const genLinkBtn = document.getElementById('generate-access-link-btn');
+        if (genLinkBtn) {
+            genLinkBtn.addEventListener('click', () => this.generateAccessLink());
+        }
+
         // In-drawer cancel flow (pre-start shifts).
         document.getElementById('cancel-shift-btn').addEventListener('click', () => {
             this.showCancelForm();
@@ -738,6 +744,11 @@ class ShiftCalendar {
         document.getElementById('resolve-open-btn').style.display = 'none';
         document.getElementById('cancel-shift-row').style.display = 'none';
 
+        // A guard can still sign in to a checked-in or active shift, so an SSO
+        // access link is still useful there even though the shift is locked.
+        const alRow = document.getElementById('access-link-row');
+        if (alRow) alRow.style.display = (shift.status === 'checked_in' || shift.status === 'active') ? 'flex' : 'none';
+
         // A completed shift has a full audit timeline — offer a link to it.
         const vtRow = document.getElementById('view-timeline-row');
         const vtBtn = document.getElementById('view-timeline-btn');
@@ -788,6 +799,10 @@ class ShiftCalendar {
         // Cancel-shift UI.
         document.getElementById('cancel-view').style.display = 'none';
         document.getElementById('cancel-shift-row').style.display = 'none';
+
+        // Access-link action (re-shown per shift below).
+        const alRow = document.getElementById('access-link-row');
+        if (alRow) alRow.style.display = 'none';
 
         // View-timeline link (only re-shown for a completed shift).
         const vtRow = document.getElementById('view-timeline-row');
@@ -976,6 +991,105 @@ class ShiftCalendar {
             confirmBtn.disabled = false;
             confirmBtn.textContent = 'Cancel Shift';
         }
+    }
+
+    // ── One-time SSO access link ──────────────────────────────
+
+    // Generate a single-use access link for the open shift and copy it straight
+    // to the clipboard, so the admin can paste it to the guard. The link is
+    // valid for 1 hour and still passes every login gate when redeemed.
+    async generateAccessLink() {
+        const shift = this.editingShift;
+        if (!shift) return;
+
+        const btn  = document.getElementById('generate-access-link-btn');
+        const orig = btn ? btn.textContent : 'Generate Access Link';
+        if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+
+        try {
+            const res = await fetch(`/admin/shifts/${shift.id}/access-link`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                }
+            });
+            const data = await res.json();
+
+            if (!data.success || !data.url) {
+                this.showAccessToast(data.error || 'Unable to generate the access link.', false);
+                return;
+            }
+
+            const copied = await this.copyToClipboard(data.url);
+            this.showAccessToast(
+                copied ? '✓ Access link copied to clipboard.'
+                       : 'Link generated, but copying failed. Copy it manually:\n' + data.url,
+                copied
+            );
+        } catch (e) {
+            console.error('Access link error:', e);
+            this.showAccessToast('Something went wrong. Please try again.', false);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = orig; }
+        }
+    }
+
+    // Copy text to the clipboard. Uses the async Clipboard API where available
+    // (needs a secure context), falling back to a hidden textarea + execCommand
+    // so it still works on plain-http localhost. Returns whether it succeeded.
+    async copyToClipboard(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (e) { /* fall through to legacy path */ }
+
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Lightweight transient toast (created on first use). Green for success,
+    // red for failure; auto-hides after a few seconds.
+    showAccessToast(message, ok = true) {
+        let toast = document.getElementById('access-link-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'access-link-toast';
+            toast.style.cssText = [
+                'position:fixed', 'bottom:24px', 'left:50%', 'transform:translateX(-50%)',
+                'z-index:1000', 'max-width:520px', 'padding:11px 16px', 'border-radius:6px',
+                'font-size:12px', 'font-weight:bold', 'white-space:pre-line', 'text-align:center',
+                'box-shadow:0 10px 30px rgba(0,0,0,0.5)', 'opacity:0', 'transition:opacity 0.2s ease',
+                'pointer-events:none'
+            ].join(';');
+            document.body.appendChild(toast);
+        }
+
+        toast.textContent = message;
+        toast.style.background = ok ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
+        toast.style.border = '1px solid ' + (ok ? 'var(--success-green)' : 'var(--error-red)');
+        toast.style.color = ok ? 'var(--success-green)' : 'var(--error-red)';
+
+        clearTimeout(this._accessToastTimer);
+        // force reflow so re-show re-triggers the fade
+        void toast.offsetWidth;
+        toast.style.opacity = '1';
+        this._accessToastTimer = setTimeout(() => { toast.style.opacity = '0'; }, ok ? 3000 : 6000);
     }
 
     // ── WTR warnings below calendar ───────────────────────────
@@ -1177,6 +1291,9 @@ class ShiftCalendar {
             // A scheduled shift that hasn't begun yet — offer Cancel Shift. Once
             // a guard has checked in (or the shift is active) cancellation is gone.
             document.getElementById('cancel-shift-row').style.display = 'flex';
+            // …and a one-time SSO access link the guard can sign in with.
+            const alRow = document.getElementById('access-link-row');
+            if (alRow) alRow.style.display = 'flex';
 
             // If its start time is already in the past, the backend will reject a
             // save unless the start is moved forward (scheduled_start must be

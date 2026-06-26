@@ -119,4 +119,54 @@ return [
 
     'alerts_feed_per_page' => (int) env('IRONLOCK_ALERTS_FEED_PER_PAGE', 25),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Shift Access Link (one-time SSO sign-in)
+    |--------------------------------------------------------------------------
+    |
+    | A supervisor can mint a single-use link that signs a guard in to a
+    | specific shift without typing credentials. The link still passes every
+    | normal login gate (employment status, account lock, and the shift
+    | check-in window) — it only removes the password step.
+    |
+    | - shift_access_link_ttl_minutes: the link expires this many minutes after
+    |   it is generated, regardless of use (default 60).
+    |
+    | - shift_access_link_base: the URL prefix the raw token is appended to when
+    |   building the link the admin copies. The mobile app intercepts this deep
+    |   link and posts the token to POST /mobile/v1/auth/shift-access. When unset
+    |   it defaults to <app.url>/m/shift-access.
+    |
+    */
+
+    'shift_access_link_ttl_minutes' => (int) env('IRONLOCK_SHIFT_ACCESS_TTL_MINUTES', 60),
+
+    'shift_access_link_base' => env('IRONLOCK_SHIFT_ACCESS_LINK_BASE'),
+
+    /*
+    | The mobile app's deep-link scheme prefix. The web landing page at
+    | GET /m/shift-access/{token} bounces the browser into this so the app
+    | opens (a custom scheme isn't auto-tappable from an https link in
+    | WhatsApp/SMS). The raw token is appended to this prefix. Once Universal/
+    | App Links are configured the https link opens the app directly and this
+    | page is just a fallback.
+    */
+
+    'shift_access_app_scheme' => env('IRONLOCK_SHIFT_ACCESS_APP_SCHEME', 'ironlock://shift-access/'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Monthly evidence backups
+    |--------------------------------------------------------------------------
+    |
+    | Each completed calendar month of photo evidence is downloadable as a ZIP
+    | archive for this many days after the month ends, then the scheduled
+    | cleanup removes the backup record + any cached ZIP. The cleanup NEVER
+    | touches the original photo_evidences (they are immutable) — it only purges
+    | the generated archives. Default 30 days.
+    |
+    */
+
+    'backup_retention_days' => (int) env('IRONLOCK_BACKUP_RETENTION_DAYS', 30),
+
 ];

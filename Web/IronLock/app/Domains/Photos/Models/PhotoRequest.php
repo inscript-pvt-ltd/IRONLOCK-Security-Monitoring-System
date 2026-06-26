@@ -9,6 +9,7 @@ use App\Domains\Shifts\Models\Shift;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
@@ -16,7 +17,8 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
  *
  * Mirrors the canonical `photo_requests` schema. Created either by an admin
  * ("manual") or the scheduler ("scheduled"); each request issues one ONLINE
- * nonce and is fulfilled by exactly one PhotoEvidence row.
+ * nonce and is fulfilled by one or more PhotoEvidence rows (a guard may answer a
+ * single request with up to 5 photos — see evidences()).
  */
 class PhotoRequest extends Model
 {
@@ -88,9 +90,24 @@ class PhotoRequest extends Model
         return $this->belongsTo(Nonce::class, 'nonce_id');
     }
 
+    /**
+     * The first/primary evidence for this request. Kept for backward
+     * compatibility — a request may now carry up to 5 photos (see evidences()),
+     * but older call sites that expect a single image still resolve the first.
+     */
     public function evidence(): HasOne
     {
         return $this->hasOne(PhotoEvidence::class, 'photo_request_id');
+    }
+
+    /**
+     * All evidence photos uploaded for this request (1–5). A guard may answer a
+     * single verification request with multiple images; each is its own
+     * immutable PhotoEvidence row under this request.
+     */
+    public function evidences(): HasMany
+    {
+        return $this->hasMany(PhotoEvidence::class, 'photo_request_id');
     }
 
     public function shift(): BelongsTo
