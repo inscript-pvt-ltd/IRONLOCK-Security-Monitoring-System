@@ -31,6 +31,9 @@ Route::prefix('mobile/v1')->middleware(\App\Http\Middleware\LogMobileApiActivity
     // Public authentication endpoints (throttled).
     Route::post('auth/login', [AuthController::class, 'login'])->middleware('throttle:10,1');
     Route::post('auth/refresh', [AuthController::class, 'refresh'])->middleware('throttle:20,1');
+    // One-time Shift Access Link (SSO) redemption — passwordless, but runs the
+    // same login gates as auth/login. Throttled like login to blunt token guessing.
+    Route::post('auth/shift-access', [AuthController::class, 'shiftAccess'])->middleware('throttle:10,1');
 
     // Protected — require a valid guard access token.
     Route::middleware('guard.auth')->group(function () {

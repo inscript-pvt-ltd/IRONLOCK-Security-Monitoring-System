@@ -181,6 +181,28 @@
         border-color: var(--premium-gold);
     }
 
+    /* Render native date pickers in dark mode so the calendar icon shows as a
+       light glyph (visible on the dark field) and the picker popup matches the
+       theme. Applies to SIA Expiry and Hire Date alike. */
+    .drawer-input[type="date"],
+    .drawer-input[type="time"],
+    .drawer-input[type="datetime-local"] { color-scheme: dark; }
+    .drawer-input::-webkit-calendar-picker-indicator { cursor: pointer; opacity: 0.9; }
+
+    /* Password field with a show/hide eye toggle. */
+    .pw-wrap { position: relative; }
+    .pw-wrap .drawer-input { padding-right: 36px; }
+    .pw-toggle {
+        position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+        background: none; border: none; padding: 4px; cursor: pointer;
+        color: var(--text-muted); display: flex; align-items: center; line-height: 0;
+    }
+    .pw-toggle:hover { color: var(--text-primary); }
+    .pw-toggle svg { width: 16px; height: 16px; }
+    .pw-toggle .pw-eye-off { display: none; }
+    .pw-toggle.pw-shown .pw-eye { display: none; }
+    .pw-toggle.pw-shown .pw-eye-off { display: block; }
+
     .drawer-actions {
         display: flex;
         gap: 8px;
@@ -657,9 +679,21 @@
 
         <div class="drawer-field" id="passwordField">
             <label class="drawer-label">Password</label>
-            <input type="password" class="drawer-input" id="password" name="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password">
+            <div class="pw-wrap">
+                <input type="password" class="drawer-input" id="password" name="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password">
+                <button type="button" class="pw-toggle" data-target="password" aria-label="Show password" title="Show password">
+                    <svg class="pw-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    <svg class="pw-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                </button>
+            </div>
             <span class="field-error" id="error_password"></span>
-            <input type="password" class="drawer-input" id="password_confirmation" name="password_confirmation" placeholder="Confirm Password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" style="margin-top: 6px;">
+            <div class="pw-wrap" style="margin-top: 6px;">
+                <input type="password" class="drawer-input" id="password_confirmation" name="password_confirmation" placeholder="Confirm Password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password">
+                <button type="button" class="pw-toggle" data-target="password_confirmation" aria-label="Show password" title="Show password">
+                    <svg class="pw-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    <svg class="pw-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                </button>
+            </div>
             <span class="field-error" id="error_password_confirmation"></span>
             <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">Numbers only, min 8 digits. Leave blank to keep current password.</div>
         </div>
@@ -902,6 +936,41 @@
         document.getElementById('guardDrawer').scrollTop = 0;
     }
 
+    // Show/hide password toggle (eye icon). Wired once on load.
+    function bindPasswordToggles() {
+        document.querySelectorAll('.pw-toggle').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const input = document.getElementById(btn.dataset.target);
+                if (!input) return;
+                const reveal = input.type === 'password';
+                input.type = reveal ? 'text' : 'password';
+                btn.classList.toggle('pw-shown', reveal);
+                const label = reveal ? 'Hide password' : 'Show password';
+                btn.setAttribute('aria-label', label);
+                btn.setAttribute('title', label);
+            });
+        });
+    }
+
+    // Re-mask both password fields (called whenever the drawer opens).
+    function resetPasswordToggles() {
+        ['password', 'password_confirmation'].forEach(id => {
+            const input = document.getElementById(id);
+            if (input) input.type = 'password';
+        });
+        document.querySelectorAll('.pw-toggle').forEach(btn => {
+            btn.classList.remove('pw-shown');
+            btn.setAttribute('aria-label', 'Show password');
+            btn.setAttribute('title', 'Show password');
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', bindPasswordToggles);
+    } else {
+        bindPasswordToggles();
+    }
+
     function openGuardDrawer(mode, guardId = null) {
         const drawer = document.getElementById('guardDrawer');
         const overlay = document.querySelector('.drawer-overlay');
@@ -918,6 +987,9 @@
 
         // Clear all errors
         clearAllErrors();
+
+        // Always reopen with passwords masked.
+        resetPasswordToggles();
 
         if (mode === 'add') {
             title.textContent = 'Add Guard';

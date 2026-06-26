@@ -90,10 +90,16 @@ class PhotoController extends Controller
             return $this->apiError('SHIFT_NOT_ACTIVE', 'No active shift found with this ID.', 409);
         }
 
-        $validator = Validator::make($request->all(), [
-            'photo' => ['required', 'file', 'image', 'mimes:jpeg,jpg,png', 'max:10240'], // 10 MB
+        // Two accepted shapes, both validated the same way downstream:
+        //   - legacy single: `photo` (file) + `signature` (string)
+        //   - multi (1–5):   `photos[]` (files) + `signatures[]` (parallel)
+        // Each image is signed independently (HMAC over its own bytes), so a
+        // multi upload carries one signature per image.
+        $isMulti = $request->hasFile('photos') || is_array($request->input('signatures'));
+        $max = PhotoVerificationService::MAX_PHOTOS_PER_REQUEST;
+
+        $rules = [
             'nonce_value' => ['required', 'string'],
-            'signature' => ['required', 'string'],
             'request_id' => ['sometimes', 'nullable', 'string'],
             'latitude' => ['sometimes', 'nullable', 'numeric'],
             'longitude' => ['sometimes', 'nullable', 'numeric'],
@@ -102,18 +108,50 @@ class PhotoController extends Controller
             'ntp_timestamp' => ['sometimes', 'nullable', 'string'],
             'ntp_reference' => ['sometimes', 'nullable', 'string'],
             'elapsed_seconds' => ['sometimes', 'nullable', 'numeric'],
-        ]);
+        ];
+
+        if ($isMulti) {
+            $rules['photos'] = ['required', 'array', 'min:1', "max:{$max}"];
+            $rules['photos.*'] = ['required', 'file', 'image', 'mimes:jpeg,jpg,png', 'max:10240']; // 10 MB each
+            $rules['signatures'] = ['required', 'array', 'min:1', "max:{$max}"];
+            $rules['signatures.*'] = ['required', 'string'];
+        } else {
+            $rules['photo'] = ['required', 'file', 'image', 'mimes:jpeg,jpg,png', 'max:10240']; // 10 MB
+            $rules['signature'] = ['required', 'string'];
+        }
+
+        $validator = Validator::make($request->all(), $rules);
+
+        // One signature per image, positionally matched.
+        $validator->after(function ($v) use ($request, $isMulti) {
+            if ($isMulti && count((array) $request->file('photos')) !== count((array) $request->input('signatures'))) {
+                $v->errors()->add('signatures', 'Each photo must have exactly one matching signature.');
+            }
+        });
 
         if ($validator->fails()) {
             return $this->apiError('VALIDATION_ERROR', 'The given data was invalid.', 422, $validator->errors()->toArray());
         }
 
-        $result = $this->photos->submitPhoto(
+        // Normalise to a list of {file, signature} items the service stores as
+        // individual evidence rows under the one request.
+        if ($isMulti) {
+            $files = array_values($request->file('photos'));
+            $sigs = array_values((array) $request->input('signatures'));
+            $items = [];
+            foreach ($files as $i => $file) {
+                $items[] = ['file' => $file, 'signature' => (string) ($sigs[$i] ?? '')];
+            }
+        } else {
+            $items = [['file' => $request->file('photo'), 'signature' => (string) $request->input('signature')]];
+        }
+
+        $result = $this->photos->submitPhotos(
             $guard,
             $shift,
-            $request->file('photo'),
+            $items,
             $request->only([
-                'request_id', 'nonce_value', 'signature', 'latitude', 'longitude',
+                'request_id', 'nonce_value', 'latitude', 'longitude',
                 'captured_at', 'exif_timestamp', 'ntp_timestamp', 'ntp_reference', 'elapsed_seconds',
             ])
         );
@@ -129,6 +167,9 @@ class PhotoController extends Controller
         return $this->apiSuccess([
             'result' => $result['result'],
             'flags' => $result['flags'],
+            // How many images were stored for this request (1–5). Legacy single
+            // uploads return 1, so existing clients are unaffected.
+            'count' => $result['count'] ?? 1,
         ]);
     }
 

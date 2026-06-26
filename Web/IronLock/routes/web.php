@@ -8,6 +8,22 @@ Route::get('/', function () {
     return redirect()->route('admin.login');
 });
 
+// Shift Access Link (SSO) landing page — PUBLIC, no auth. A supervisor sends the
+// guard an https link (this URL); tapping it in WhatsApp/SMS opens the browser,
+// and this page bounces into the mobile app's custom scheme so the app can
+// redeem the token via POST /api/mobile/v1/auth/shift-access. This page is a
+// doorway ONLY — it never consumes or validates the token (redemption happens
+// app-side). The token is constrained to hex so nothing else reaches the view.
+Route::get('m/shift-access/{token}', function (string $token) {
+    return response()
+        ->view('mobile.shift_access_redirect', [
+            'token' => $token,
+            'scheme' => rtrim((string) config('ironlock.shift_access_app_scheme', 'ironlock://shift-access/'), '/') . '/' . $token,
+        ])
+        // Don't let a proxy/CDN cache the bounce page.
+        ->header('Cache-Control', 'no-store, no-cache, must-revalidate');
+})->where('token', '[A-Fa-f0-9]{16,128}')->name('shift-access.open');
+
 // Admin Authentication Routes
 Route::prefix('admin')->name('admin.')->group(function () {
     // Public routes (no auth required)
@@ -94,10 +110,21 @@ Route::prefix('admin')->name('admin.')->group(function () {
         // active shift with a live code-challenge (pushed to the app, same as a
         // scheduled challenge). No admin review — the result is auto CONFIRMED/FAILED.
         Route::post('shifts/{shift}/request-wakefulness', [App\Http\Controllers\Admin\ShiftController::class, 'requestWakefulness'])->name('shifts.request-wakefulness');
+        // One-time SSO access link: mint a single-use, 1-hour link the guard can
+        // use to sign in to this shift without a password (still passes all login
+        // gates at redemption). Returned to the drawer, which copies it.
+        Route::post('shifts/{shift}/access-link', [App\Http\Controllers\Admin\ShiftController::class, 'generateAccessLink'])->name('shifts.access-link');
         Route::get('photos/{evidence}/view', [App\Http\Controllers\Admin\ShiftController::class, 'viewPhoto'])->name('photos.view');
         // Record an admin's manual review (approve/reject) of a stored photo. The
         // decision feeds the compliance summary and is pushed/polled to the guard.
         Route::post('photos/{evidence}/review', [App\Http\Controllers\Admin\ShiftController::class, 'reviewPhoto'])->name('photos.review');
+
+        // Backup management (admin-only): list monthly evidence archives for the
+        // sidebar Backup modal and download a month's ZIP. Generation is dynamic
+        // and read-only over the evidence store; never publicly accessible.
+        Route::get('backups', [App\Http\Controllers\Admin\BackupController::class, 'index'])->name('backups.index');
+        Route::get('backups/{month}/download', [App\Http\Controllers\Admin\BackupController::class, 'download'])
+            ->where('month', '\d{4}-\d{2}')->name('backups.download');
 
         // API status endpoint
         Route::get('status', function () {

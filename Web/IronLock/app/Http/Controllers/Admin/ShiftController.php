@@ -17,6 +17,7 @@ use App\Domains\Photos\Services\PhotoVerificationService;
 use App\Domains\Notifications\Services\PhotoPushNotifier;
 use App\Domains\Wakefulness\Models\WakefulnessCheck;
 use App\Domains\Wakefulness\Services\WakefulnessService;
+use App\Domains\Authentication\Services\ShiftAccessLinkService;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -255,48 +256,61 @@ class ShiftController extends Controller
                 ->get();
 
             // Photo verification (Phase 4): all requests for this shift, newest
-            // first, each with its stored evidence. The image itself is served
-            // only through an admin-authenticated route (viewPhoto) — the file
-            // is never publicly accessible and no raw path leaks into the page.
-            $photoRequests = PhotoRequest::with('evidence.review')
+            // first, each with ALL its stored evidence images (a request may now
+            // carry up to 5). The images are served only through an admin-
+            // authenticated route (viewPhoto) — the file is never publicly
+            // accessible and no raw path leaks into the page.
+            $photoRequests = PhotoRequest::with('evidences.review')
                 ->where('shift_id', $shift->id)
                 ->orderByDesc('requested_at')
                 ->get()
                 ->map(function (PhotoRequest $r) {
-                    $evidence = $r->evidence;
-                    $review = $evidence?->review;
+                    $evidences = $r->evidences
+                        ->sortBy('created_at')
+                        ->values()
+                        ->map(function (PhotoEvidence $e) {
+                            $review = $e->review;
+                            return [
+                                'evidence_id' => $e->id,
+                                'evidence_status' => $e->status(),
+                                'flags' => $e->flags ?? [],
+                                'gps_latitude' => $e->gps_latitude,
+                                'gps_longitude' => $e->gps_longitude,
+                                'captured_at' => $e->captured_at,
+                                'view_url' => route('admin.photos.view', $e->id),
+                                // Review state — drives the Review button / decision badge.
+                                'review_url' => route('admin.photos.review', $e->id),
+                                'can_review' => $review === null,
+                                'review_decision' => $review?->decision,    // APPROVED | REJECTED | null
+                                'review_note' => $review?->note,
+                                'reviewed_at' => $review?->reviewed_at,
+                            ];
+                        })->all();
+
                     return [
                         'status' => $r->status,
                         'request_type' => $r->request_type,
                         'requested_at' => $r->requested_at,
                         'submitted_at' => $r->submitted_at,
-                        'evidence_id' => $evidence?->id,
-                        'evidence_status' => $evidence?->status(),
-                        'flags' => $evidence?->flags ?? [],
-                        'gps_latitude' => $evidence?->gps_latitude,
-                        'gps_longitude' => $evidence?->gps_longitude,
-                        'captured_at' => $evidence?->captured_at,
-                        'view_url' => $evidence ? route('admin.photos.view', $evidence->id) : null,
-                        // Review state — drives the Review button / decision badge.
-                        'review_url' => $evidence ? route('admin.photos.review', $evidence->id) : null,
-                        'can_review' => $evidence !== null && $review === null,
-                        'review_decision' => $review?->decision,        // APPROVED | REJECTED | null
-                        'review_note' => $review?->note,
-                        'reviewed_at' => $review?->reviewed_at,
+                        'image_count' => count($evidences),
+                        'evidences' => $evidences,
                     ];
                 });
 
             // Photo-review tally for the Compliance Summary panel — computed live
             // (reviews can be recorded after the shift ends, so the stored
             // compliance snapshot may lag; the panel always shows current state).
+            // Counts are image-level now that a request can hold multiple photos.
+            $allEvidences = $photoRequests->flatMap(fn ($r) => $r['evidences']);
             $photoSummary = [
-                'total' => $photoRequests->count(),
+                'total' => $photoRequests->count(),                                  // requests
                 'fulfilled' => $photoRequests->where('status', PhotoRequest::STATUS_FULFILLED)->count(),
-                'reviewed' => $photoRequests->whereNotNull('review_decision')->count(),
-                'approved' => $photoRequests->where('review_decision', PhotoReview::DECISION_APPROVED)->count(),
-                'rejected' => $photoRequests->where('review_decision', PhotoReview::DECISION_REJECTED)->count(),
+                'images' => $allEvidences->count(),                                  // photos uploaded
+                'reviewed' => $allEvidences->whereNotNull('review_decision')->count(),
+                'approved' => $allEvidences->where('review_decision', PhotoReview::DECISION_APPROVED)->count(),
+                'rejected' => $allEvidences->where('review_decision', PhotoReview::DECISION_REJECTED)->count(),
             ];
-            $photoSummary['unreviewed'] = max(0, $photoSummary['fulfilled'] - $photoSummary['reviewed']);
+            $photoSummary['unreviewed'] = max(0, $photoSummary['images'] - $photoSummary['reviewed']);
 
             // Wakefulness verification (Phase 5): every code-challenge for this
             // shift, newest first. A null result is the still-pending state; the
@@ -433,6 +447,48 @@ class ShiftController extends Controller
         } catch (\Throwable $e) {
             Log::error('Error requesting wakefulness check', ['shift_id' => $id, 'exception' => $e]);
             return response()->json(['success' => false, 'error' => 'Unable to request a wakefulness check. Please try again.'], 500);
+        }
+    }
+
+    /**
+     * Generate a one-time SSO access link for this shift and return it to the
+     * admin (the drawer copies it to the clipboard). The link signs the assigned
+     * guard in without a password but still passes every normal login gate at
+     * redemption; generating a new one supersedes any prior unused link. Valid
+     * for config('ironlock.shift_access_link_ttl_minutes') (default 60).
+     */
+    public function generateAccessLink(string $id): JsonResponse
+    {
+        try {
+            $shift = Shift::with('assignedGuard')->findOrFail($id);
+
+            if (in_array($shift->status, [Shift::STATUS_COMPLETED, Shift::STATUS_CANCELLED], true)) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'An access link cannot be generated for a completed or cancelled shift.',
+                ], 422);
+            }
+
+            if (!$shift->assignedGuard) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This shift has no assigned guard.',
+                ], 422);
+            }
+
+            $link = app(ShiftAccessLinkService::class)->generate($shift, $this->currentAdminId());
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Access link generated.',
+                'url' => $link['url'],
+                'expires_at' => $link['expires_at']->toISOString(),
+            ]);
+        } catch (ModelNotFoundException $e) {
+            return response()->json(['success' => false, 'error' => 'Shift not found.'], 404);
+        } catch (\Throwable $e) {
+            Log::error('Error generating access link', ['shift_id' => $id, 'exception' => $e]);
+            return response()->json(['success' => false, 'error' => 'Unable to generate an access link. Please try again.'], 500);
         }
     }
 
@@ -783,7 +839,7 @@ class ShiftController extends Controller
                 foreach ([
                     'shift_events', 'working_time_overrides', 'nonces', 'photo_reviews',
                     'photo_requests', 'wakefulness_checks', 'alerts', 'reports',
-                    'guard_locations', 'offline_sync_queue',
+                    'guard_locations', 'offline_sync_queue', 'shift_access_links',
                 ] as $childTable) {
                     DB::table($childTable)->where('shift_id', $shift->id)->delete();
                 }

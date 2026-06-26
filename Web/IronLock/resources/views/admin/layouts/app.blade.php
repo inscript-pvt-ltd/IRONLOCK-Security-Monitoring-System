@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
+    <link rel="icon" type="image/png" href="{{ asset('ironlock-favicon.png') }}">
     <title>@yield('title', 'Smart Guard Monitor - Admin Dashboard')</title>
 
     <style>
@@ -690,6 +691,16 @@
 
         <div class="nav-spacer"></div>
 
+        <a href="#" class="nav-item" id="backup-nav-item" onclick="openBackupModal(event)">
+            {{-- Backup — archive box --}}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="21 8 21 21 3 21 3 8"></polyline>
+                <rect x="1" y="3" width="22" height="5"></rect>
+                <line x1="10" y1="12" x2="14" y2="12"></line>
+            </svg>
+            <span>Backup</span>
+        </a>
+
         <a href="#" class="nav-item">
             {{-- Settings — gear --}}
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -770,6 +781,72 @@
         @csrf
     </form>
 
+    <!-- Backup Management modal (admin-only) -->
+    <style>
+        .backup-overlay {
+            position: fixed; inset: 0; z-index: 2000; display: none;
+            align-items: center; justify-content: center; padding: 24px;
+            background: rgba(0,0,0,0.6); backdrop-filter: blur(2px);
+        }
+        .backup-overlay.open { display: flex; }
+        .backup-modal {
+            background: var(--surface-dark, #0F172A); border: 1.5px solid var(--border-dark, #2A3441);
+            border-radius: 12px; width: 100%; max-width: 540px; max-height: 80vh;
+            display: flex; flex-direction: column; box-shadow: 0 24px 70px rgba(0,0,0,0.55);
+        }
+        .backup-modal-head {
+            display: flex; align-items: center; gap: 10px;
+            padding: 16px 20px; border-bottom: 1px solid var(--border-dark, #2A3441);
+        }
+        .backup-modal-head h3 { margin: 0; font-size: 15px; color: var(--text-primary, #fff); flex: 1; }
+        .backup-modal-close {
+            background: none; border: none; color: var(--text-muted, #8b95a3);
+            font-size: 22px; line-height: 1; cursor: pointer; padding: 0 4px;
+        }
+        .backup-modal-close:hover { color: var(--text-primary, #fff); }
+        .backup-modal-body { padding: 16px 20px; overflow-y: auto; }
+        .backup-card {
+            background: var(--bg-dark, #0F1419); border: 1px solid var(--border-dark, #2A3441);
+            border-radius: 8px; padding: 14px 16px; margin-bottom: 12px;
+        }
+        .backup-card:last-child { margin-bottom: 0; }
+        .backup-card-top { display: flex; align-items: baseline; gap: 10px; }
+        .backup-card-title { font-size: 14px; font-weight: bold; color: var(--text-primary, #fff); flex: 1; }
+        .backup-status {
+            font-size: 10px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em;
+            padding: 2px 8px; border-radius: 9px; border: 1px solid;
+        }
+        .backup-status.current { color: var(--success-green, #22c55e); border-color: var(--success-green, #22c55e); }
+        .backup-status.countdown { color: var(--premium-gold, #D4AF37); border-color: var(--premium-gold, #D4AF37); }
+        .backup-sub { font-size: 11px; color: var(--text-muted, #8b95a3); margin: 8px 0 6px; }
+        .backup-bar-track {
+            height: 8px; border-radius: 5px; background: var(--surface-dark, #1f2733);
+            border: 1px solid var(--border-dark, #2A3441); overflow: hidden;
+        }
+        .backup-bar-fill { height: 100%; background: var(--premium-gold, #D4AF37); transition: width 0.3s ease; }
+        .backup-bar-fill.current { background: var(--success-green, #22c55e); }
+        .backup-card-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+        .backup-count { font-size: 11px; color: var(--text-muted, #8b95a3); flex: 1; }
+        .backup-dl-btn {
+            font-size: 11px; font-weight: bold; padding: 7px 14px; border-radius: 5px; cursor: pointer;
+            background: var(--premium-gold, #D4AF37); color: #1a1407; border: none;
+        }
+        .backup-dl-btn:hover { opacity: 0.9; }
+        .backup-dl-btn:disabled { opacity: 0.4; cursor: default; }
+        .backup-empty, .backup-loading { color: var(--text-muted, #8b95a3); font-size: 12px; text-align: center; padding: 24px 0; }
+    </style>
+    <div class="backup-overlay" id="backup-overlay" onclick="if(event.target===this)closeBackupModal()">
+        <div class="backup-modal" role="dialog" aria-modal="true" aria-label="Backup Management">
+            <div class="backup-modal-head">
+                <h3>Backup — Monthly Evidence Archive</h3>
+                <button type="button" class="backup-modal-close" onclick="closeBackupModal()" aria-label="Close">&times;</button>
+            </div>
+            <div class="backup-modal-body" id="backup-modal-body">
+                <div class="backup-loading">Loading backups…</div>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Auto-hide flash messages
         document.addEventListener('DOMContentLoaded', function() {
@@ -787,6 +864,72 @@
                 document.getElementById('logout-form').submit();
             }
         }
+
+        // ── Backup Management modal ────────────────────────────────────────
+        // Admin-only. Lists monthly evidence archives (current month + completed
+        // months still within their 30-day retention) and downloads a month's ZIP.
+        function openBackupModal(e) {
+            if (e) e.preventDefault();
+            var overlay = document.getElementById('backup-overlay');
+            var body = document.getElementById('backup-modal-body');
+            overlay.classList.add('open');
+            body.innerHTML = '<div class="backup-loading">Loading backups…</div>';
+
+            fetch('{{ route('admin.backups.index') }}', { headers: { 'Accept': 'application/json' } })
+                .then(function (r) { return r.json(); })
+                .then(function (data) { renderBackups(data.backups || []); })
+                .catch(function () {
+                    body.innerHTML = '<div class="backup-empty">Unable to load backups. Please try again.</div>';
+                });
+        }
+
+        function closeBackupModal() {
+            document.getElementById('backup-overlay').classList.remove('open');
+        }
+
+        function downloadBackup(monthKey) {
+            // GET download carries the admin session cookie; streams the ZIP.
+            window.location.href = '/admin/backups/' + encodeURIComponent(monthKey) + '/download';
+        }
+
+        function renderBackups(list) {
+            var body = document.getElementById('backup-modal-body');
+            function esc(s) {
+                return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+                });
+            }
+            if (!list.length) {
+                body.innerHTML = '<div class="backup-empty">No evidence has been archived yet.</div>';
+                return;
+            }
+            var html = '';
+            list.forEach(function (b) {
+                var pct = Math.max(0, Math.min(100, b.progress_percent || 0));
+                var statusClass = b.is_current ? 'current' : 'countdown';
+                var barClass = b.is_current ? 'backup-bar-fill current' : 'backup-bar-fill';
+                var imgs = (b.image_count || 0) + ' image' + ((b.image_count === 1) ? '' : 's');
+                html += '<div class="backup-card">'
+                    + '<div class="backup-card-top">'
+                    +   '<span class="backup-card-title">' + esc(b.label) + '</span>'
+                    +   '<span class="backup-status ' + statusClass + '">' + esc(b.status) + '</span>'
+                    + '</div>'
+                    + '<div class="backup-sub">' + esc(b.sublabel) + '</div>'
+                    + '<div class="backup-bar-track"><div class="' + barClass + '" style="width:' + pct + '%"></div></div>'
+                    + '<div class="backup-card-foot">'
+                    +   '<span class="backup-count">' + esc(imgs) + '</span>'
+                    +   '<button type="button" class="backup-dl-btn" ' + (b.downloadable ? '' : 'disabled') + ' '
+                    +     'onclick="downloadBackup(\'' + esc(b.month_key) + '\')">Download Backup</button>'
+                    + '</div>'
+                    + '</div>';
+            });
+            body.innerHTML = html;
+        }
+
+        // Close the backup modal on Escape.
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') closeBackupModal();
+        });
 
         // ── Notification bell ──────────────────────────────────────────────
         // Polls the admin notification feed (pending early-finish requests) and

@@ -556,6 +556,14 @@
         border-color: var(--premium-gold);
     }
 
+    /* Render native date/time pickers in dark mode so the calendar/clock icon
+       shows as a light glyph (visible on the dark field) and the picker popup
+       matches the theme. */
+    .drawer-input[type="date"],
+    .drawer-input[type="time"],
+    .drawer-input[type="datetime-local"] { color-scheme: dark; }
+    .drawer-input::-webkit-calendar-picker-indicator { cursor: pointer; opacity: 0.9; }
+
     .drawer-select { cursor: pointer; }
 
     .time-row {
@@ -895,6 +903,10 @@
             <!-- Replaces Save when the shift needs resolution -->
             <button type="button" class="drawer-btn drawer-btn-primary" id="resolve-open-btn" style="display:none;">Resolve</button>
             <button type="button" class="drawer-btn drawer-btn-secondary" onclick="closeShiftDrawer()">Close</button>
+        </div>
+        <!-- Generate one-time SSO access link — sits above Cancel Shift -->
+        <div class="drawer-actions" id="access-link-row" style="display:none; margin-top:8px;">
+            <button type="button" class="drawer-btn drawer-btn-secondary" id="generate-access-link-btn">Generate Access Link</button>
         </div>
         <!-- Cancel-shift action — only for a shift that hasn't started yet -->
         <div class="drawer-actions" id="cancel-shift-row" style="display:none; margin-top:8px;">

@@ -40,6 +40,9 @@ class PhotoVerificationService
     /** Upload-delay threshold before DELAYED_UPLOAD is flagged (spec §16.4). */
     public const DELAYED_UPLOAD_SECONDS = 10;
 
+    /** Max images a guard may attach to a single verification request (min 1). */
+    public const MAX_PHOTOS_PER_REQUEST = 5;
+
     /** NTP vs EXIF delta before CLOCK_MANIPULATION_SUSPECTED is flagged. */
     public const CLOCK_SKEW_SECONDS = 30;
 
@@ -86,7 +89,10 @@ class PhotoVerificationService
     }
 
     /**
-     * Validate and (on success) store an uploaded photo.
+     * Validate and (on success) store a single uploaded photo.
+     *
+     * Backward-compatible thin wrapper over submitPhotos() — existing single
+     * `photo` + `signature` uploads keep working unchanged.
      *
      * @param array $payload {
      *   request_id?: string, nonce_value: string, signature: string,
@@ -94,11 +100,47 @@ class PhotoVerificationService
      *   exif_timestamp?: string, ntp_timestamp?: string,
      *   ntp_reference?: string, elapsed_seconds?: int|float
      * }
-     * @return array{result: 'VALIDATED'|'FLAGGED'|'REJECTED', flags: array<string>, reason: ?string, evidence: ?PhotoEvidence}
+     * @return array{result: 'VALIDATED'|'FLAGGED'|'REJECTED', flags: array<string>, reason: ?string, evidence: ?PhotoEvidence, evidences: array<PhotoEvidence>, count: int}
      */
     public function submitPhoto(Guard $guard, Shift $shift, UploadedFile $file, array $payload): array
     {
+        return $this->submitPhotos(
+            $guard,
+            $shift,
+            [['file' => $file, 'signature' => (string) ($payload['signature'] ?? '')]],
+            $payload
+        );
+    }
+
+    /**
+     * Validate and (on success) store 1–5 uploaded photos for ONE verification
+     * request. Each image is verified independently (its own HMAC over its own
+     * bytes) but the request, nonce and capture-time/window checks are evaluated
+     * once for the whole submission — the nonce is single-use and is consumed
+     * exactly once, no matter how many images accompany it.
+     *
+     * The submission is all-or-nothing for the hard checks: if any image's HMAC
+     * fails, or the nonce/window/timeline check fails, nothing is stored and the
+     * request is marked ANOMALY (mirrors the single-photo behaviour exactly).
+     * On success every image becomes its own immutable PhotoEvidence row under
+     * the request, and the request is fulfilled once.
+     *
+     * @param array<int, array{file: UploadedFile, signature: string}> $items
+     * @param array $payload shared fields (no `photo`/`signature` — those are per item)
+     * @return array{result: 'VALIDATED'|'FLAGGED'|'REJECTED', flags: array<string>, reason: ?string, evidence: ?PhotoEvidence, evidences: array<PhotoEvidence>, count: int}
+     */
+    public function submitPhotos(Guard $guard, Shift $shift, array $items, array $payload): array
+    {
         $serverReceivedAt = Carbon::now();
+
+        // Defensive: at least one, at most five images per request.
+        $items = array_values(array_filter($items, fn ($i) => ($i['file'] ?? null) instanceof UploadedFile));
+        if (count($items) < 1) {
+            return $this->reject('NO_IMAGE');
+        }
+        if (count($items) > self::MAX_PHOTOS_PER_REQUEST) {
+            return $this->reject('TOO_MANY_IMAGES');
+        }
 
         // 1. Resolve the nonce (existence / ownership / not-used). Expiry is
         //    judged later against the capture time, per nonce type.
@@ -118,11 +160,14 @@ class PhotoVerificationService
             return $this->reject('REQUEST_NOT_FOUND');
         }
 
-        // 3. HMAC integrity — recompute over the canonical payload string with
-        //    the guard's shared secret. Mismatch ⇒ reject (tampered/forged).
-        if (!$this->verifyHmac($guard, $file, $payload)) {
-            $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt);
-            return $this->reject('HMAC_INVALID');
+        // 3. HMAC integrity per image — recompute over the canonical payload
+        //    string (with THIS image's bytes) using the guard's shared secret.
+        //    Any mismatch ⇒ reject the whole submission (tampered/forged).
+        foreach ($items as $item) {
+            if (!$this->verifyHmac($guard, $item['file'], $payload + ['signature' => $item['signature']])) {
+                $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt);
+                return $this->reject('HMAC_INVALID');
+            }
         }
 
         // 4. Reconstruct the effective capture time and apply the nonce window.
@@ -140,6 +185,8 @@ class PhotoVerificationService
         }
 
         // 5. Secondary anomaly flags — do NOT reject, only annotate + alert.
+        //    Computed once for the submission (the capture context is shared)
+        //    and applied to every stored image.
         $flags = [];
         $exifTimestamp = $this->parse($payload['exif_timestamp'] ?? null);
 
@@ -171,7 +218,14 @@ class PhotoVerificationService
             return $this->reject('NONCE_ALREADY_USED');
         }
 
-        $evidence = $this->store($guard, $shift, $file, $request, $payload, $captureTime, $ntpAtCapture, $exifTimestamp, $flags, $serverReceivedAt);
+        $evidences = [];
+        $total = count($items);
+        foreach ($items as $i => $item) {
+            $evidences[] = $this->store(
+                $guard, $shift, $item['file'], $request, $payload,
+                $captureTime, $ntpAtCapture, $exifTimestamp, $flags, $serverReceivedAt, $i, $total
+            );
+        }
 
         $request->update([
             'status' => PhotoRequest::STATUS_FULFILLED,
@@ -181,7 +235,8 @@ class PhotoVerificationService
 
         $this->logEvent($shift, 'PHOTO_SUBMITTED', [
             'request_id' => $request->id,
-            'evidence_id' => $evidence->id,
+            'evidence_ids' => array_map(fn (PhotoEvidence $e) => $e->id, $evidences),
+            'image_count' => $total,
             'flags' => $flags,
         ]);
 
@@ -189,7 +244,9 @@ class PhotoVerificationService
             'result' => empty($flags) ? 'VALIDATED' : 'FLAGGED',
             'flags' => $flags,
             'reason' => null,
-            'evidence' => $evidence,
+            'evidence' => $evidences[0] ?? null,
+            'evidences' => $evidences,
+            'count' => $total,
         ];
     }
 
@@ -364,8 +421,10 @@ class PhotoVerificationService
         ?Carbon $exifTimestamp,
         array $flags,
         Carbon $serverReceivedAt,
+        int $index = 0,
+        int $total = 1,
     ): PhotoEvidence {
-        $path = $this->buildStoragePath($guard, $shift, $file, $serverReceivedAt);
+        $path = $this->buildStoragePath($guard, $shift, $file, $serverReceivedAt, $index, $total);
         Storage::disk('photos')->put($path, file_get_contents($file->getRealPath()));
 
         return PhotoEvidence::create([
@@ -397,11 +456,13 @@ class PhotoVerificationService
      * The date + time are taken from the authoritative server-receipt timestamp
      * (UTC) — never the device clock — so the tree reflects when the server
      * actually stored the evidence and an offline upload lands in the day it was
-     * received. The `_HHMMSS` suffix keeps multiple photos on the same
-     * shift+day from overwriting one another. Folders are created lazily by the
-     * disk's put() on first write; empty day/shift folders never appear.
+     * received. The `_HHMMSS` suffix keeps photos on the same shift+day from
+     * overwriting one another; when a single request carries multiple images
+     * (1–5) they all share the same second, so a `_NN` sequence is appended to
+     * keep each filename unique and collision-safe. Folders are created lazily by
+     * the disk's put() on first write; empty day/shift folders never appear.
      */
-    private function buildStoragePath(Guard $guard, Shift $shift, UploadedFile $file, Carbon $serverReceivedAt): string
+    private function buildStoragePath(Guard $guard, Shift $shift, UploadedFile $file, Carbon $serverReceivedAt, int $index = 0, int $total = 1): string
     {
         $stamp = $serverReceivedAt->copy()->utc();
 
@@ -421,7 +482,10 @@ class PhotoVerificationService
 
         $ext = strtolower($file->getClientOriginalExtension() ?: ($file->extension() ?: 'jpg'));
 
-        $filename = "{$code}-{$name}_{$stamp->format('His')}.{$ext}";
+        // Single image keeps the original name exactly; a multi-image submission
+        // appends a 1-based sequence (all images share the same second).
+        $seq = $total > 1 ? '_' . str_pad((string) ($index + 1), 2, '0', STR_PAD_LEFT) : '';
+        $filename = "{$code}-{$name}_{$stamp->format('His')}{$seq}.{$ext}";
 
         return "{$stamp->format('Y')}/{$stamp->format('m')}/{$stamp->format('d')}/{$ref}/{$filename}";
     }
