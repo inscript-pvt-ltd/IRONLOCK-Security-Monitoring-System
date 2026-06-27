@@ -233,6 +233,84 @@
         border: 1px solid var(--border-dark);
     }
 
+    /* ── Photo attempt list (one row per request) ───── */
+    .attempt-list { display: flex; flex-direction: column; gap: 10px; }
+
+    .attempt-row {
+        display: flex; align-items: center; gap: 12px;
+        padding: 11px 14px; border-radius: 6px;
+        background: var(--bg-dark); border: 1px solid var(--border-dark);
+        width: 100%; text-align: left; transition: border-color 0.15s;
+    }
+    .attempt-row:not(.attempt-empty) { cursor: pointer; }
+    .attempt-row:not(.attempt-empty):hover { border-color: var(--premium-gold); }
+
+    .attempt-ordinal {
+        flex-shrink: 0; width: 38px; height: 38px; border-radius: 50%;
+        background: var(--deep-security-blue); color: #fff;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 10px; font-weight: bold; letter-spacing: 0.02em;
+    }
+    .attempt-ordinal-empty { background: var(--border-dark) !important; color: var(--text-muted) !important; }
+
+    .attempt-info { flex: 1; min-width: 0; }
+    .attempt-info-top { font-size: 11px; font-weight: bold; color: var(--text-primary); }
+    .attempt-info-sub { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+
+    .attempt-thumbs { display: flex; gap: 4px; flex-shrink: 0; }
+    .attempt-thumb {
+        width: 38px; height: 38px; border-radius: 3px; object-fit: cover;
+        border: 1px solid var(--border-dark); background: var(--surface-dark);
+    }
+    .attempt-thumb-more {
+        width: 38px; height: 38px; border-radius: 3px;
+        background: var(--border-dark); color: var(--text-muted);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 10px; font-weight: bold;
+    }
+    .attempt-arrow { flex-shrink: 0; color: var(--text-muted); font-size: 20px; line-height: 1; }
+    .attempt-empty-label { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+
+    /* Per-attempt review status chip (shown in the collection bar). */
+    .attempt-review {
+        flex-shrink: 0; display: inline-block; padding: 3px 9px; border-radius: 9px;
+        font-size: 9px; font-weight: bold; text-transform: uppercase;
+        letter-spacing: 0.04em; border: 1px solid; white-space: nowrap;
+    }
+    .attempt-review.ok    { color: var(--success-green); border-color: var(--success-green); }
+    .attempt-review.bad   { color: var(--error-red);     border-color: var(--error-red); }
+    .attempt-review.warn  { color: var(--warning-amber); border-color: var(--warning-amber); }
+    .attempt-review.muted { color: var(--text-muted);    border-color: var(--border-dark); }
+
+    /* ── Photo collection modal ─────────────────────── */
+    .collection-overlay {
+        display: none; position: fixed; inset: 0; z-index: 450;
+        background: rgba(0,0,0,0.72); align-items: center; justify-content: center; padding: 16px;
+    }
+    .collection-overlay.open { display: flex; }
+    .collection-modal {
+        background: var(--surface-dark); border: 1.5px solid var(--border-dark);
+        border-radius: 8px; padding: 20px;
+        width: min(700px, calc(100vw - 32px));
+        max-height: calc(100vh - 64px); overflow-y: auto;
+        box-shadow: 0 24px 80px rgba(0,0,0,0.7);
+        scrollbar-width: thin; scrollbar-color: var(--deep-security-blue) var(--bg-dark);
+    }
+    .collection-modal::-webkit-scrollbar { width: 8px; }
+    .collection-modal::-webkit-scrollbar-track { background: var(--bg-dark); }
+    .collection-modal::-webkit-scrollbar-thumb { background: var(--deep-security-blue); border-radius: 4px; }
+    .collection-modal-header {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border-dark);
+    }
+    .collection-modal-title { font-size: 13px; font-weight: bold; color: var(--text-primary); }
+    .collection-modal-sub { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+    .collection-modal-close {
+        flex-shrink: 0; background: none; border: none; color: var(--text-muted);
+        font-size: 20px; cursor: pointer; line-height: 1; padding: 0 2px; margin-left: 12px;
+    }
+    .collection-modal-close:hover { color: var(--text-primary); }
+
     /* ── Photo review (admin decision) ──────────────── */
     .photo-review-row { margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .review-badge {
@@ -466,76 +544,85 @@
                 @endif
             </div>
 
-            {{-- Badge reflects the request outcome: a fulfilled request shows the
-                 evidence's derived status (VALIDATED/FLAGGED); an unfulfilled one
-                 shows the request status (PENDING/TIMEOUT/ANOMALY). --}}
+            {{-- Each row = one attempt (photo request). Click a fulfilled attempt to
+                 open the collection modal and see all its images with review controls.
+                 Unfulfilled requests (PENDING / TIMEOUT / ANOMALY) show inline. --}}
             @if ($photoRequests->isEmpty())
                 <div class="placeholder-note">
                     No photo checks have been requested for this shift yet.
-                    @if ($shift->status === 'active')Use “Request Photo” above to ask the guard for a live photo now.@endif
+                    @if ($shift->status === 'active')Use "Request Photo" above to ask the guard for a live photo now.@endif
                 </div>
             @else
-                <div class="photo-grid">
-                    @foreach ($photoRequests as $pr)
-                        @if (empty($pr['evidences']))
-                            {{-- A request with no image yet (PENDING / TIMEOUT / ANOMALY). --}}
-                            @php $badge = strtolower($pr['status'] ?? 'pending'); @endphp
-                            <div class="photo-card">
-                                <div class="photo-thumb-empty">
-                                    {{ $pr['status'] === 'PENDING' ? 'Awaiting response…' : 'No image' }}
+                @php $ordinals = ['1st','2nd','3rd','4th','5th']; @endphp
+                <div class="attempt-list">
+                    @foreach ($photoRequests as $prIdx => $pr)
+                        @php
+                            $ordLabel   = $ordinals[$prIdx] ?? (($prIdx + 1) . 'th');
+                            $hasImages  = !empty($pr['evidences']);
+                            $reqBadge   = strtolower($pr['status'] ?? 'pending');
+                            $previewEvs = array_slice($pr['evidences'] ?? [], 0, 3);
+                            $imgCount   = $pr['image_count'] ?? 0;
+                            $moreCount  = max(0, $imgCount - 3);
+
+                            // Per-attempt review tally → status chip in the collection bar.
+                            $evs       = collect($pr['evidences'] ?? []);
+                            $revCount  = $evs->whereNotNull('review_decision')->count();
+                            $apprCount = $evs->where('review_decision', 'APPROVED')->count();
+                            $rejCount  = $evs->where('review_decision', 'REJECTED')->count();
+                            if ($revCount === 0) {
+                                $reviewClass = 'muted'; $reviewText = 'Unreviewed';
+                            } elseif ($revCount < $imgCount) {
+                                $reviewClass = 'warn'; $reviewText = $revCount . '/' . $imgCount . ' reviewed';
+                            } elseif ($rejCount > 0) {
+                                $reviewClass = 'bad'; $reviewText = '✗ ' . $rejCount . ' rejected';
+                            } else {
+                                $reviewClass = 'ok'; $reviewText = '✓ Reviewed';
+                            }
+                        @endphp
+                        <div class="attempt-row {{ !$hasImages ? 'attempt-empty' : '' }}"
+                            @if ($hasImages)
+                                role="button" tabindex="0"
+                                onclick="openCollection({{ $prIdx }})"
+                                onkeydown="if(event.key==='Enter'||event.key===' ')openCollection({{ $prIdx }})"
+                            @endif>
+                            <div class="attempt-ordinal {{ !$hasImages ? 'attempt-ordinal-empty' : '' }}">{{ $ordLabel }}</div>
+                            <div class="attempt-info">
+                                <div class="attempt-info-top">
+                                    {{ $ordLabel }} Attempt
+                                    @if ($hasImages)
+                                        &nbsp;·&nbsp;{{ $pr['image_count'] }} {{ $pr['image_count'] === 1 ? 'image' : 'images' }}
+                                    @endif
                                 </div>
-                                <div class="photo-body">
-                                    <span class="photo-badge {{ $badge }}">{{ str_replace('_', ' ', $badge) }}</span>
-                                    <div class="photo-meta">
-                                        {{ ucfirst($pr['request_type'] ?? 'manual') }} ·
-                                        <time class="tl-ts-full" data-ts="{{ $iso($pr['requested_at']) }}">{{ $fmt($pr['requested_at']) }}</time>
-                                    </div>
+                                <div class="attempt-info-sub">
+                                    {{ ucfirst($pr['request_type'] ?? 'manual') }}
+                                    &nbsp;·&nbsp;<time class="tl-ts-full" data-ts="{{ $iso($pr['requested_at']) }}">{{ $fmt($pr['requested_at']) }}</time>
+                                    &nbsp;·&nbsp;<span class="photo-badge {{ $reqBadge }}" style="font-size:8px;padding:1px 5px;">{{ str_replace('_', ' ', $reqBadge) }}</span>
                                 </div>
                             </div>
-                        @else
-                            {{-- One card per uploaded image; a request may carry up to 5. --}}
-                            @foreach ($pr['evidences'] as $idx => $ev)
-                                @php $badge = strtolower($ev['evidence_status'] ?? 'validated'); @endphp
-                                <div class="photo-card">
-                                    <img class="photo-thumb" src="{{ $ev['view_url'] }}" alt="Verification photo"
-                                         onclick="window.open(this.src, '_blank')" loading="lazy">
-                                    <div class="photo-body">
-                                        <span class="photo-badge {{ $badge }}">{{ str_replace('_', ' ', $badge) }}</span>
-                                        @if (($pr['image_count'] ?? 1) > 1)
-                                            <span class="photo-seq">{{ $idx + 1 }} / {{ $pr['image_count'] }}</span>
-                                        @endif
-                                        <div class="photo-meta">
-                                            {{ ucfirst($pr['request_type'] ?? 'manual') }} ·
-                                            <time class="tl-ts-full" data-ts="{{ $iso($pr['submitted_at'] ?? $pr['requested_at']) }}">{{ $fmt($pr['submitted_at'] ?? $pr['requested_at']) }}</time>
-                                        </div>
-                                        @if (!empty($ev['gps_latitude']) && !empty($ev['gps_longitude']))
-                                            <div class="photo-meta">📍 {{ number_format($ev['gps_latitude'], 5) }}, {{ number_format($ev['gps_longitude'], 5) }}</div>
-                                        @endif
-                                        @foreach ($ev['flags'] as $flag)
-                                            <span class="photo-flag">⚠ {{ str_replace('_', ' ', $flag) }}</span>
-                                        @endforeach
-
-                                        {{-- Admin review (approve/reject) is per image; once
-                                             reviewed the badge replaces the button. --}}
-                                        <div class="photo-review-row">
-                                            @if ($ev['review_decision'])
-                                                <span class="review-badge {{ strtolower($ev['review_decision']) }}">{{ $ev['review_decision'] }}</span>
-                                                <span class="photo-meta">reviewed <time class="tl-ts-full" data-ts="{{ $iso($ev['reviewed_at']) }}">{{ $fmt($ev['reviewed_at']) }}</time></span>
-                                            @else
-                                                <span class="review-badge unreviewed">Unreviewed</span>
-                                                <button type="button" class="btn-review"
-                                                        data-review-url="{{ $ev['review_url'] }}">Review</button>
-                                            @endif
-                                        </div>
-                                        @if (!empty($ev['review_note']))
-                                            <div class="review-note-line">Note: {{ $ev['review_note'] }}</div>
-                                        @endif
-                                    </div>
+                            @if ($hasImages)
+                                <span class="attempt-review {{ $reviewClass }}">{{ $reviewText }}</span>
+                                <div class="attempt-thumbs">
+                                    @foreach ($previewEvs as $ev)
+                                        <img class="attempt-thumb" src="{{ $ev['view_url'] }}" alt="" loading="lazy">
+                                    @endforeach
+                                    @if ($moreCount > 0)
+                                        <div class="attempt-thumb-more">+{{ $moreCount }}</div>
+                                    @endif
                                 </div>
-                            @endforeach
-                        @endif
+                                <span class="attempt-arrow">›</span>
+                            @else
+                                <span class="attempt-empty-label">
+                                    {{ $pr['status'] === 'PENDING' ? 'Awaiting response…' : 'No image received' }}
+                                </span>
+                            @endif
+                        </div>
                     @endforeach
                 </div>
+
+                {{-- Serialised for the collection modal JS. Contains only pre-computed
+                     server-generated values (route URLs, formatted data — no raw model
+                     fields are exposed beyond what the page already renders). --}}
+                <script>window.photoAttempts = @json($photoRequests->values());</script>
             @endif
         </div>
 
@@ -557,7 +644,7 @@
                 <div class="placeholder-note">
                     No wakefulness checks have been issued for this shift yet.
                     Challenges fire automatically on a randomised schedule while the guard is on duty.
-                    @if ($shift->status === 'active')Use “Request Wakefulness Check” above to challenge the guard now.@endif
+                    @if ($shift->status === 'active')Use "Request Wakefulness Check" above to challenge the guard now.@endif
                 </div>
             @else
                 @if ($wakefulnessChecks->contains(fn ($c) => $c['result'] === 'FAILED'))
@@ -640,13 +727,22 @@
                  stays current even when reviews happen after the shift ends). --}}
             <div class="panel-title" style="margin-top:16px;">Photo Verification</div>
             @if (($photoSummary['total'] ?? 0) > 0)
-                <div class="sum-row"><span class="sum-label">Requests</span><span class="sum-val">{{ $photoSummary['total'] }}</span></div>
-                <div class="sum-row"><span class="sum-label">Fulfilled</span><span class="sum-val">{{ $photoSummary['fulfilled'] }}</span></div>
+                @php $unfulfilled = max(0, ($photoSummary['total'] ?? 0) - ($photoSummary['fulfilled'] ?? 0)); @endphp
+                <div class="sum-row">
+                    <span class="sum-label">Requests</span>
+                    <span class="sum-val">
+                        {{ $photoSummary['total'] }}@if ($unfulfilled > 0)<span style="color: var(--warning-amber);"> ({{ $unfulfilled }} unfulfilled)</span>@endif
+                    </span>
+                </div>
                 <div class="sum-row"><span class="sum-label">Images</span><span class="sum-val">{{ $photoSummary['images'] ?? 0 }}</span></div>
                 <div class="sum-row"><span class="sum-label">Reviewed</span><span class="sum-val">{{ $photoSummary['reviewed'] }} / {{ $photoSummary['images'] ?? 0 }}</span></div>
-                <div class="sum-row"><span class="sum-label">Approved</span><span class="sum-val" style="color: var(--success-green);">{{ $photoSummary['approved'] }}</span></div>
-                <div class="sum-row"><span class="sum-label">Rejected</span><span class="sum-val" style="color: var(--error-red);">{{ $photoSummary['rejected'] }}</span></div>
-                <div class="sum-row"><span class="sum-label">Awaiting review</span><span class="sum-val">{{ $photoSummary['unreviewed'] }}</span></div>
+                <div class="sum-row">
+                    <span class="sum-label">Decision</span>
+                    <span class="sum-val">
+                        <span style="color: var(--success-green);">{{ $photoSummary['approved'] }} ✓</span>
+                        / <span style="color: var(--error-red);">{{ $photoSummary['rejected'] }} ✗</span>
+                    </span>
+                </div>
             @else
                 <div class="placeholder-note">No photos have been submitted for this shift.</div>
             @endif
@@ -664,6 +760,20 @@
                 <div class="placeholder-note">No wakefulness checks have been issued for this shift.</div>
             @endif
         </div>
+    </div>
+</div>
+
+{{-- Collection modal — all images for one attempt, opened by clicking an attempt row --}}
+<div class="collection-overlay" id="collection-overlay">
+    <div class="collection-modal">
+        <div class="collection-modal-header">
+            <div>
+                <div class="collection-modal-title" id="collection-title"></div>
+                <div class="collection-modal-sub" id="collection-sub"></div>
+            </div>
+            <button class="collection-modal-close" onclick="closeCollection()" title="Close">&times;</button>
+        </div>
+        <div class="photo-grid" id="collection-grid"></div>
     </div>
 </div>
 
@@ -847,6 +957,119 @@
     });
 })();
 
+// ── Photo collection modal ───────────────────────────────────────────
+// Populated on-demand from window.photoAttempts (set by the blade).
+// Review buttons inside the modal delegate to window.openReview, which is
+// exposed by the review-modal IIFE below.
+(function () {
+    var overlay = document.getElementById('collection-overlay');
+    if (!overlay) return;
+
+    var ORDINALS = ['1st','2nd','3rd','4th','5th'];
+    var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    function pad(n) { return String(n).padStart(2, '0'); }
+    function hr12(d) { var h = d.getHours() % 12; return h === 0 ? 12 : h; }
+    function ampm(d) { return d.getHours() >= 12 ? 'PM' : 'AM'; }
+    function fmtFull(ts) {
+        if (!ts) return '—';
+        var d = new Date(ts);
+        if (isNaN(d)) return String(ts);
+        return pad(d.getDate()) + ' ' + MONTHS[d.getMonth()] + ' ' + d.getFullYear()
+             + ' · ' + hr12(d) + ':' + pad(d.getMinutes()) + ' ' + ampm(d);
+    }
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    window.openCollection = function (idx) {
+        var attempts = window.photoAttempts || [];
+        var pr = attempts[idx];
+        if (!pr || !pr.evidences || !pr.evidences.length) return;
+
+        var ordinal = ORDINALS[idx] || ((idx + 1) + 'th');
+        var count   = pr.image_count || pr.evidences.length;
+
+        document.getElementById('collection-title').textContent =
+            ordinal + ' Attempt — ' + count + (count === 1 ? ' Image' : ' Images');
+        document.getElementById('collection-sub').textContent =
+            (pr.request_type
+                ? pr.request_type.charAt(0).toUpperCase() + pr.request_type.slice(1)
+                : 'Manual')
+            + ' · submitted ' + fmtFull(pr.submitted_at || pr.requested_at);
+
+        var grid = document.getElementById('collection-grid');
+        grid.innerHTML = '';
+
+        pr.evidences.forEach(function (ev, i) {
+            var badge   = String(ev.evidence_status || 'validated').toLowerCase();
+            var seqChip = count > 1
+                ? '<span class="photo-seq">' + (i + 1) + ' / ' + count + '</span>'
+                : '';
+            var capLine = '<div class="photo-meta">'
+                + fmtFull(ev.captured_at || pr.submitted_at || pr.requested_at) + '</div>';
+            var gps = ev.gps_latitude && ev.gps_longitude
+                ? '<div class="photo-meta">📍 '
+                    + parseFloat(ev.gps_latitude).toFixed(5) + ', '
+                    + parseFloat(ev.gps_longitude).toFixed(5) + '</div>'
+                : '';
+            var flags = (ev.flags || []).map(function (f) {
+                return '<span class="photo-flag">⚠ ' + esc(String(f).replace(/_/g, ' ')) + '</span>';
+            }).join('');
+
+            var reviewHtml;
+            if (ev.review_decision) {
+                reviewHtml = '<span class="review-badge ' + esc(ev.review_decision.toLowerCase()) + '">'
+                    + esc(ev.review_decision) + '</span>'
+                    + '<span class="photo-meta"> reviewed ' + fmtFull(ev.reviewed_at) + '</span>';
+                if (ev.review_note) {
+                    reviewHtml += '<div class="review-note-line">Note: ' + esc(ev.review_note) + '</div>';
+                }
+            } else {
+                reviewHtml = '<span class="review-badge unreviewed">Unreviewed</span>'
+                    + (ev.can_review
+                        ? '<button type="button" class="btn-review" data-review-url="'
+                            + esc(ev.review_url) + '">Review</button>'
+                        : '');
+            }
+
+            var card = document.createElement('div');
+            card.className = 'photo-card';
+            card.innerHTML =
+                '<img class="photo-thumb" src="' + esc(ev.view_url) + '" alt="Photo ' + (i + 1) + '"'
+                + ' onclick="window.open(this.src,\'_blank\')" loading="lazy">'
+                + '<div class="photo-body">'
+                + '<span class="photo-badge ' + esc(badge) + '">' + esc(badge.replace(/_/g, ' ')) + '</span>'
+                + seqChip + capLine + gps + flags
+                + '<div class="photo-review-row">' + reviewHtml + '</div>'
+                + '</div>';
+            grid.appendChild(card);
+        });
+
+        overlay.classList.add('open');
+    };
+
+    window.closeCollection = function () {
+        overlay.classList.remove('open');
+    };
+
+    overlay.addEventListener('click', function (e) {
+        if (e.target === overlay) window.closeCollection();
+    });
+
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && overlay.classList.contains('open')) window.closeCollection();
+    });
+
+    // Delegate Review button clicks inside the collection grid to the review
+    // modal (opened on top — review modal z-index 500 > collection z-index 450).
+    overlay.addEventListener('click', function (e) {
+        var btn = e.target.closest('.btn-review[data-review-url]');
+        if (btn && window.openReview) window.openReview(btn.dataset.reviewUrl);
+    });
+})();
+
 // ── Review a photo (approve / reject + optional note) ────────────────
 // Opens a modal for the clicked photo, POSTs the decision, and reloads so
 // the badge + compliance tally reflect it. The server pushes the outcome
@@ -868,6 +1091,10 @@
         overlay.classList.add('open');
         noteEl.focus();
     }
+    // Exposed so the collection modal can trigger the review flow for images
+    // rendered dynamically inside it (z-index 500 sits above collection at 450).
+    window.openReview = open;
+
     function close() {
         overlay.classList.remove('open');
         activeUrl = null;

@@ -28,6 +28,12 @@ class SiteController extends Controller
     public function index(Request $request)
     {
         $sites = Site::with(['creator', 'geofences'])
+        // Count shifts currently in progress per site — used to lock geofence
+        // editing while a guard is on duty (the live geofence must not change
+        // mid-shift). Mirrors the server-side guard in GeofenceController.
+        ->withCount(['shifts as active_shifts_count' => function ($query) {
+            $query->where('status', \App\Domains\Shifts\Models\Shift::STATUS_ACTIVE);
+        }])
         ->when($request->get('status'), function($query, $status) {
             $query->where('status', $status);
         })
@@ -43,6 +49,10 @@ class SiteController extends Controller
         // Load coordinates for each geofence. The geometry is always a polygon, but
         // expose the original shape so circles reload as circles (and keep their radius).
         foreach ($sites as $site) {
+            // Boolean flag the Sites page reads to disable the radius/geofence
+            // tools while a shift is active at this site.
+            $site->has_active_shift = $site->active_shifts_count > 0;
+
             foreach ($site->geofences as $geofence) {
                 $geofence->coordinates = $geofence->getPolygonCoordinates();
                 $geofence->type = $geofence->shape_type ?? 'polygon';

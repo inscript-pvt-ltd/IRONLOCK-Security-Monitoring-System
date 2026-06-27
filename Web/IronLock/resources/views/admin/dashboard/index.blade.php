@@ -158,15 +158,15 @@
         <div class="kpi-value" style="color: var(--premium-gold);">{{ $stats['active_guards'] }}</div>
         <div class="kpi-label">Active Guards</div>
     </div>
-    <div class="kpi-card" onclick="location.href='#'">
+    <div class="kpi-card" onclick="location.href='{{ route('admin.alerts.index') }}?severity=CRITICAL&status=OPEN'">
         <div class="kpi-value" style="color: var(--critical-red);">{{ $stats['critical_alerts'] }}</div>
         <div class="kpi-label">Critical Alerts</div>
     </div>
-    <div class="kpi-card" onclick="location.href='#'">
+    <div class="kpi-card" onclick="location.href='{{ route('admin.live-map.index') }}'">
         <div class="kpi-value" style="color: var(--warning-amber);">{{ $stats['comms_interrupted'] }}</div>
         <div class="kpi-label">Comms Interrupted</div>
     </div>
-    <div class="kpi-card" onclick="location.href='#'">
+    <div class="kpi-card" onclick="location.href='{{ route('admin.alerts.index') }}?status=OPEN'">
         <div class="kpi-value" style="color: var(--text-primary);">{{ $stats['pending_acks'] }}</div>
         <div class="kpi-label">Pending Acks</div>
     </div>
