@@ -390,6 +390,24 @@
         text-overflow: ellipsis;
     }
 
+    .geofence-lock-note {
+        font-size: 10px;
+        line-height: 1.4;
+        color: var(--warning-amber);
+        background: rgba(255, 193, 7, 0.08);
+        border: 1px solid rgba(255, 193, 7, 0.35);
+        border-radius: 4px;
+        padding: 7px 9px;
+        margin-bottom: 10px;
+    }
+
+    /* Dim + block the drawing tools while the geofence is locked. */
+    .geofence-tools.locked .geofence-tool-group,
+    .geofence-tools.locked .geofence-card-header {
+        opacity: 0.5;
+        pointer-events: none;
+    }
+
     .geofence-tool-group {
         margin-bottom: 12px;
     }
@@ -716,6 +734,11 @@
                 </div>
                 <div class="geofence-site-name" id="geofenceSiteName">No site selected</div>
 
+                <!-- Shown when the selected site has an active shift — editing is locked. -->
+                <div class="geofence-lock-note" id="geofenceLockNote" style="display:none;">
+                    🔒 A shift is active here — the geofence (including radius) is locked until it ends.
+                </div>
+
                 <div class="geofence-tool-group">
                     <div class="geofence-tool-label">Shape Type</div>
                     <div class="geofence-tool-buttons">
@@ -835,6 +858,7 @@
     let currentCircle = null; // { center:[lat,lng], radius }
     let drawingTool   = 'circle';
     let isDrawingMode   = false;
+    let geofenceLocked  = false; // true while the selected site has an active shift (no edits)
     let cancelActiveDraw = null; // set while a polygon/circle draw is in progress; discards its in-progress points
     let radiusSaveTimer = null;
     let pickingLocation = false; // true while user is in pick-from-map mode
@@ -1225,7 +1249,14 @@
         }
 
         loadSiteGeofence(site);
-        updateGeofenceStatus(site, `Selected: ${site.name} — pick a tool above to draw its geofence`);
+
+        // Lock the geofence tools while a shift is active at this site.
+        applyGeofenceLock(site.has_active_shift);
+        if (site.has_active_shift) {
+            updateGeofenceStatus(null, `🔒 ${site.name} has an active shift — geofence editing is locked until it ends`);
+        } else {
+            updateGeofenceStatus(site, `Selected: ${site.name} — pick a tool above to draw its geofence`);
+        }
     }
 
     // ── Geofence display ──────────────────────────────────────────────────────
@@ -1313,8 +1344,32 @@
         return true;
     }
 
+    // Blocks geofence edits while the selected site has an active shift. The
+    // server enforces the same rule (GeofenceController) — this is the UX guard.
+    function requireUnlocked() {
+        if (geofenceLocked) {
+            showToast('A shift is active at this site — the geofence is locked until it ends', 'error');
+            return false;
+        }
+        return true;
+    }
+
+    // Enable/disable the drawing tools + radius input based on whether the site
+    // currently has an active shift.
+    function applyGeofenceLock(locked) {
+        geofenceLocked = !!locked;
+        ['polygonTool', 'circleTool', 'radiusInput', 'clearBtn'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = geofenceLocked;
+        });
+        const tools = document.getElementById('geofenceTools');
+        if (tools) tools.classList.toggle('locked', geofenceLocked);
+        const note = document.getElementById('geofenceLockNote');
+        if (note) note.style.display = geofenceLocked ? 'block' : 'none';
+    }
+
     function activatePolygonTool() {
-        if (!requireSelectedSite()) return;
+        if (!requireSelectedSite() || !requireUnlocked()) return;
         drawingTool = 'polygon';
         document.getElementById('radiusGroup').style.display = 'none';
         resetToolButtons();
@@ -1324,7 +1379,7 @@
     }
 
     function activateCircleTool() {
-        if (!requireSelectedSite()) return;
+        if (!requireSelectedSite() || !requireUnlocked()) return;
         drawingTool = 'circle';
         document.getElementById('radiusGroup').style.display = 'block';
         resetToolButtons();
@@ -1446,6 +1501,7 @@
 
     // Live radius resize — redraws the circle polygon and debounces the server save.
     function updateCircleRadius() {
+        if (geofenceLocked) return;
         if (!currentCircle) return;
         const radius = parseInt(document.getElementById('radiusInput').value, 10) || 200;
         const { center } = currentCircle;
@@ -1462,6 +1518,7 @@
 
     function clearGeofence() {
         if (!currentSiteId) { updateGeofenceStatus(null, 'Select a site first, then clear its geofence'); return; }
+        if (!requireUnlocked()) return;
 
         // Mid-draw: Clear just discards the points placed so far (nothing is
         // saved yet) and re-arms the same tool so the admin can draw again. It

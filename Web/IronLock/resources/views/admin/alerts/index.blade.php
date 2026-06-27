@@ -611,6 +611,23 @@
 
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAlertDrawer(); });
 
+    // Deep-link filters from the dashboard KPI cards (e.g. Critical Alerts →
+    // ?severity=CRITICAL&status=OPEN, Pending Acks → ?status=OPEN). Pre-set the
+    // matching dropdowns before the first load so the feed opens pre-filtered.
+    (function () {
+        const qp = new URLSearchParams(window.location.search);
+        const setSel = (id, val) => {
+            if (val === null) return;
+            const el = document.getElementById(id);
+            if (el && [...el.options].some(o => o.value === val)) el.value = val;
+        };
+        setSel('f-severity', qp.get('severity'));
+        setSel('f-status', qp.get('status'));
+        setSel('f-site', qp.get('site_id'));
+        setSel('f-guard', qp.get('guard_id'));
+        setSel('f-type', qp.get('type'));
+    })();
+
     // Initial load, then poll every 15s (matches the dashboard cadence).
     loadAlerts();
     setInterval(loadAlerts, 15000);

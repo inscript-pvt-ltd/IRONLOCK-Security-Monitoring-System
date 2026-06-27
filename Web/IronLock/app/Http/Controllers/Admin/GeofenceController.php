@@ -113,6 +113,23 @@ class GeofenceController extends Controller
         try {
             $site = Site::findOrFail($request->site_id);
 
+            // Lock geofence changes while a shift is in progress at this site —
+            // the live geofence drives zone monitoring and must not change under
+            // an on-duty guard. (The Sites UI also disables the tools, but this
+            // is the authoritative guard.)
+            $activeShifts = DB::table('shifts')
+                ->where('site_id', $site->id)
+                ->where('status', 'active')
+                ->count();
+
+            if ($activeShifts > 0) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'error' => "Can't change this site's geofence while a shift is active here. You can edit it once the shift ends."
+                ], 422);
+            }
+
             // Get next version number for this site
             $nextVersion = Geofence::where('site_id', $site->id)->max('version') + 1;
 
@@ -349,6 +366,20 @@ class GeofenceController extends Controller
         try {
             // Ensure the site exists before touching its geofences.
             Site::findOrFail($siteId);
+
+            // Same lock as store(): no geofence changes while a shift is active
+            // at this site.
+            $siteActiveShifts = DB::table('shifts')
+                ->where('site_id', $siteId)
+                ->where('status', 'active')
+                ->count();
+
+            if ($siteActiveShifts > 0) {
+                return response()->json([
+                    'success' => false,
+                    'error' => "Can't clear this site's geofence while a shift is active here. You can edit it once the shift ends."
+                ], 422);
+            }
 
             return DB::transaction(function () use ($siteId) {
                 // Get all geofences for this site
