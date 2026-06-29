@@ -37,7 +37,18 @@
         'WAKEFULNESS_CHALLENGE'         => ['label' => 'Wakefulness Challenge',        'tone' => 'ok'],
         'WAKEFULNESS_CONFIRMED'         => ['label' => 'Wakefulness Confirmed',        'tone' => 'ok'],
         'WAKEFULNESS_FAILED'            => ['label' => 'Wakefulness Failed',           'tone' => 'alert'],
+        // Offline / backfill (Phase 7). Informational, never alert-red — a closed,
+        // backfilled comms gap is not a live incident (roadmap §7.3, "no
+        // retroactive alerts"). Rendered as an "offline / backfilled" band below,
+        // distinguished by shape + icon + text, not colour alone.
+        'COMMS_GAP_START'               => ['label' => 'Connectivity Lost',           'tone' => 'offline'],
+        'COMMS_GAP_END'                 => ['label' => 'Reconnected',                 'tone' => 'offline'],
+        'SYNC_FLUSH'                    => ['label' => 'Synced on Reconnect',         'tone' => 'offline'],
     ];
+
+    // The three offline/backfill audit types render as a neutral band, not a
+    // live event row.
+    $offlineEventTypes = ['COMMS_GAP_START', 'COMMS_GAP_END', 'SYNC_FLUSH'];
 
     $summary = is_array($shift->compliance_summary) ? $shift->compliance_summary : null;
 
@@ -150,6 +161,27 @@
         color: var(--text-secondary); line-height: 1.5; word-break: break-word;
     }
     .tl-empty { font-size: 12px; color: var(--text-muted); padding: 10px 0; }
+
+    /* ── Offline / backfilled (Phase 7) ─────────────────
+       A closed comms gap is informational, not an incident. The dot is a
+       neutral SQUARE (distinct shape, not just colour, per the accessibility
+       rule) and the body carries a "backfilled" badge + a slate-bordered band. */
+    .tl-dot.offline {
+        background: var(--text-muted);
+        border-radius: 2px;            /* square — distinguishable from round live dots */
+    }
+    .tl-offline-badge {
+        display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 9px;
+        font-size: 9px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em;
+        color: var(--text-muted); border: 1px solid var(--border-dark); vertical-align: middle;
+    }
+    .tl-offline {
+        margin-top: 6px; padding: 8px 10px; border-radius: 4px; font-size: 11px;
+        background: rgba(148, 163, 184, 0.06);
+        border: 1px solid var(--border-dark); border-left: 3px solid var(--text-muted);
+        color: var(--text-secondary); line-height: 1.5; word-break: break-word;
+    }
+    .tl-offline-note { color: var(--text-muted); font-size: 10px; margin-top: 4px; }
 
     /* ── Pending early-finish request action card (in timeline) ──────── */
     .tl-action {
@@ -447,6 +479,16 @@
         $mins = (int) round($hours * 60);
         return intdiv($mins, 60) . 'h ' . ($mins % 60) . 'm';
     };
+    // Humanise a raw seconds gap (from a COMMS_GAP / SYNC_FLUSH payload) into a
+    // compact "Xs" / "Xm Ys" / "Xh Ym" duration for the offline band.
+    $gapHuman = function ($seconds) {
+        $seconds = (int) $seconds;
+        if ($seconds < 60) return $seconds . 's';
+        $m = intdiv($seconds, 60); $s = $seconds % 60;
+        if ($m < 60) return $m . 'm' . ($s ? ' ' . $s . 's' : '');
+        $h = intdiv($m, 60); $m %= 60;
+        return $h . 'h' . ($m ? ' ' . $m . 'm' : '');
+    };
     // End-of-shift outcome for the compliance panel. An early end only reaches
     // end_type='early' after a supervisor approves it, so that label is the
     // "approved early finish" indicator.
@@ -523,6 +565,10 @@
                     @php
                         $meta = $eventMeta[$event->event_type] ?? ['label' => \Illuminate\Support\Str::headline(strtolower($event->event_type)), 'tone' => 'ok'];
                         $payload = is_array($event->metadata) ? $event->metadata : [];
+                        $isOfflineEvent = in_array($event->event_type, $offlineEventTypes, true);
+                        // Offline events are dated to when they actually happened
+                        // (recorded_at), not when the backlog reached the server.
+                        $offlineActualAt = $event->recorded_at ?? $event->server_received_at ?? $event->created_at;
                     @endphp
                     <div class="tl-row">
                         <div class="tl-node">
@@ -530,23 +576,47 @@
                             <div class="tl-line"></div>
                         </div>
                         <div class="tl-body">
-                            <div class="tl-heading">{{ $meta['label'] }}</div>
-                            <div class="tl-meta">
-                                <time class="tl-ts" data-ts="{{ $iso($event->server_received_at ?? $event->created_at) }}">{{ $time($event->server_received_at ?? $event->created_at) }}</time> · server time · {{ $event->event_type }}
+                            <div class="tl-heading">
+                                {{ $meta['label'] }}
+                                @if ($isOfflineEvent)<span class="tl-offline-badge">⟲ Backfilled</span>@endif
                             </div>
-                            @if (!empty($payload))
-                                <div class="tl-card">
-                                    @foreach ($payload as $k => $v)
-                                        @php $v = is_bool($v) ? ($v ? 'yes' : 'no') : (is_array($v) ? json_encode($v) : $v); @endphp
-                                        <div>{{ \Illuminate\Support\Str::headline($k) }}:
-                                            @if ($isTs($v))
-                                                <time class="tl-ts-full" data-ts="{{ $iso($v) }}">{{ $fmt($v) }}</time>
-                                            @else
-                                                {{ $v }}
-                                            @endif
-                                        </div>
-                                    @endforeach
+                            @if ($isOfflineEvent)
+                                {{-- Offline / backfilled band. Dated to when it actually
+                                     happened (recorded_at), with the reconnect/sync time
+                                     shown separately so a gap reads as "offline, later
+                                     synced" — never a live incident (Phase 7 §7.3). --}}
+                                <div class="tl-meta">
+                                    <time class="tl-ts-full" data-ts="{{ $iso($offlineActualAt) }}">{{ $fmt($offlineActualAt) }}</time>
+                                    · actual time · synced <time class="tl-ts" data-ts="{{ $iso($event->server_received_at ?? $event->created_at) }}">{{ $time($event->server_received_at ?? $event->created_at) }}</time>
                                 </div>
+                                <div class="tl-offline">
+                                    @if ($event->event_type === 'COMMS_GAP_START')
+                                        📡 Guard's device went offline here. Pings were buffered on-device and backfilled on reconnect.
+                                    @elseif ($event->event_type === 'COMMS_GAP_END')
+                                        📡 Device reconnected@if (isset($payload['gap_seconds'])) after {{ $gapHuman($payload['gap_seconds']) }} offline@endif. Buffered data has been synced.
+                                    @else
+                                        ⟲ {{ $payload['gps_pings_synced'] ?? 0 }} GPS {{ (int) ($payload['gps_pings_synced'] ?? 0) === 1 ? 'ping' : 'pings' }} backfilled@if (isset($payload['gap_seconds'])) · offline ~{{ $gapHuman($payload['gap_seconds']) }}@endif.
+                                        @if (!empty($payload['note']))<div class="tl-offline-note">{{ $payload['note'] }}</div>@endif
+                                    @endif
+                                </div>
+                            @else
+                                <div class="tl-meta">
+                                    <time class="tl-ts" data-ts="{{ $iso($event->server_received_at ?? $event->created_at) }}">{{ $time($event->server_received_at ?? $event->created_at) }}</time> · server time · {{ $event->event_type }}
+                                </div>
+                                @if (!empty($payload))
+                                    <div class="tl-card">
+                                        @foreach ($payload as $k => $v)
+                                            @php $v = is_bool($v) ? ($v ? 'yes' : 'no') : (is_array($v) ? json_encode($v) : $v); @endphp
+                                            <div>{{ \Illuminate\Support\Str::headline($k) }}:
+                                                @if ($isTs($v))
+                                                    <time class="tl-ts-full" data-ts="{{ $iso($v) }}">{{ $fmt($v) }}</time>
+                                                @else
+                                                    {{ $v }}
+                                                @endif
+                                            </div>
+                                        @endforeach
+                                    </div>
+                                @endif
                             @endif
                             @if ($event->id === $pendingEarlyEndEventId)
                                 <div class="tl-action" data-shift-id="{{ $shift->id }}">

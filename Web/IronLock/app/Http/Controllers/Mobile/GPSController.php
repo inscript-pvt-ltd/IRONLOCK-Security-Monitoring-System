@@ -45,10 +45,20 @@ class GPSController extends Controller
             return $this->apiError('SHIFT_NOT_ACTIVE', 'No active shift found with this ID.', 409);
         }
 
+        // Snapshot the guard's state BEFORE applying the batch — finalizeFlush()
+        // judges the net zone transition and the comms-gap window against this
+        // (server-side facts only; the client clock is never trusted to decide
+        // whether a backlog is a reconnect or whether to raise a live alert).
+        $pre = $this->gpsService->flushPreState($guard->id);
+
         $results = [];
+        $pingsApplied = 0;
 
         // Process in order — the UPSERT means the last valid ping is the final
         // live position, and the transition logic sees each step in sequence.
+        // Live zone-exit dispatch is SUPPRESSED per-ping ($dispatchZoneCheck =
+        // false) so a replayed backlog never pages retroactively; the single
+        // present-state decision is made once below in finalizeFlush().
         foreach ($pings as $ping) {
             $lat = $ping['latitude'] ?? null;
             $lng = $ping['longitude'] ?? null;
@@ -72,13 +82,22 @@ class GPSController extends Controller
                     ? (int) round((float) $ping['battery'] * 100)
                     : null,
                 'recorded_at' => $ping['recorded_at'] ?? null,
-            ]);
+            ], dispatchZoneCheck: false);
+
+            $pingsApplied++;
 
             $results[] = [
                 'recorded_at' => $ping['recorded_at'] ?? now()->toISOString(),
                 'zone_status' => $location->zone_status,
                 'requires_alert' => $location->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE,
             ];
+        }
+
+        // Close out the flush once: present-state zone-exit dispatch (if the guard
+        // is now outside having been inside) + comms-gap / SYNC_FLUSH audit when
+        // this batch is a reconnect after a stale last-seen.
+        if ($pingsApplied > 0) {
+            $this->gpsService->finalizeFlush($guard->id, $shift->id, $pre, $pingsApplied);
         }
 
         return $this->apiSuccess(['results' => $results]);

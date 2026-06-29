@@ -169,4 +169,27 @@ return [
 
     'backup_retention_days' => (int) env('IRONLOCK_BACKUP_RETENTION_DAYS', 30),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Offline sync / backfill (Phase 7)
+    |--------------------------------------------------------------------------
+    |
+    | When a guard's app reconnects after a comms gap it flushes its buffered GPS
+    | pings in one batch (MOBILE_API_INTEGRATION.md §6.1). A flush whose last
+    | server-receipt is older than this many seconds is treated as a RECONNECT:
+    | the server records a COMMS_GAP_START / COMMS_GAP_END pair and a SYNC_FLUSH
+    | summary on the shift timeline, and only the guard's *current* position (the
+    | net effect of the flush) can raise a live zone-exit alert — historical pings
+    | are recorded for audit but never paged retroactively (§7.3, no retroactive
+    | alerts). The boundary is server-determined; the client clock is never
+    | trusted to decide it.
+    |
+    | 60s ≈ four missed 15s pings — long enough to ignore a single dropped ping,
+    | short enough to flag a genuine connectivity gap. Independent of the 30s
+    | COMMS_TIMEOUT that greys a guard out live (GuardLocation::COMMS_TIMEOUT_SECONDS).
+    |
+    */
+
+    'gps_backfill_threshold_seconds' => (int) env('IRONLOCK_GPS_BACKFILL_THRESHOLD', 60),
+
 ];
