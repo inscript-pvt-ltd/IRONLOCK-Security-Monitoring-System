@@ -201,6 +201,7 @@
 
     .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
     .photo-card {
+        position: relative;
         background: var(--bg-dark); border: 1px solid var(--border-dark);
         border-radius: 4px; overflow: hidden; display: flex; flex-direction: column;
     }
@@ -310,6 +311,36 @@
         font-size: 20px; cursor: pointer; line-height: 1; padding: 0 2px; margin-left: 12px;
     }
     .collection-modal-close:hover { color: var(--text-primary); }
+
+    /* ── Bulk review controls (collection modal header) ── */
+    .collection-head-right { display: flex; align-items: flex-start; gap: 12px; flex-shrink: 0; }
+    .collection-bulk {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        justify-content: flex-end; max-width: 340px;
+    }
+    .collection-selall {
+        display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+        font-size: 10px; color: var(--text-secondary); cursor: pointer; user-select: none;
+    }
+    .collection-selall input { cursor: pointer; }
+    .btn-bulk {
+        font-size: 10px; font-weight: bold; padding: 5px 10px; border-radius: 4px;
+        cursor: pointer; background: transparent; border: 1px solid;
+        transition: all 0.2s ease; white-space: nowrap;
+    }
+    .btn-bulk-approve { border-color: var(--success-green); color: var(--success-green); }
+    .btn-bulk-approve:hover:not(:disabled) { background: var(--success-green); color: #08230f; }
+    .btn-bulk-reject { border-color: var(--error-red); color: var(--error-red); }
+    .btn-bulk-reject:hover:not(:disabled) { background: var(--error-red); color: #fff; }
+    .btn-bulk:disabled { opacity: 0.4; cursor: default; }
+
+    /* Per-photo selection checkbox, overlaid on a reviewable thumbnail */
+    .photo-check {
+        position: absolute; top: 8px; left: 8px; z-index: 2;
+        width: 18px; height: 18px; cursor: pointer; accent-color: var(--premium-gold);
+        box-shadow: 0 0 0 2px rgba(0,0,0,0.5); border-radius: 3px;
+    }
+    .photo-card.selected { outline: 2px solid var(--premium-gold); outline-offset: -2px; }
 
     /* ── Photo review (admin decision) ──────────────── */
     .photo-review-row { margin-top: 6px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -771,7 +802,18 @@
                 <div class="collection-modal-title" id="collection-title"></div>
                 <div class="collection-modal-sub" id="collection-sub"></div>
             </div>
-            <button class="collection-modal-close" onclick="closeCollection()" title="Close">&times;</button>
+            <div class="collection-head-right">
+                {{-- Bulk review — acts on the checked photos via the same per-photo
+                     endpoint. Hidden when no photo in this attempt is reviewable. --}}
+                <div class="collection-bulk" id="collection-bulk" style="display:none;">
+                    <label class="collection-selall">
+                        <input type="checkbox" id="collection-selectall"> Select all
+                    </label>
+                    <button type="button" class="btn-bulk btn-bulk-approve" id="bulk-approve" disabled>Approve selected</button>
+                    <button type="button" class="btn-bulk btn-bulk-reject" id="bulk-reject" disabled>Reject selected</button>
+                </div>
+                <button class="collection-modal-close" onclick="closeCollection()" title="Close">&times;</button>
+            </div>
         </div>
         <div class="photo-grid" id="collection-grid"></div>
     </div>
@@ -1034,10 +1076,20 @@
                         : '');
             }
 
+            // A photo is selectable for bulk review only while it is still
+            // unreviewed AND reviewable — mirrors the per-photo Review button and
+            // the server's idempotent "reviewed once" rule.
+            var isReviewable = !ev.review_decision && ev.can_review && ev.review_url;
+            var checkHtml = isReviewable
+                ? '<input type="checkbox" class="photo-check" data-review-url="'
+                    + esc(ev.review_url) + '" title="Select for bulk review">'
+                : '';
+
             var card = document.createElement('div');
             card.className = 'photo-card';
             card.innerHTML =
-                '<img class="photo-thumb" src="' + esc(ev.view_url) + '" alt="Photo ' + (i + 1) + '"'
+                checkHtml
+                + '<img class="photo-thumb" src="' + esc(ev.view_url) + '" alt="Photo ' + (i + 1) + '"'
                 + ' onclick="window.open(this.src,\'_blank\')" loading="lazy">'
                 + '<div class="photo-body">'
                 + '<span class="photo-badge ' + esc(badge) + '">' + esc(badge.replace(/_/g, ' ')) + '</span>'
@@ -1046,6 +1098,14 @@
                 + '</div>';
             grid.appendChild(card);
         });
+
+        // Bulk controls: visible only when this attempt still has reviewable
+        // photos. Reset selection state each time the modal opens.
+        var bulkBarEl = document.getElementById('collection-bulk');
+        if (bulkBarEl) bulkBarEl.style.display = grid.querySelector('.photo-check') ? 'flex' : 'none';
+        var selEl = document.getElementById('collection-selectall');
+        if (selEl) selEl.checked = false;
+        syncBulkButtons();
 
         overlay.classList.add('open');
     };
@@ -1068,6 +1128,97 @@
         var btn = e.target.closest('.btn-review[data-review-url]');
         if (btn && window.openReview) window.openReview(btn.dataset.reviewUrl);
     });
+
+    // ── Bulk review (checkbox selection inside the collection modal) ──────
+    // "Approve/Reject selected" fans out to the SAME per-photo endpoint as the
+    // single-review flow — one POST per checked photo. No new backend: each
+    // photo still gets its own immutable PhotoReview row, audit event and guard
+    // push, and the server's "reviewed once" idempotency is preserved.
+    var bulkApprove = document.getElementById('bulk-approve');
+    var bulkReject  = document.getElementById('bulk-reject');
+    var selAllEl    = document.getElementById('collection-selectall');
+    var bulkToken   = document.querySelector('meta[name="csrf-token"]');
+    bulkToken = bulkToken ? bulkToken.content : '';
+
+    function checks()        { return Array.prototype.slice.call(document.querySelectorAll('#collection-grid .photo-check')); }
+    function checkedChecks() { return checks().filter(function (c) { return c.checked; }); }
+
+    // Function declaration → hoisted, so openCollection() (above) can call it.
+    function syncBulkButtons() {
+        var all = checks();
+        var n = checkedChecks().length;
+        if (bulkApprove) bulkApprove.disabled = n === 0;
+        if (bulkReject)  bulkReject.disabled  = n === 0;
+        if (selAllEl)    selAllEl.checked = all.length > 0 && n === all.length;
+        all.forEach(function (c) {
+            var card = c.closest('.photo-card');
+            if (card) card.classList.toggle('selected', c.checked);
+        });
+    }
+
+    if (selAllEl) {
+        selAllEl.addEventListener('change', function () {
+            checks().forEach(function (c) { c.checked = selAllEl.checked; });
+            syncBulkButtons();
+        });
+    }
+
+    // Checkbox toggles are dynamic, so listen via delegation on the overlay.
+    overlay.addEventListener('change', function (e) {
+        if (e.target && e.target.classList && e.target.classList.contains('photo-check')) {
+            syncBulkButtons();
+        }
+    });
+
+    async function bulkReview(decision) {
+        var targets = checkedChecks();
+        if (!targets.length) return;
+
+        var gerund = decision === 'approve' ? 'Approving' : 'Rejecting';
+        var past   = decision === 'approve' ? 'approved'  : 'rejected';
+        var verb   = decision === 'approve' ? 'Approve'   : 'Reject';
+        var noun   = targets.length === 1 ? 'photo' : 'photos';
+
+        if (!confirm(verb + ' ' + targets.length + ' ' + noun + '? The guard is notified of each outcome.')) {
+            return;
+        }
+
+        var btn = decision === 'approve' ? bulkApprove : bulkReject;
+        bulkApprove.disabled = true;
+        bulkReject.disabled  = true;
+
+        var ok = 0, fail = 0;
+        for (var i = 0; i < targets.length; i++) {
+            btn.textContent = gerund + ' ' + (i + 1) + '/' + targets.length + '…';
+            try {
+                var res = await fetch(targets[i].dataset.reviewUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': bulkToken
+                    },
+                    body: JSON.stringify({ decision: decision, note: null })
+                });
+                var data = await res.json();
+                if (data && data.success) { ok++; } else { fail++; }
+            } catch (e) {
+                console.error('Bulk review error:', e);
+                fail++;
+            }
+        }
+
+        if (fail > 0) {
+            alert(ok + ' ' + noun + ' ' + past + ', ' + fail + ' could not be saved. '
+                + 'Reloading to show the current state.');
+        }
+        // Reload so badges, the per-attempt chip and the compliance tally all
+        // reflect the new reviews (same as the single-review path).
+        window.location.reload();
+    }
+
+    if (bulkApprove) bulkApprove.addEventListener('click', function () { bulkReview('approve'); });
+    if (bulkReject)  bulkReject.addEventListener('click', function () { bulkReview('reject'); });
 })();
 
 // ── Review a photo (approve / reject + optional note) ────────────────
