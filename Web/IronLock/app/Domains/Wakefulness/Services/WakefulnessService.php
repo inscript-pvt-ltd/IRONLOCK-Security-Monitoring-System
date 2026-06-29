@@ -184,7 +184,14 @@ class WakefulnessService
             return ['result' => 'PASSED', 'reason' => null, 'check' => $check];
         }
 
-        $this->escalateUnresponsive($check, $reason ?? 'FAILED');
+        // An OFFLINE answer is replayed on reconnect, after its window has already
+        // closed — record the failure for audit (WAKEFULNESS_FAILED is written
+        // regardless below), but do NOT raise a live CRITICAL welfare-check alert
+        // retroactively for a challenge that is already over (Phase 7 §7.3, "no
+        // retroactive alerts"; the guard is back online by the time we see this).
+        // A genuine *live* miss is still escalated: the online timeout sweep pages
+        // unanswered online challenges, and an online failure here keeps alerting.
+        $this->escalateUnresponsive($check, $reason ?? 'FAILED', raiseAlert: !$isOffline);
 
         return ['result' => 'FAILED', 'reason' => $reason, 'check' => $check];
     }

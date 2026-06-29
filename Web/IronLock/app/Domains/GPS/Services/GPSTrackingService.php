@@ -21,8 +21,15 @@ use Illuminate\Support\Str;
  * transition we log a ZONE_TRANSITION shift_event and schedule a grace-period
  * CheckZoneExitJob; the job — not this method — decides whether to raise a
  * ZONE_EXIT alert. The client clock is never trusted: `recorded_at` is kept for
- * diagnostics only and `updated_at` (the DB's authoritative "last seen") is what
- * the dashboard and COMMS_INTERRUPTED logic rely on.
+ * diagnostics only and `updated_at` (the server's authoritative "last seen") is
+ * what the dashboard and COMMS_INTERRUPTED logic rely on.
+ *
+ * Offline backfill (Phase 7): when an app reconnects it flushes buffered pings
+ * in one batch (§6.1). The flush is recorded for audit ping-by-ping, but live
+ * alerting is decided ONCE on the net result — see recordLocation()'s
+ * $dispatchZoneCheck flag and finalizeFlush(). Historical pings never page a
+ * supervisor retroactively (roadmap §7.3); a comms gap is recorded as an
+ * explicit COMMS_GAP_START / COMMS_GAP_END pair plus a SYNC_FLUSH summary.
  */
 class GPSTrackingService
 {
@@ -32,11 +39,39 @@ class GPSTrackingService
     ) {}
 
     /**
-     * Record one GPS ping for a guard, updating their live location row and
-     * triggering zone-transition handling. Returns the persisted GuardLocation.
+     * The guard's pre-flush state, read ONCE before a batch is applied. Used by
+     * finalizeFlush() to judge the net zone transition and the comms-gap window
+     * from server-side facts (never the client clock).
+     *
+     * @return array{zone_status: ?string, last_seen_at: ?Carbon}
      */
-    public function recordLocation(string $guardId, string $shiftId, array $locationData): GuardLocation
+    public function flushPreState(string $guardId): array
     {
+        $row = GuardLocation::where('guard_id', $guardId)->first();
+
+        return [
+            'zone_status' => $row?->zone_status,
+            'last_seen_at' => $row?->updated_at,
+        ];
+    }
+
+    /**
+     * Record one GPS ping for a guard, updating their live location row and
+     * (per-ping) appending the immutable ZONE_TRANSITION audit trail. Returns the
+     * persisted GuardLocation.
+     *
+     * $dispatchZoneCheck gates the *live* grace-period zone-exit job. It is true
+     * for a normal standalone ping (so a fresh INSIDE→OUTSIDE edge schedules the
+     * check inline), and false when the caller is replaying a flush — there, the
+     * decision is deferred to finalizeFlush() so a buffered backlog logs its
+     * history without paging retroactively for events already over.
+     */
+    public function recordLocation(
+        string $guardId,
+        string $shiftId,
+        array $locationData,
+        bool $dispatchZoneCheck = true
+    ): GuardLocation {
         $now = Carbon::now();
 
         // Read the prior zone status before the UPSERT overwrites the row, so
@@ -84,6 +119,9 @@ class GPSTrackingService
         );
 
         // Only act when the zone status actually changes (avoids per-ping noise).
+        // The ZONE_TRANSITION audit row is ALWAYS written so the timeline is
+        // complete even for a replayed backlog; only the *live alert* dispatch is
+        // gated by $dispatchZoneCheck.
         if ($previousZoneStatus !== null && $previousZoneStatus !== $zoneStatus) {
             $this->logZoneTransitionEvent(
                 $guardId,
@@ -98,7 +136,8 @@ class GPSTrackingService
 
             // On leaving the zone, schedule a grace-period check. The job
             // re-confirms the guard is still outside before raising an alert.
-            if ($zoneStatus === GeofenceService::STATUS_OUTSIDE_ZONE) {
+            // Suppressed during a flush replay — finalizeFlush() decides once.
+            if ($dispatchZoneCheck && $zoneStatus === GeofenceService::STATUS_OUTSIDE_ZONE) {
                 $gracePeriodMinutes = $shift?->site?->grace_period_minutes ?? 5;
 
                 CheckZoneExitJob::dispatch($guardId, $shiftId, $now->toISOString())
@@ -115,6 +154,53 @@ class GPSTrackingService
         }
 
         return $location;
+    }
+
+    /**
+     * Close out a flush once, after every ping in it has been applied. Two jobs:
+     *
+     *  1. Live zone-exit — dispatch the grace-period check ONLY when the net
+     *     effect of the flush is a *present* breach: the guard is OUTSIDE now and
+     *     was INSIDE before the flush. This mirrors the standalone-ping
+     *     INSIDE→OUTSIDE edge while collapsing a whole backlog to a single
+     *     decision: a guard who exited and returned while offline raises nothing;
+     *     one already outside before the flush is not re-paged; one still outside
+     *     now is alerted on present state (the job re-confirms before raising).
+     *
+     *  2. Comms-gap audit — if the last server-receipt before this flush is older
+     *     than the backfill threshold, this flush is a RECONNECT: record an
+     *     explicit COMMS_GAP_START / COMMS_GAP_END pair and a SYNC_FLUSH summary
+     *     so the offline window is legible on the timeline. Boundaries are
+     *     server-determined (START = last receipt, END = now).
+     *
+     * @param  array{zone_status: ?string, last_seen_at: ?Carbon}  $pre
+     */
+    public function finalizeFlush(string $guardId, string $shiftId, array $pre, int $pingsApplied): void
+    {
+        $now = Carbon::now();
+        $current = GuardLocation::where('guard_id', $guardId)->first();
+
+        // (1) Present-state zone-exit — net INSIDE→OUTSIDE only.
+        if ($current
+            && $current->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE
+            && ($pre['zone_status'] ?? null) === GeofenceService::STATUS_INSIDE_ZONE) {
+            $shift = Shift::with('site')->find($shiftId);
+            $gracePeriodMinutes = $shift?->site?->grace_period_minutes ?? 5;
+
+            CheckZoneExitJob::dispatch($guardId, $shiftId, $now->toISOString())
+                ->delay(now()->addMinutes($gracePeriodMinutes));
+        }
+
+        // (2) Comms-gap / reconnect audit.
+        $lastSeen = $pre['last_seen_at'] ?? null;
+        if ($lastSeen instanceof Carbon) {
+            $gapSeconds = $lastSeen->diffInSeconds($now);
+            $threshold = (int) config('ironlock.gps_backfill_threshold_seconds', 60);
+
+            if ($gapSeconds > $threshold) {
+                $this->logCommsGap($guardId, $shiftId, $lastSeen, $now, $gapSeconds, $pingsApplied);
+            }
+        }
     }
 
     /**
@@ -168,6 +254,76 @@ class GPSTrackingService
             ]);
         } catch (\Throwable $e) {
             Log::error('Failed to log zone transition', [
+                'guard_id' => $guardId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Record a reconnect on the immutable shift_events trail: a COMMS_GAP_START at
+     * the last server-receipt, a COMMS_GAP_END at reconnect, and a SYNC_FLUSH
+     * summary of what this GPS flush carried. The Phase 7 dashboard renders the
+     * START/END pair as an "offline / backfilled" band (D-04). Best-effort — an
+     * audit failure must never block the ping flush.
+     *
+     * NOTE: the SYNC_FLUSH summary counts only the GPS pings in this batch.
+     * Wakefulness/photo replays drain through their own endpoints and stay
+     * individually audited (WAKEFULNESS_* / PHOTO_*). A single cross-capability
+     * receipt would need a dedicated app-called "sync complete" endpoint — a
+     * future Flutter-contract item, out of scope here.
+     */
+    private function logCommsGap(
+        string $guardId,
+        string $shiftId,
+        Carbon $gapStart,
+        Carbon $reconnectedAt,
+        int $gapSeconds,
+        int $pingsApplied
+    ): void {
+        try {
+            $rows = [
+                [
+                    'event_type' => 'COMMS_GAP_START',
+                    'recorded_at' => $gapStart,
+                    'metadata' => [
+                        'detected_on_reconnect' => true,
+                        'last_seen_at' => $gapStart->toISOString(),
+                    ],
+                ],
+                [
+                    'event_type' => 'COMMS_GAP_END',
+                    'recorded_at' => $reconnectedAt,
+                    'metadata' => [
+                        'gap_seconds' => $gapSeconds,
+                        'reconnected_at' => $reconnectedAt->toISOString(),
+                    ],
+                ],
+                [
+                    'event_type' => 'SYNC_FLUSH',
+                    'recorded_at' => $reconnectedAt,
+                    'metadata' => [
+                        'gap_seconds' => $gapSeconds,
+                        'gps_pings_synced' => $pingsApplied,
+                        'note' => 'GPS backlog flushed on reconnect; wakefulness/photo replays audited separately.',
+                    ],
+                ],
+            ];
+
+            foreach ($rows as $row) {
+                DB::table('shift_events')->insert([
+                    'id' => (string) Str::uuid(),
+                    'shift_id' => $shiftId,
+                    'guard_id' => $guardId,
+                    'event_type' => $row['event_type'],
+                    'metadata' => json_encode($row['metadata']),
+                    'recorded_at' => $row['recorded_at'],
+                    'server_received_at' => $reconnectedAt,
+                    'created_at' => $reconnectedAt,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Failed to log comms gap', [
                 'guard_id' => $guardId,
                 'error' => $e->getMessage(),
             ]);

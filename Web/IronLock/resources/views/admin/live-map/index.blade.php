@@ -77,6 +77,15 @@
     .gp-status.alert,
     .gp-status.comms { background: rgba(239,68,68,.18); color: var(--error-red); border: 1px solid var(--error-red); }
 
+    /* Offline callout (Phase 7) — neutral slate band making a *current* comms
+       gap explicit ("offline since X"), distinct from the red alert chip. */
+    .gp-offline {
+        font-size: 11px; color: var(--text-secondary); line-height: 1.45;
+        background: rgba(100,116,139,.12); border: 1px solid var(--border-dark);
+        border-left: 3px solid #64748B; border-radius: 4px;
+        padding: 7px 9px; margin-bottom: 14px;
+    }
+
     .gp-field { margin-bottom: 11px; }
     .gp-label { display: block; font-size: 9px; font-weight: bold; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 3px; }
     .gp-value { font-size: 12px; color: var(--text-primary); line-height: 1.4; }
@@ -310,11 +319,20 @@
         const openAlertBtn = g.has_open_alert
             ? `<a class="gp-btn outline" href="${alertsFeedUrl}">Open Alert →</a>` : '';
 
+        // Make a *current* comms gap explicit: when the guard is offline now, the
+        // last fix is also their "last synced" point — buffered pings backfill on
+        // reconnect (the timeline then shows the COMMS_GAP / SYNC_FLUSH band).
+        const offlineNotice = g.comms_interrupted
+            ? `<div class="gp-offline">⊘ Offline since ${escapeHtml(g.last_seen_human || 'unknown')} — buffered data will backfill on reconnect.</div>`
+            : '';
+        const lastPingLabel = g.comms_interrupted ? 'Last synced' : 'Last GPS ping';
+
         document.querySelector('#guard-panel .gp-title span').textContent = g.guard_name;
         document.getElementById('guard-panel-body').innerHTML = `
             <div class="gp-status ${s.cls}">${s.txt}</div>
+            ${offlineNotice}
             <div class="gp-field"><span class="gp-label">Site</span><div class="gp-value">${escapeHtml(g.site_name || '—')}</div></div>
-            <div class="gp-field"><span class="gp-label">Last GPS ping</span>
+            <div class="gp-field"><span class="gp-label">${lastPingLabel}</span>
                 <div class="gp-value">${escapeHtml(g.last_seen_human || 'Never')}<br><span style="color:var(--text-muted);font-size:11px;">${coords}</span></div></div>
             <div class="gp-field"><span class="gp-label">Shift started</span>
                 <div class="gp-value">${fmtTime(g.shift_started_at)} ${g.shift_reference ? '· #' + escapeHtml(g.shift_reference) : ''}</div></div>
