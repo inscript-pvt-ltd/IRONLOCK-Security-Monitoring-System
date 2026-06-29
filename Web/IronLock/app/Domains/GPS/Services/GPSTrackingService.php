@@ -62,6 +62,11 @@ class GPSTrackingService
         }
 
         // UPSERT: replace the single live-location row for this guard.
+        // `updated_at` is the authoritative "last seen" time that drives
+        // GuardLocation::isCommsInterrupted(). It is set explicitly in PHP (UTC)
+        // rather than left to the column's ON UPDATE CURRENT_TIMESTAMP default,
+        // because the DB session timezone is not guaranteed to be UTC — relying
+        // on the DB clock would drift the 30s comms threshold (project tz gotcha).
         $location = GuardLocation::updateOrCreate(
             ['guard_id' => $guardId],
             [
@@ -74,6 +79,7 @@ class GPSTrackingService
                 'recorded_at' => isset($locationData['recorded_at'])
                     ? Carbon::parse($locationData['recorded_at'])
                     : null,
+                'updated_at' => Carbon::now(),
             ]
         );
 

@@ -46,7 +46,7 @@ class SweepWakefulnessTimeouts extends Command
             + (int) config('ironlock.wakefulness_deadline_grace_seconds', 5);
         $cutoff = $now->copy()->subSeconds($deadlineSeconds);
 
-        $checks = WakefulnessCheck::with('shift.assignedGuard')
+        $checks = WakefulnessCheck::with(['shift.assignedGuard', 'assignedGuard'])
             ->whereNull('result')
             ->where('online_or_offline', WakefulnessCheck::MODE_ONLINE)
             ->where('scheduled_at', '<', $cutoff)

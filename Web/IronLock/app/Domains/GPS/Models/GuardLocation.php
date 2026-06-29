@@ -13,8 +13,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * Mirrors the `guard_locations` migration: NOT append-only, NO history. Each
  * 15-second GPS ping REPLACES the previous coordinates via UPSERT keyed on
  * `guard_id` (which is the primary key — there is no surrogate `id`). The table
- * has no `created_at`; `updated_at` is the authoritative "last seen" timestamp,
- * auto-refreshed by MySQL on every write (useCurrent / useCurrentOnUpdate).
+ * has no `created_at`; `updated_at` is the authoritative "last seen" timestamp.
+ * It is set explicitly in PHP (UTC) on every ping by GPSTrackingService — NOT
+ * left to the column's MySQL ON UPDATE CURRENT_TIMESTAMP default — so the value
+ * never depends on the DB session timezone and always refreshes even when a
+ * repeat ping carries otherwise-identical coordinates (project tz gotcha).
  */
 class GuardLocation extends Model
 {
@@ -67,6 +70,7 @@ class GuardLocation extends Model
         'battery_level',
         'zone_status',
         'recorded_at',
+        'updated_at',
     ];
 
     /**

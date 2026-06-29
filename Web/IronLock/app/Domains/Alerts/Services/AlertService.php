@@ -10,12 +10,12 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
- * AlertService — create, acknowledge, resolve and list supervisor alerts.
+ * AlertService — create, acknowledge and list supervisor alerts.
  *
  * Alerts are raised by the system (e.g. CheckZoneExitJob) and surfaced on the
- * admin dashboard. Acknowledgement/resolution are recorded against the admin
- * who actioned them. All field names follow the `alerts` migration via the
- * Alert model's fillable.
+ * admin dashboard. Acknowledgement is the terminal state (there is no separate
+ * resolve step) and is recorded against the admin who actioned it. All field
+ * names follow the `alerts` migration via the Alert model's fillable.
  */
 class AlertService
 {
@@ -137,25 +137,6 @@ class AlertService
 
             return $acknowledged;
         });
-    }
-
-    /**
-     * Record that an alert has been resolved (the situation is closed out).
-     */
-    public function resolveAlert(string $alertId, string $resolvedBy): bool
-    {
-        $alert = Alert::find($alertId);
-
-        if (!$alert) {
-            return false;
-        }
-
-        $alert->update([
-            'resolved_by' => $resolvedBy,
-            'resolved_at' => now(),
-        ]);
-
-        return true;
     }
 
     /**
