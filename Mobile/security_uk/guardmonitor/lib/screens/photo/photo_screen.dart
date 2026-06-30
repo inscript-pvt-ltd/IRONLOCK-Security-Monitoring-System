@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../providers/app_providers.dart';
+import '../../services/offline_photo_service.dart';
 import '../../services/photo_service.dart';
 import '../../services/secure_storage_service.dart';
 import '../../theme/app_colors.dart';
@@ -17,15 +18,30 @@ import '../../widgets/app_button.dart';
 class PhotoScreen extends ConsumerStatefulWidget {
   const PhotoScreen({
     super.key,
-    required this.requestId,
-    required this.nonceValue,
+    required String this.requestId,
+    required String this.nonceValue,
     this.issuedAt,
     this.receivedAt,
     this.responseSeconds,
-  });
-  final String requestId;
+  }) : scheduled = false;
+
+  /// Phase 7 — OFFLINE schedule-triggered capture. No server request id / nonce
+  /// and no response countdown: the guard captures, and on submit the screen
+  /// draws a pool nonce, signs, and queues for flush on reconnect.
+  const PhotoScreen.scheduled({super.key})
+      : requestId = null,
+        nonceValue = null,
+        issuedAt = null,
+        receivedAt = null,
+        responseSeconds = null,
+        scheduled = true;
+
+  // Null in scheduled (offline) mode.
+  final String? requestId;
   // Server-issued nonce for this online request — used to sign the upload.
-  final String nonceValue;
+  final String? nonceValue;
+  // True for the offline schedule-triggered capture (no request id / countdown).
+  final bool scheduled;
   // Server issue time of the request, when sent (`issued_at`). Highest-priority
   // anchor for the response countdown.
   final DateTime? issuedAt;
@@ -76,6 +92,16 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
 
     _initCamera();
 
+    // Offline scheduled mode has no server response window — there's no
+    // countdown and no expiry; validity is purely the 15-min pool-nonce TTL,
+    // judged server-side from the reconstructed capture time. So skip the window
+    // anchor + the per-second tick entirely; just open an idle capture surface.
+    if (widget.scheduled) {
+      WidgetsBinding.instance.addPostFrameCallback(
+          (_) => ref.read(photoProvider.notifier).openScheduled());
+      return;
+    }
+
     // Open the request's window anchored to when it was *issued/arrived*, not to
     // now — the server's response window is fixed, so a late tap (e.g. the guard
     // opened the notification minutes later) must spend the elapsed time and may
@@ -107,7 +133,7 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
     // Arrival stamped by the background isolate when the push landed while
     // locked — only set for *this* request id.
     final bgReceipt = widget.issuedAt == null
-        ? await SecureStorageService.getPhotoReceipt(widget.requestId)
+        ? await SecureStorageService.getPhotoReceipt(widget.requestId!)
         : null;
     // One-shot: clear it so a later screen for a new request can't read a stale
     // arrival. Best-effort.
@@ -429,6 +455,40 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
       // Location unavailable (denied, simulator, timeout) — proceed without it.
     }
 
+    // Phase 7 — OFFLINE schedule-triggered capture: don't upload now. Draw a
+    // pool nonce, sign + persist + queue; the flush engine sends it on reconnect.
+    // Capture time is the NTP-anchored proof, never the device clock.
+    if (widget.scheduled) {
+      final id = await ref.read(offlinePhotoServiceProvider).enqueueCapture(
+            shiftId: shiftId,
+            filePaths: filePaths,
+            latitude: latitude,
+            longitude: longitude,
+          );
+      if (!mounted) return;
+      if (id != null) {
+        // The capture was durably copied + queued — count it as answered and
+        // close. (Server validation / review arrives later via the reviews poll.)
+        ref.read(shiftProvider.notifier).recordPhoto(passed: true);
+        _deleteFiles(filePaths); // durable copies were made by enqueueCapture
+        _capturedPaths.clear();
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Saved — will upload when you're back online."),
+          duration: Duration(seconds: 3),
+        ));
+        await Navigator.of(context).maybePop();
+      } else {
+        // Pool dry (never prefetched) or signing key missing — can't queue.
+        ref.read(photoProvider.notifier).setResult(PhotoStatus.failed);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              "Couldn't save the photo offline. Reconnect and try again."),
+          duration: Duration(seconds: 4),
+        ));
+      }
+      return;
+    }
+
     try {
       // Online (server-initiated) check: sign with the nonce delivered on the
       // request, not a pool nonce. One nonce covers all 1–5 images.
@@ -436,7 +496,8 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
         filePaths: filePaths,
         shiftId: shiftId,
         requestId: widget.requestId,
-        nonceValue: widget.nonceValue,
+        // Non-null here: scheduled (offline) mode returned above.
+        nonceValue: widget.nonceValue!,
         latitude: latitude,
         longitude: longitude,
       );
@@ -596,33 +657,51 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                     ],
                   ),
                   SizedBox(height: context.s(12)),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text('Respond within', style: AppType.caption),
-                      Text(
-                        isExpired ? 'Expired' : '${photo.secondsRemaining}s',
-                        style: AppType.label.copyWith(
-                          color: isExpired ? AppColors.danger : timerColor,
+                  // Offline scheduled capture has no countdown — show a static
+                  // hint instead of the response-window timer/bar.
+                  if (widget.scheduled)
+                    Row(
+                      children: [
+                        Icon(Icons.cloud_off,
+                            size: context.s(14), color: AppColors.muted),
+                        const SizedBox(width: AppSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            'Offline — saved and uploaded when you reconnect.',
+                            style: AppType.caption,
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                  SizedBox(height: context.s(8)),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(2),
-                    child: LinearProgressIndicator(
-                      value: isExpired
-                          ? 0
-                          : photo.secondsRemaining /
-                              (photo.windowSeconds == 0 ? 1 : photo.windowSeconds),
-                      backgroundColor: AppColors.border,
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning,
-                      ),
-                      minHeight: 3,
+                      ],
+                    )
+                  else ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Respond within', style: AppType.caption),
+                        Text(
+                          isExpired ? 'Expired' : '${photo.secondsRemaining}s',
+                          style: AppType.label.copyWith(
+                            color: isExpired ? AppColors.danger : timerColor,
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
+                    SizedBox(height: context.s(8)),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: isExpired
+                            ? 0
+                            : photo.secondsRemaining /
+                                (photo.windowSeconds == 0 ? 1 : photo.windowSeconds),
+                        backgroundColor: AppColors.border,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning,
+                        ),
+                        minHeight: 3,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

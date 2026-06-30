@@ -322,7 +322,9 @@ the anchored time (`native_exif` or similar). Add a test asserting `|EXIF − nt
 
 ### Remaining before "fully shipped"
 
-1. **Offline-photo capture trigger** (§8) — product/backend decision + UI entry point.
+1. ~~Offline-photo capture trigger~~ ✅ **Done 2026-06-30** — backend chose Option A (photo
+   schedule). `PhotoScheduleNotifier` + `PhotoScreen.scheduled()`; fires offline-only, judged on
+   the NTP-anchored `trustedNow()` so the device clock can't dodge/force a capture.
 2. **On-device verification** (Android + iOS): build with native-assets, confirm SQLCipher opens
    on device, force-offline a shift, reconnect, confirm the dashboard "offline band" (with Jerry).
 3. **EXIF check** on a real capture: confirm `|EXIF − ntp_reference| ≤ 30s` (camera plugin EXIF).

@@ -15,4 +15,5 @@ export 'shift_access_provider.dart';
 export 'shift_provider.dart';
 export 'photo_provider.dart';
 export 'photo_review_provider.dart';
+export 'photo_schedule_provider.dart';
 export 'ui_providers.dart';

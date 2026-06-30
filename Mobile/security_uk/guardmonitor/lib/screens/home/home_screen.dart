@@ -107,6 +107,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Guards against the 20s poll — which keeps reporting the same request as
   // pending until it's fulfilled — re-opening a second PhotoScreen on top (H1).
   String? _handlingPhotoRequestId;
+  // Guards against stacking two offline scheduled-capture screens.
+  bool _handlingScheduledPhoto = false;
 
   @override
   void initState() {
@@ -209,6 +211,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ref.read(wakefulnessProvider.notifier).trigger(checkId, code);
           }
         }
+      }
+
+      // Phase 7: offline-photo schedule. Self-fire a capture only when OFFLINE —
+      // online, the same mark is delivered by the server as a PHOTO_REQUEST
+      // (push or the /photos/pending poll below), so one schedule never
+      // double-fires. Due-ness is judged against the NTP anchor, not the device
+      // clock (tamper-resistant).
+      final photoScheduler = ref.read(photoScheduleProvider.notifier);
+      if (photoScheduler.isArmed) {
+        photoScheduler.checkSchedule(offline: !online);
       }
 
       final shiftId = ref.read(shiftProvider).id;
@@ -333,6 +345,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     // Navigate to photo screen when backend requests photo verification.
     ref.listen<PendingPhotoState>(pendingPhotoProvider, (_, next) {
+      // Phase 7: an OFFLINE schedule-triggered capture — no request id / nonce /
+      // countdown. Open PhotoScreen in scheduled mode; it draws a pool nonce and
+      // queues on submit.
+      if (next.pending && next.scheduled) {
+        if (_handlingScheduledPhoto) return;
+        _handlingScheduledPhoto = true;
+        ref.read(pendingPhotoProvider.notifier).setPending(false);
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const PhotoScreen.scheduled(),
+          ),
+        ).whenComplete(() => _handlingScheduledPhoto = false);
+        return;
+      }
       if (next.pending && next.requestId != null && next.nonceValue != null) {
         final requestId = next.requestId!;
         final nonceValue = next.nonceValue!;

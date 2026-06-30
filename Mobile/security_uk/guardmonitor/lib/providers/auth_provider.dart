@@ -12,6 +12,7 @@ import '../services/notification_service.dart';
 import '../services/push_messaging_service.dart';
 import '../services/push_service.dart';
 import '../services/secure_storage_service.dart';
+import 'photo_schedule_provider.dart';
 import 'shift_provider.dart';
 import 'wakefulness_provider.dart';
 
@@ -154,6 +155,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     ref.read(currentShiftProvider.notifier).clear();
     ref.invalidate(shiftProvider);
     ref.invalidate(wakefulnessScheduleProvider);
+    ref.invalidate(photoScheduleProvider);
     // Reset the wakefulness FSM + its handled-check history so a different guard
     // signing in on this device starts clean.
     ref.invalidate(wakefulnessProvider);

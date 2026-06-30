@@ -5,6 +5,36 @@ Each entry: what changed, current state, what's verified, and what's still open.
 
 ---
 
+## 2026-06-30 (cont.) — Phase 7 Stage 7: offline-photo trigger (schedule) wired
+
+Backend answered the one open Phase 7 question (`PHASE_7_OFFLINE_PHOTO_TRIGGER_QUESTION.md`):
+**Option A — a photo schedule**, analogous to wakefulness TOTP. Built the trigger + the offline
+capture UI. **143 tests pass · analyze clean.**
+
+- **`PhotoProvisioning` + `PhotoScheduleNotifier`** (`photo_schedule_provider.dart`): parse/persist
+  the new `photos` block from `POST /shifts/{id}/start` (`schedule`, `response_seconds`,
+  `offline_nonce_ttl_minutes`, `max_photos_per_capture`); restore on relaunch; clear on
+  end/reconcile/sign-out. `shift_service.startShift` now returns `photos` too.
+- **Fires only when OFFLINE** (online marks arrive as a server `PHOTO_REQUEST` — one schedule,
+  no double-fire). Run from the active-shift home poll next to the wakefulness scheduler.
+- **⛔ Clock-tamper hardening (per request):** due-ness is judged against
+  **`TimeAnchorService.trustedNow()`** — the NTP anchor projected by a monotonic `Stopwatch`, not
+  `DateTime.now()`. Changing the device clock can't dodge or force a scheduled photo. The capture
+  itself already uses the same NTP projection for `ntp_reference`/`captured_at`.
+- **`PhotoScreen.scheduled()`** — reuses the camera/review widgets; **no countdown** (shows an
+  "Offline — saved and uploaded when you reconnect" hint); on submit calls
+  `OfflinePhotoService.enqueueCapture` (draw pool nonce → sign → persist → queue) and pops with a
+  "Saved" snackbar. The **online request path is byte-for-byte unchanged** (guarded by the
+  `scheduled` flag).
+- Tests: `PhotoProvisioning.fromJson` (+defaults/empty), `dueMark` decision incl. **back-dated-clock
+  tamper case**, and `checkSchedule` gating (offline-fires / online-suppresses / no-double-fire).
+
+Phase 7 is now **feature-complete on-device**. Remaining = **on-device verification** (Android +
+iOS native-assets build, SQLCipher opens, force-offline a shift → reconnect → dashboard offline
+band with Jerry) + the **EXIF/NTP ≤30s** check on a real camera capture.
+
+---
+
 ## 2026-06-30 — Phase 7 Offline Sync (Stages 1–6 built; one trigger open)
 
 Built the **offline capture → flush-on-reconnect** subsystem per

@@ -100,6 +100,11 @@ class PhotoNotifier extends Notifier<PhotoState> {
           );
   }
 
+  /// Opens an OFFLINE schedule-triggered capture: a fresh idle surface with no
+  /// countdown (offline validity is the pool-nonce TTL, judged server-side from
+  /// the reconstructed capture time — there's no client window to run down).
+  void openScheduled() => state = const PhotoState(status: PhotoStatus.idle);
+
   void startCapture() => state = state.copyWith(status: PhotoStatus.capturing);
 
   /// Photo taken, awaiting the guard's Retake / Use Photo decision.
@@ -134,8 +139,13 @@ class PendingPhotoState {
     this.issuedAt,
     this.receivedAt,
     this.responseSeconds,
+    this.scheduled = false,
   });
   final bool pending;
+  // True for an OFFLINE schedule-triggered capture (Phase 7): no request_id, no
+  // server nonce, no countdown — the screen draws a pool nonce at submit and
+  // queues. False for the normal online (server-initiated) request.
+  final bool scheduled;
   final String? requestId;
   // Server-issued nonce delivered with an online photo request — required to
   // sign the upload. Comes from `GET /shifts/{id}/photos/pending`.
@@ -171,6 +181,11 @@ class PendingPhotoNotifier extends Notifier<PendingPhotoState> {
         receivedAt: receivedAt,
         responseSeconds: responseSeconds,
       );
+
+  /// Flags an OFFLINE schedule-triggered capture for the home screen to open in
+  /// scheduled mode (no request id / server nonce / countdown).
+  void setScheduledOffline() =>
+      state = const PendingPhotoState(pending: true, scheduled: true);
 }
 
 final pendingPhotoProvider =

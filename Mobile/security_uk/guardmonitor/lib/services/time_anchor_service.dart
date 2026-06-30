@@ -79,6 +79,20 @@ class TimeAnchorService {
     await sync(host: host);
   }
 
+  /// Tamper-resistant "now" (UTC): the NTP anchor projected forward by the
+  /// monotonic [Stopwatch]. Because the stopwatch can't be wound and the anchor
+  /// came from NTP, **changing the device clock does not move this value** — so
+  /// it's what the offline photo *schedule* uses to decide a mark is due, not
+  /// `DateTime.now()`. Falls back to the wall clock only when no anchor was ever
+  /// obtained (offline since launch); in that case the resulting capture is
+  /// flagged `NTP_UNAVAILABLE` server-side anyway.
+  DateTime trustedNow() {
+    final anchor = _ntpAtSync;
+    final mono = _monotonic;
+    if (anchor != null && mono != null) return anchor.add(mono.elapsed).toUtc();
+    return DateTime.now().toUtc();
+  }
+
   /// The time proof for a capture happening *now*. Projects the NTP anchor to
   /// this instant via the monotonic clock; falls back to the device wall clock
   /// with a null `ntp_reference` when no anchor exists.

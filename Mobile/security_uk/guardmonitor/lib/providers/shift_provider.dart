@@ -4,6 +4,7 @@ import '../models/current_shift_model.dart';
 import '../services/gps_service.dart';
 import '../services/notification_service.dart';
 import '../services/shift_service.dart';
+import 'photo_schedule_provider.dart';
 import 'ui_providers.dart';
 import 'wakefulness_provider.dart';
 
@@ -58,10 +59,12 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
     final current = state;
     if (current == null) throw StateError('No current shift to start.');
     final result = await ref.read(shiftServiceProvider).startShift(current.id);
-    // Provision the wakefulness TOTP schedule if the backend returned one.
-    // Best-effort and non-blocking — a failure here must not stop the shift.
+    // Provision the wakefulness TOTP schedule + the offline-photo schedule if
+    // the backend returned them. Best-effort and non-blocking — a failure here
+    // must not stop the shift.
     ref.read(wakefulnessScheduleProvider.notifier)
         .provisionFromJson(result.wakefulness);
+    ref.read(photoScheduleProvider.notifier).provisionFromJson(result.photos);
     final updated = CurrentShiftModel(
       id: current.id,
       reference: current.reference,
@@ -276,6 +279,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
     ref.read(gpsServiceProvider).stopCapture();
     NotificationService.cancelShiftEnd();
     ref.read(wakefulnessScheduleProvider.notifier).clear();
+    ref.read(photoScheduleProvider.notifier).clear();
     ref.read(wakefulnessProvider.notifier).clearHistory();
     ref.read(locationDeniedProvider.notifier).set(false);
     state = const ShiftState();
@@ -294,6 +298,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
     ref.read(gpsServiceProvider).stopCapture();
     NotificationService.cancelShiftEnd();
     ref.read(wakefulnessScheduleProvider.notifier).clear();
+    ref.read(photoScheduleProvider.notifier).clear();
     ref.read(wakefulnessProvider.notifier).clearHistory();
     ref.read(locationDeniedProvider.notifier).set(false);
     state = const ShiftState();
@@ -314,9 +319,10 @@ class ShiftNotifier extends Notifier<ShiftState> {
           (tracking) =>
               ref.read(locationDeniedProvider.notifier).set(!tracking),
         );
-    // Re-arm the wakefulness TOTP schedule from secure storage (the start
-    // response isn't replayed on resume).
+    // Re-arm the wakefulness TOTP schedule + offline-photo schedule from secure
+    // storage (the start response isn't replayed on resume).
     ref.read(wakefulnessScheduleProvider.notifier).restore();
+    ref.read(photoScheduleProvider.notifier).restore();
 
     // Re-arm the end-of-shift reminder (e.g. after an app relaunch mid-shift).
     NotificationService.scheduleShiftEnd(

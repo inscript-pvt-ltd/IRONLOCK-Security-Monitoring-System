@@ -22,9 +22,13 @@ class _FakeShiftService extends ShiftService {
   Future<CurrentShiftModel?> fetchCurrent() async => current;
 
   @override
-  Future<({DateTime? actualStart, Map<String, dynamic>? wakefulness})> startShift(
-          String shiftId) async =>
-      (actualStart: startAt, wakefulness: null);
+  Future<
+      ({
+        DateTime? actualStart,
+        Map<String, dynamic>? wakefulness,
+        Map<String, dynamic>? photos,
+      })> startShift(String shiftId) async =>
+      (actualStart: startAt, wakefulness: null, photos: null);
 
   @override
   Future<({DateTime? actualStart, DateTime? actualEnd, double? durationHours, String? endType})>

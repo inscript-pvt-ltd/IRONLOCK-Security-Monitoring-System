@@ -16,6 +16,7 @@ class SecureStorageService {
   static const _privacyAcceptedKey = 'ironlock_privacy_accepted';
   static const _hmacSecretKey = 'ironlock_hmac_secret';
   static const _wakefulnessKey = 'ironlock_wakefulness';
+  static const _photoScheduleKey = 'ironlock_photo_schedule';
   static const _photoReceiptKey = 'ironlock_photo_receipt';
   static const _seenReviewsKey = 'ironlock_seen_reviews';
   static const _dbCipherKey = 'ironlock_db_cipher_key';
@@ -65,6 +66,17 @@ class SecureStorageService {
 
   static Future<void> clearWakefulness() =>
       _storage.delete(key: _wakefulnessKey);
+
+  /// Photo schedule (offline-capture due-times + window params) from
+  /// `POST /shifts/{id}/start`, stored as a JSON blob. Wiped on sign-out.
+  static Future<void> savePhotoSchedule(String json) =>
+      _storage.write(key: _photoScheduleKey, value: json);
+
+  static Future<String?> getPhotoSchedule() =>
+      _storage.read(key: _photoScheduleKey);
+
+  static Future<void> clearPhotoSchedule() =>
+      _storage.delete(key: _photoScheduleKey);
 
   /// Arrival time of the most recent online photo request, stamped the instant
   /// the app first sees it (the FCM background isolate when locked, or the
@@ -157,6 +169,7 @@ class SecureStorageService {
         _storage.delete(key: _expiresAtKey),
         _storage.delete(key: _hmacSecretKey),
         _storage.delete(key: _wakefulnessKey),
+        _storage.delete(key: _photoScheduleKey),
         _storage.delete(key: _photoReceiptKey),
         _storage.delete(key: _seenReviewsKey),
         _storage.delete(key: _dbCipherKey),
