@@ -3,8 +3,11 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../providers/app_providers.dart';
 import '../../services/photo_service.dart';
+import '../../services/secure_storage_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_spacing.dart';
 import '../../theme/app_typography.dart';
@@ -12,8 +15,25 @@ import '../../theme/responsive.dart';
 import '../../widgets/app_button.dart';
 
 class PhotoScreen extends ConsumerStatefulWidget {
-  const PhotoScreen({super.key, required this.requestId});
+  const PhotoScreen({
+    super.key,
+    required this.requestId,
+    required this.nonceValue,
+    this.issuedAt,
+    this.receivedAt,
+    this.responseSeconds,
+  });
   final String requestId;
+  // Server-issued nonce for this online request — used to sign the upload.
+  final String nonceValue;
+  // Server issue time of the request, when sent (`issued_at`). Highest-priority
+  // anchor for the response countdown.
+  final DateTime? issuedAt;
+  // When the foreground push/poll first saw the request. Fallback anchor when
+  // there's no server `issued_at` and no stamped background arrival.
+  final DateTime? receivedAt;
+  // Server-supplied window length, when sent. Null → [kPhotoWindowSeconds].
+  final int? responseSeconds;
 
   @override
   ConsumerState<PhotoScreen> createState() => _PhotoScreenState();
@@ -27,7 +47,18 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
 
   List<CameraDescription> _cameras = [];
   CameraController? _cameraCtrl;
+  int _cameraIndex = 0;   // index into _cameras for the active lens
   bool _cameraReady = false;
+  bool _switching = false; // guards re-entrant front/back toggles
+  bool _noHardware = false; // true only when no camera hardware found (simulator)
+  bool _permissionDenied = false; // camera runtime permission not granted
+  String? _cameraError; // real-device camera init failure (surfaced, not swallowed)
+  String? _capturedPath; // the just-taken photo, awaiting Retake / Add / Use
+  // Photos already committed via "Add another" — a request may be answered with
+  // up to kMaxPhotosPerRequest images in one upload. The held [_capturedPath] is
+  // the (N+1)th under review; on Use Photos it's appended and the batch uploads.
+  final List<String> _capturedPaths = [];
+  bool _popping = false;  // guards the auto-pop after a successful upload
 
   @override
   void initState() {
@@ -45,27 +76,209 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
 
     _initCamera();
 
+    // Open the request's window anchored to when it was *issued/arrived*, not to
+    // now — the server's response window is fixed, so a late tap (e.g. the guard
+    // opened the notification minutes later) must spend the elapsed time and may
+    // even open already-expired. The provider is global and may still hold the
+    // previous request's terminal state, so set it explicitly here.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _openWindow());
+
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       final s = ref.read(photoProvider);
-      if (s.status == PhotoStatus.idle || s.status == PhotoStatus.expired) {
+      // Tick through every state where the response window is still live —
+      // including capturing and reviewing, so the countdown never pauses while
+      // the guard is deciding whether to keep the shot.
+      if (s.status == PhotoStatus.idle ||
+          s.status == PhotoStatus.capturing ||
+          s.status == PhotoStatus.reviewing ||
+          s.status == PhotoStatus.expired) {
         ref.read(photoProvider.notifier).tick();
       }
     });
   }
 
+  /// Anchor and open the response window for this request. Reads the highest-
+  /// priority anchor available (server `issued_at` → the FCM background isolate's
+  /// stamped arrival → the foreground `receivedAt` → now) and opens the window
+  /// with whatever time is left.
+  Future<void> _openWindow() async {
+    if (!mounted) return;
+    final windowSeconds = widget.responseSeconds ?? kPhotoWindowSeconds;
+    // Arrival stamped by the background isolate when the push landed while
+    // locked — only set for *this* request id.
+    final bgReceipt = widget.issuedAt == null
+        ? await SecureStorageService.getPhotoReceipt(widget.requestId)
+        : null;
+    // One-shot: clear it so a later screen for a new request can't read a stale
+    // arrival. Best-effort.
+    await SecureStorageService.clearPhotoReceipt();
+    if (!mounted) return;
+    final remaining = photoSecondsRemaining(
+      issuedAt: widget.issuedAt,
+      receivedAt: bgReceipt ?? widget.receivedAt,
+      windowSeconds: windowSeconds,
+      now: DateTime.now().toUtc(),
+    );
+    ref.read(photoProvider.notifier).startWindow(
+          remaining: remaining,
+          windowSeconds: windowSeconds,
+        );
+  }
+
   Future<void> _initCamera() async {
+    // Camera needs runtime permission. Without it, availableCameras() /
+    // CameraController.initialize() throw on many Android devices — which used
+    // to be swallowed and faked as a "simulated" view, leaving the guard with no
+    // preview, no flip button, and a shutter that dead-ends. Request it up front
+    // and surface the real outcome instead.
+    final status = await Permission.camera.request();
+    if (!mounted) return;
+    if (!status.isGranted) {
+      setState(() => _permissionDenied = true);
+      return;
+    }
+
     try {
-      _cameras = await availableCameras();
-      if (_cameras.isEmpty) return; // simulator — use simulated view
-      _cameraCtrl = CameraController(
-        _cameras.first,
-        ResolutionPreset.high,
-        enableAudio: false,
+      // Some devices return an empty list on the first query right after a
+      // permission grant (the camera service hasn't refreshed yet) — retry a
+      // few times before concluding there's no hardware.
+      for (var attempt = 0; attempt < 3; attempt++) {
+        _cameras = await availableCameras();
+        if (_cameras.isNotEmpty) break;
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+      if (_cameras.isEmpty) {
+        setState(() => _noHardware = true); // genuinely no hardware (simulator)
+        return;
+      }
+      // Photo verification is a presence/identity check, so default to the
+      // front-facing camera; the guard can switch to the rear lens (e.g. to
+      // capture their surroundings) via the flip button.
+      _cameraIndex = _indexForDirection(CameraLensDirection.front);
+      await _setController(_cameras[_cameraIndex]);
+    } catch (e) {
+      // A real failure on a real device — show it (with a Retry) rather than a
+      // misleading simulated view.
+      if (mounted) setState(() => _cameraError = e.toString());
+    }
+  }
+
+  /// Re-attempt camera init after a permission grant or a transient failure.
+  void _retryCamera() {
+    setState(() {
+      _permissionDenied = false;
+      _cameraError = null;
+      _cameraReady = false;
+      _noHardware = false;
+    });
+    _initCamera();
+  }
+
+  /// The full-bleed live layer behind the controls: the real preview when ready,
+  /// an actionable problem view when permission/init failed (instead of a fake
+  /// "simulated" view that hides the failure), the simulated view only on a
+  /// genuine no-camera device, else a brief loading state.
+  Widget _buildLivePreview() {
+    if (_cameraReady && _cameraCtrl != null) {
+      return _RealCameraView(controller: _cameraCtrl!);
+    }
+    if (_permissionDenied) {
+      return _CameraProblemView(
+        icon: Icons.no_photography_outlined,
+        title: 'Camera access needed',
+        message:
+            'Allow camera permission to take your verification photo, then return here.',
+        actionLabel: 'Open Settings',
+        onAction: () => openAppSettings(),
       );
-      await _cameraCtrl!.initialize();
-      if (mounted) setState(() => _cameraReady = true);
-    } catch (_) {
-      // Camera unavailable on simulator; simulated view shown instead.
+    }
+    if (_cameraError != null) {
+      return _CameraProblemView(
+        icon: Icons.error_outline,
+        title: 'Camera unavailable',
+        message: 'The camera could not be started on this device. Tap retry.',
+        actionLabel: 'Retry',
+        onAction: _retryCamera,
+      );
+    }
+    if (_noHardware) return _SimulatedCameraView(scanCtrl: _scanCtrl);
+    // Permission granted, still initialising the controller.
+    return const ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: CircularProgressIndicator(
+          valueColor: AlwaysStoppedAnimation<Color>(AppColors.gold),
+        ),
+      ),
+    );
+  }
+
+  /// (Re)build the controller for [camera] and mark the preview ready.
+  Future<void> _setController(CameraDescription camera) async {
+    // Release the current camera BEFORE opening the next. Most Android devices
+    // only allow one open camera at a time, so initializing the new controller
+    // while the old one is still alive throws "camera in use" — which made the
+    // back-camera preview come up blank after a flip. Tear down first.
+    final old = _cameraCtrl;
+    if (old != null) {
+      _cameraCtrl = null;
+      await old.dispose();
+    }
+
+    final ctrl = CameraController(
+      camera,
+      // Medium (~480p) keeps the upload payload small — a presence/identity
+      // check doesn't need full resolution, and the smaller JPEG uploads far
+      // faster and is less likely to hit the 60s receive timeout on weak
+      // mobile signal. Bump back up to .high if image detail ever matters.
+      ResolutionPreset.medium,
+      enableAudio: false,
+    );
+    await ctrl.initialize();
+    if (!mounted) {
+      await ctrl.dispose();
+      return;
+    }
+    setState(() {
+      _cameraCtrl = ctrl;
+      _cameraReady = true;
+    });
+  }
+
+  /// The index of the **normal** lens for [dir]. Modern iPhones expose several
+  /// back lenses (wide, ultra-wide, telephoto) as separate cameras; cycling all
+  /// of them is what landed the flip on the ultra-wide (the zoomed-out look).
+  /// `availableCameras()` lists the default wide-angle first for each side, so
+  /// the first match is the standard lens. Falls back to 0 if none matches.
+  int _indexForDirection(CameraLensDirection dir) {
+    final i = _cameras.indexWhere((c) => c.lensDirection == dir);
+    return i >= 0 ? i : 0;
+  }
+
+  bool get _hasFrontAndBack =>
+      _cameras.any((c) => c.lensDirection == CameraLensDirection.front) &&
+      _cameras.any((c) => c.lensDirection == CameraLensDirection.back);
+
+  /// Toggle strictly between the normal front and normal back lens — NOT a cycle
+  /// through every physical lens (which would step onto the ultra-wide /
+  /// telephoto). Only meaningful while lining up the shot (idle).
+  Future<void> _switchCamera() async {
+    if (_switching || !_hasFrontAndBack) return;
+    if (ref.read(photoProvider).status != PhotoStatus.idle) return;
+    _switching = true;
+    setState(() => _cameraReady = false); // brief loading state during the swap
+    try {
+      final current = _cameras[_cameraIndex].lensDirection;
+      final target = current == CameraLensDirection.back
+          ? CameraLensDirection.front
+          : CameraLensDirection.back;
+      _cameraIndex = _indexForDirection(target);
+      await _setController(_cameras[_cameraIndex]);
+    } catch (e) {
+      // Surface it (with a Retry) rather than leaving a silent blank preview.
+      if (mounted) setState(() => _cameraError = e.toString());
+    } finally {
+      _switching = false;
     }
   }
 
@@ -75,52 +288,157 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
     _scanCtrl.dispose();
     _flashCtrl.dispose();
     _cameraCtrl?.dispose();
+    // Best-effort cleanup of any temp shots not consumed by an upload.
+    _deleteFiles([_capturedPath, ..._capturedPaths]);
     super.dispose();
   }
+
+  /// Best-effort delete of temp capture files (the OS clears them regardless).
+  void _deleteFiles(Iterable<String?> paths) {
+    for (final p in paths) {
+      if (p == null) continue;
+      try {
+        File(p).delete();
+      } catch (_) {}
+    }
+  }
+
+  int get _totalCaptured => _capturedPaths.length + (_capturedPath != null ? 1 : 0);
+  bool get _canAddMore => _totalCaptured < kMaxPhotosPerRequest;
 
   Future<void> _capture() async {
     final s = ref.read(photoProvider);
     if (s.status != PhotoStatus.idle) return;
 
     _flashCtrl.forward(from: 0).then((_) => _flashCtrl.reverse());
-    ref.read(photoProvider.notifier).capture();
+    ref.read(photoProvider.notifier).startCapture();
 
     String? filePath;
+    String? captureError;
 
     if (_cameraReady && _cameraCtrl != null) {
       try {
         final xFile = await _cameraCtrl!.takePicture();
         filePath = xFile.path;
-      } catch (_) {
-        // Fall through to simulator fallback
+        // Guard against a path the review Image.file can't actually read.
+        if (!File(filePath).existsSync()) {
+          captureError = 'captured file missing: $filePath';
+          filePath = null;
+        }
+      } catch (e) {
+        captureError = e.toString();
       }
     }
 
-    // Simulator fallback: write a minimal valid JPEG so the upload has a real file.
     if (filePath == null) {
-      final f = File('${Directory.systemTemp.path}/guard_sim_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await f.writeAsBytes(_kMinimalJpeg);
-      filePath = f.path;
+      if (_noHardware) {
+        // Simulator only — write a minimal valid JPEG so the upload path stays
+        // exercisable without real camera hardware.
+        final f = File('${Directory.systemTemp.path}/guard_sim_${DateTime.now().millisecondsSinceEpoch}.jpg');
+        await f.writeAsBytes(_kMinimalJpeg);
+        filePath = f.path;
+      } else {
+        // Real device: the shot failed — surface WHY (instead of swallowing it)
+        // and return to idle keeping the remaining window so the guard can retry.
+        ref.read(photoProvider.notifier).retake();
+        if (mounted) {
+          setState(() => _cameraError = captureError ?? 'capture returned no file');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Capture failed: ${captureError ?? 'no image returned'}'),
+              duration: const Duration(seconds: 6),
+            ),
+          );
+        }
+        return;
+      }
     }
 
-    await _upload(filePath);
+    // Hold the shot for review instead of uploading immediately — the guard
+    // decides Retake or Use Photo, all inside the same response window.
+    if (!mounted) return;
+    setState(() => _capturedPath = filePath);
+    ref.read(photoProvider.notifier).review();
   }
 
-  Future<void> _upload(String filePath) async {
+  /// Discard the held shot and return to the live camera, keeping the time left
+  /// and any already-committed shots.
+  void _retake() {
+    _deleteFiles([_capturedPath]);
+    setState(() => _capturedPath = null);
+    ref.read(photoProvider.notifier).retake();
+  }
+
+  /// Keep the held shot (commit it to the batch) and return to the live camera
+  /// for the next one — same response window. Only when under the 5-photo cap.
+  void _addAnother() {
+    final path = _capturedPath;
+    if (path == null || _capturedPaths.length >= kMaxPhotosPerRequest) return;
+    setState(() {
+      _capturedPaths.add(path);
+      _capturedPath = null;
+    });
+    ref.read(photoProvider.notifier).retake(); // back to idle/live camera
+  }
+
+  /// Remove an already-committed shot from the batch.
+  void _removeCommitted(int index) {
+    if (index < 0 || index >= _capturedPaths.length) return;
+    final removed = _capturedPaths[index];
+    setState(() => _capturedPaths.removeAt(index));
+    _deleteFiles([removed]);
+  }
+
+  /// Commit the held shot and upload the whole batch (1–5).
+  Future<void> _confirmUpload() async {
+    if (_capturedPath == null && _capturedPaths.isEmpty) return;
+    // Fold the held shot into the batch so it uploads with the rest.
+    final batch = [..._capturedPaths, ?_capturedPath];
+    setState(() {
+      _capturedPaths
+        ..clear()
+        ..addAll(batch);
+      _capturedPath = null;
+    });
+    ref.read(photoProvider.notifier).uploading();
+    await _upload(batch);
+  }
+
+  Future<void> _upload(List<String> filePaths) async {
     final shiftId = ref.read(shiftProvider).id;
     if (shiftId == null) {
       ref.read(photoProvider.notifier).setResult(PhotoStatus.failed);
       return;
     }
 
-    final nonce = ref.read(noncePoolProvider.notifier).consume();
+    // Bind the photo to where it was taken so the server can confirm it was
+    // captured on-site. A failed/timed-out fix uploads without coordinates
+    // rather than blocking the verification entirely.
+    double? latitude;
+    double? longitude;
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
+      latitude = pos.latitude;
+      longitude = pos.longitude;
+    } catch (_) {
+      // Location unavailable (denied, simulator, timeout) — proceed without it.
+    }
 
     try {
-      final result = await ref.read(photoServiceProvider).uploadPhoto(
-        filePath: filePath,
+      // Online (server-initiated) check: sign with the nonce delivered on the
+      // request, not a pool nonce. One nonce covers all 1–5 images.
+      final result = await ref.read(photoServiceProvider).uploadPhotos(
+        filePaths: filePaths,
         shiftId: shiftId,
         requestId: widget.requestId,
-        nonce: nonce,
+        nonceValue: widget.nonceValue,
+        latitude: latitude,
+        longitude: longitude,
       );
 
       if (!mounted) return;
@@ -132,8 +450,32 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
       };
 
       ref.read(photoProvider.notifier).setResult(photoStatus);
-      ref.read(shiftProvider.notifier).recordPhoto(
-        passed: photoStatus == PhotoStatus.validated,
+      // FLAGGED still means the photo was accepted and stored ("no action
+      // needed" for the guard) — only a rejection/transport failure is a miss.
+      // Count both VALIDATED and FLAGGED as a completed photo (ONE answered
+      // request, regardless of how many images it carried) in the summary.
+      final stored = photoStatus == PhotoStatus.validated ||
+          photoStatus == PhotoStatus.flagged;
+      ref.read(shiftProvider.notifier).recordPhoto(passed: stored);
+      // Accepted → the batch is consumed; drop the temp files. (On failure we
+      // keep them so Try Again can re-upload the same set.)
+      if (stored) {
+        _deleteFiles(filePaths);
+        _capturedPaths.clear();
+      }
+    } on PhotoRejectedException catch (e) {
+      // The photo was not stored. Surface the reason; an invalid signature
+      // means the signing key may have rotated, so prompt a re-login path.
+      if (!mounted) return;
+      ref.read(photoProvider.notifier).setResult(PhotoStatus.failed);
+      ref.read(shiftProvider.notifier).recordPhoto(passed: false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.needsRelogin
+              ? 'Verification failed (signature). Please sign out and back in, then retry.'
+              : 'Photo rejected: ${_rejectionLabel(e.reason)}. Tap Try Again.'),
+          duration: const Duration(seconds: 4),
+        ),
       );
     } catch (_) {
       if (!mounted) return;
@@ -142,120 +484,316 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
     }
   }
 
+  /// Human-readable label for a server `PHOTO_REJECTED` reason.
+  String _rejectionLabel(String reason) => switch (reason) {
+        'NONCE_EXPIRED' => 'the time window expired',
+        'NONCE_ALREADY_USED' => 'already submitted',
+        'NONCE_NOT_FOUND' => 'invalid request token',
+        'TIMELINE_ANOMALY' => 'capture time looks wrong — check your clock',
+        'REQUEST_NOT_FOUND' => 'request no longer valid',
+        _ => 'verification failed',
+      };
+
   @override
   Widget build(BuildContext context) {
     final photo = ref.watch(photoProvider);
     final isIdle = photo.status == PhotoStatus.idle;
+    final isReviewing = photo.status == PhotoStatus.reviewing;
     final isExpired = photo.status == PhotoStatus.expired;
     final timerColor = photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning;
+    // The shutter only does something when the camera is genuinely usable: the
+    // real preview is ready, or it's the simulator dummy-image path.
+    final canCapture = isIdle && (_cameraReady || _noHardware);
+
+    // The held shot is shown frozen on screen from review through to the result
+    // — including `expired`, so a window that lapses mid-review keeps the shot on
+    // screen instead of snapping back to the live camera.
+    final showCaptured = _capturedPath != null &&
+        (isReviewing ||
+            photo.status == PhotoStatus.uploading ||
+            photo.status == PhotoStatus.validated ||
+            photo.status == PhotoStatus.flagged ||
+            photo.status == PhotoStatus.failed ||
+            isExpired);
+
+    // Once the upload lands (verified or flagged-but-accepted), close the
+    // overlay and drop the guard back on the shift screen.
+    ref.listen<PhotoState>(photoProvider, (prev, next) {
+      final done = next.status == PhotoStatus.validated ||
+          next.status == PhotoStatus.flagged;
+      if (done && prev?.status != next.status && !_popping) {
+        _popping = true;
+        final navigator = Navigator.of(context);
+        Future.delayed(const Duration(milliseconds: 1000), () {
+          if (mounted) navigator.maybePop();
+        });
+      }
+      // Window lapsed — the committed batch can never upload now, so drop it so
+      // it can't reappear as stale thumbnails when the provider auto-resets to
+      // idle. The held shot stays frozen on screen (handled by `showCaptured`).
+      if (next.status == PhotoStatus.expired &&
+          prev?.status != PhotoStatus.expired &&
+          _capturedPaths.isNotEmpty) {
+        final stale = List<String>.from(_capturedPaths);
+        setState(() => _capturedPaths.clear());
+        _deleteFiles(stale);
+      }
+    });
 
     return Scaffold(
-      backgroundColor: AppColors.bg,
+      backgroundColor: Colors.black,
+      // Camera-app style: the preview fills the whole screen and every control
+      // is overlaid on top of it, instead of sitting in a small boxed card.
       body: Stack(
+        fit: StackFit.expand,
         children: [
+          // Full-bleed: the frozen captured shot while reviewing/uploading,
+          // otherwise the live preview (real camera on device, simulated on sim).
+          if (showCaptured)
+            Image.file(
+              File(_capturedPath!),
+              fit: BoxFit.cover,
+              width: double.infinity,
+              height: double.infinity,
+            )
+          else
+            _buildLivePreview(),
+
+          // Top scrim so the header + timer stay legible over a bright preview.
+          Align(
+            alignment: Alignment.topCenter,
+            child: Container(
+              height: context.s(190),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Color(0xCC000000), Color(0x00000000)],
+                ),
+              ),
+            ),
+          ),
+
+          // Header + response window + progress, pinned to the top.
           SafeArea(
-            child: SingleChildScrollView(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.base,
+                vertical: AppSpacing.base,
+              ),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Header
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.base,
-                      vertical: AppSpacing.base,
-                    ),
-                    child: Row(
-                      children: [
-                        GestureDetector(
-                          onTap: () => Navigator.of(context).pop(),
-                          child: const Icon(Icons.arrow_back, color: AppColors.text),
-                        ),
-                        const SizedBox(width: AppSpacing.md),
-                        Text('Photo Verification', style: AppType.h3),
-                      ],
-                    ),
-                  ),
-
-                  // Response window bar
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.base),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text('Respond within', style: AppType.caption),
-                        Text(
-                          isExpired ? 'Expired' : '${photo.secondsRemaining}s',
-                          style: AppType.label.copyWith(
-                            color: isExpired ? AppColors.danger : timerColor,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-
-                  // Progress bar
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.base),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(2),
-                      child: LinearProgressIndicator(
-                        value: isExpired ? 0 : photo.secondsRemaining / 78,
-                        backgroundColor: AppColors.border,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning,
-                        ),
-                        minHeight: 3,
+                  Row(
+                    children: [
+                      GestureDetector(
+                        onTap: () => Navigator.of(context).pop(),
+                        child: const Icon(Icons.arrow_back, color: AppColors.text),
                       ),
+                      const SizedBox(width: AppSpacing.md),
+                      Text('Photo Verification', style: AppType.h3),
+                    ],
+                  ),
+                  SizedBox(height: context.s(12)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Respond within', style: AppType.caption),
+                      Text(
+                        isExpired ? 'Expired' : '${photo.secondsRemaining}s',
+                        style: AppType.label.copyWith(
+                          color: isExpired ? AppColors.danger : timerColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: context.s(8)),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: isExpired
+                          ? 0
+                          : photo.secondsRemaining /
+                              (photo.windowSeconds == 0 ? 1 : photo.windowSeconds),
+                      backgroundColor: AppColors.border,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning,
+                      ),
+                      minHeight: 3,
                     ),
                   ),
-                  const SizedBox(height: 16),
+                ],
+              ),
+            ),
+          ),
 
-                  // Camera view — real on device, simulated on simulator
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.base),
-                    child: _cameraReady && _cameraCtrl != null
-                        ? _RealCameraView(controller: _cameraCtrl!)
-                        : _SimulatedCameraView(scanCtrl: _scanCtrl),
-                  ),
-                  const SizedBox(height: 16),
+          // Bottom scrim behind the capture controls.
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              height: context.s(280),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.bottomCenter,
+                  end: Alignment.topCenter,
+                  colors: [Color(0xD9000000), Color(0x00000000)],
+                ),
+              ),
+            ),
+          ),
 
-                  Text('Photograph your current location', style: AppType.label),
-                  const SizedBox(height: 4),
-                  Text(
-                    _cameraReady
-                        ? 'Point camera at your surroundings and tap capture'
-                        : 'Simulated camera · will use real camera on device',
-                    style: AppType.caption,
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: AppSpacing.xl),
-
-                  _ShutterButton(onTap: isIdle ? _capture : null, enabled: isIdle),
-                  const SizedBox(height: AppSpacing.xl),
-
-                  if (photo.status != PhotoStatus.idle) ...[
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.base),
-                      child: _UploadStatus(
+          // Capture controls overlaid at the bottom.
+          SafeArea(
+            top: false,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.base,
+                  vertical: AppSpacing.lg,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isReviewing) ...[
+                      // Committed shots so far (removable), then this held shot.
+                      if (_capturedPaths.isNotEmpty) ...[
+                        _CapturedStrip(
+                          paths: _capturedPaths,
+                          onRemove: _removeCommitted,
+                        ),
+                        SizedBox(height: context.s(12)),
+                      ],
+                      // Held shot — keep it, add another, or submit. All inside
+                      // the one response window (up to 5 photos per request).
+                      Text(
+                        _canAddMore
+                            ? 'Use this photo, or add another ($_totalCaptured/$kMaxPhotosPerRequest)'
+                            : 'Maximum $kMaxPhotosPerRequest photos',
+                        style: AppType.label,
+                        textAlign: TextAlign.center,
+                      ),
+                      SizedBox(height: context.s(14)),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: AppButton(
+                              label: 'Retake',
+                              variant: AppButtonVariant.secondary,
+                              onPressed: _retake,
+                            ),
+                          ),
+                          if (_canAddMore) ...[
+                            const SizedBox(width: AppSpacing.md),
+                            Expanded(
+                              child: AppButton(
+                                label: 'Add',
+                                variant: AppButtonVariant.secondary,
+                                onPressed: _addAnother,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(width: AppSpacing.md),
+                          Expanded(
+                            child: AppButton(
+                              label: _totalCaptured > 1
+                                  ? 'Use $_totalCaptured Photos'
+                                  : 'Use Photo',
+                              onPressed: _confirmUpload,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ] else if (isIdle || photo.status == PhotoStatus.capturing) ...[
+                      // Already-committed shots remain visible + removable while
+                      // lining up the next one.
+                      if (_capturedPaths.isNotEmpty) ...[
+                        _CapturedStrip(
+                          paths: _capturedPaths,
+                          onRemove: _removeCommitted,
+                        ),
+                        SizedBox(height: context.s(12)),
+                      ],
+                      Text(
+                        _permissionDenied
+                            ? 'Camera permission needed — see above'
+                            : _cameraError != null
+                                ? 'Camera unavailable — tap Retry above'
+                                : _cameraReady
+                                    ? 'Point camera at your surroundings and tap capture'
+                                    : _noHardware
+                                        ? 'Simulated camera · will use real camera on device'
+                                        : 'Starting camera…',
+                        style: AppType.caption,
+                        textAlign: TextAlign.center,
+                      ),
+                      SizedBox(height: context.s(16)),
+                      SizedBox(
+                        // Full width so the Stack spans the screen — otherwise it
+                        // shrink-wraps to the shutter and the flip's `right:` lands
+                        // ON TOP of the shutter (hidden, and stealing its taps).
+                        width: double.infinity,
+                        height: context.s(72),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // Only fireable once the camera is actually usable
+                            // (ready, or the simulator dummy path) — otherwise it
+                            // dead-ends. Permission/error recovery is driven by
+                            // the problem view's button instead.
+                            _ShutterButton(
+                              onTap: canCapture ? _capture : null,
+                              enabled: canCapture,
+                            ),
+                            // Flip front/back — pinned to the right edge, vertically
+                            // centred. Only when both a front and a back lens
+                            // exist, and while idle.
+                            if (_hasFrontAndBack)
+                              Positioned(
+                                right: context.s(28),
+                                top: 0,
+                                bottom: 0,
+                                child: Center(
+                                  child: _FlipButton(
+                                    onTap: isIdle ? _switchCamera : null,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (photo.status != PhotoStatus.idle &&
+                        !isReviewing &&
+                        photo.status != PhotoStatus.capturing) ...[
+                      _UploadStatus(
                         status: photo.status,
                         expireCountdown: photo.expireCountdown,
                       ),
-                    ),
-                    const SizedBox(height: AppSpacing.md),
-                  ],
-
-                  if (photo.status == PhotoStatus.flagged ||
-                      photo.status == PhotoStatus.failed) ...[
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.base),
-                      child: AppButton(
+                    ],
+                    // Only a genuine miss (rejection / transport failure) offers
+                    // Try Again. FLAGGED means the photo WAS accepted & stored
+                    // ("no action needed") and auto-pops — showing Try Again for
+                    // it just flashed the button for ~1s before the screen closed.
+                    if (photo.status == PhotoStatus.failed) ...[
+                      SizedBox(height: context.s(10)),
+                      AppButton(
                         label: 'Try Again',
                         variant: AppButtonVariant.secondary,
-                        onPressed: () => ref.read(photoProvider.notifier).tryAgain(),
+                        onPressed: () {
+                          // Fresh start: drop the held shot AND the whole batch.
+                          _deleteFiles([_capturedPath, ..._capturedPaths]);
+                          setState(() {
+                            _capturedPath = null;
+                            _capturedPaths.clear();
+                          });
+                          ref.read(photoProvider.notifier).tryAgain();
+                        },
                       ),
-                    ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -284,12 +822,63 @@ class _RealCameraView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(AppRadius.camera),
-      child: SizedBox(
-        height: context.s(270),
-        width: double.infinity,
-        child: CameraPreview(controller),
+    // Fill the whole screen the way a native camera app does: scale the preview
+    // up so it *covers* the area (cropping the overflow) rather than leaving
+    // letterbox bars. Without this the preview keeps its sensor aspect ratio and
+    // looks small/boxed.
+    final size = MediaQuery.of(context).size;
+    var scale = size.aspectRatio * controller.value.aspectRatio;
+    if (scale < 1) scale = 1 / scale;
+    return ClipRect(
+      child: Transform.scale(
+        scale: scale,
+        alignment: Alignment.center,
+        child: Center(child: CameraPreview(controller)),
+      ),
+    );
+  }
+}
+
+// ── Camera problem view (permission denied / init failed on a real device) ───
+
+class _CameraProblemView extends StatelessWidget {
+  const _CameraProblemView({
+    required this.icon,
+    required this.title,
+    required this.message,
+    required this.actionLabel,
+    required this.onAction,
+  });
+  final IconData icon;
+  final String title;
+  final String message;
+  final String actionLabel;
+  final VoidCallback onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: const Color(0xFF05070F),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: AppColors.gold, size: context.s(48)),
+              SizedBox(height: context.s(16)),
+              Text(title, style: AppType.h3, textAlign: TextAlign.center),
+              SizedBox(height: context.s(8)),
+              Text(
+                message,
+                style: AppType.caption,
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: context.s(20)),
+              AppButton(label: actionLabel, onPressed: onAction),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -303,24 +892,19 @@ class _SimulatedCameraView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(AppRadius.camera),
-      child: Container(
-        height: context.s(270),
-        width: double.infinity,
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF020408), Color(0xFF05070F)],
-          ),
-          borderRadius: BorderRadius.circular(AppRadius.camera),
-          border: Border.all(color: const Color(0x1AD4AF37)),
+    // Full-bleed to match the real-camera layout — no fixed height or rounded
+    // card, it fills the Stack it's placed in.
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF020408), Color(0xFF05070F)],
         ),
-        child: CustomPaint(
-          painter: _CameraOverlayPainter(scanCtrl),
-          child: const _CameraLabels(),
-        ),
+      ),
+      child: CustomPaint(
+        painter: _CameraOverlayPainter(scanCtrl),
+        child: const _CameraLabels(),
       ),
     );
   }
@@ -402,9 +986,100 @@ class _CameraLabels extends StatelessWidget {
         child: Text(
           'Simulated camera · gallery disabled',
           style: AppType.micro.copyWith(
-            fontSize: 10,
+            fontSize: context.sp(10),
             color: const Color(0x73D4AF37),
             fontWeight: FontWeight.w400,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Captured-photos strip (multi-photo verification, up to 5) ────────────────
+
+/// Horizontal row of the shots committed to the current upload batch, each with
+/// a tap-to-remove ✕. Lets the guard build up 1–5 photos for one request and
+/// drop any they don't want before submitting.
+class _CapturedStrip extends StatelessWidget {
+  const _CapturedStrip({required this.paths, required this.onRemove});
+  final List<String> paths;
+  final void Function(int index) onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final side = context.s(56);
+    return SizedBox(
+      height: side + context.s(6),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        shrinkWrap: true,
+        itemCount: paths.length,
+        separatorBuilder: (_, _) => SizedBox(width: context.s(8)),
+        itemBuilder: (context, i) {
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(context.s(8)),
+                child: Image.file(
+                  File(paths[i]),
+                  width: side,
+                  height: side,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              Positioned(
+                top: -context.s(6),
+                right: -context.s(6),
+                child: GestureDetector(
+                  onTap: () => onRemove(i),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    width: context.s(22),
+                    height: context.s(22),
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.danger,
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(Icons.close, size: context.s(14), color: Colors.white),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ── Flip (front/back) button ────────────────────────────────────────────────
+
+class _FlipButton extends StatelessWidget {
+  const _FlipButton({required this.onTap});
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return GestureDetector(
+      onTap: onTap,
+      child: Opacity(
+        opacity: enabled ? 1.0 : 0.4,
+        child: Container(
+          width: context.s(46),
+          height: context.s(46),
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            color: Color(0x4DFFFFFF),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            Icons.flip_camera_ios_outlined,
+            color: Colors.white,
+            size: context.s(24),
           ),
         ),
       ),
@@ -488,14 +1163,14 @@ class _UploadStatus extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Text(cfg.icon, style: const TextStyle(fontSize: 16)),
+          Text(cfg.icon, style: TextStyle(fontSize: context.sp(16))),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               status == PhotoStatus.expired
                   ? '⏱ Request expired — new request in ${expireCountdown}s'
                   : cfg.text,
-              style: AppType.caption.copyWith(fontSize: 13, color: cfg.color),
+              style: AppType.caption.copyWith(fontSize: context.sp(13), color: cfg.color),
             ),
           ),
         ],

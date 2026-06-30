@@ -1,43 +1,125 @@
 import 'dart:async';
+import 'dart:io' show Platform;
+import 'package:battery_plus/battery_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import '../config/api_config.dart';
 import 'api_client.dart';
 
+/// Streams the guard's location to the backend for the whole shift — including
+/// while the screen is locked or the app is backgrounded.
+///
+/// On Android this runs through geolocator's **foreground service** (an ongoing
+/// notification keeps the process alive); on iOS through **background location
+/// updates** (`UIBackgroundModes: location` + `allowBackgroundLocationUpdates`).
+/// A plain `Timer` would be suspended the moment the app leaves the foreground,
+/// so location is driven off a position **stream** instead — the OS wakes us to
+/// deliver fixes even when backgrounded.
+/// Android emits a fix on a time interval (~15s) even while the guard is
+/// stationary; iOS Core Location is *distance-driven* and stays silent until
+/// the device moves `distanceFilter` metres. For a static post that means iOS
+/// barely updates. This heartbeat forces a one-shot fix on iOS at the same
+/// cadence so a stationary guard reports like on Android. Foreground only —
+/// `Timer`s are suspended when the app is backgrounded (background stays
+/// movement-driven, an iOS limitation), and the position *stream* still covers
+/// movement on both platforms.
+const Duration _kIosHeartbeat = Duration(seconds: 15);
+
 class GpsService {
   GpsService(this._dio);
   final Dio _dio;
+  final Battery _battery = Battery();
 
-  Timer? _timer;
+  StreamSubscription<Position>? _sub;
+  Timer? _heartbeat;
   String? _shiftId;
 
-  Future<void> startCapture(String shiftId) async {
+  /// Starts background-capable location streaming for [shiftId]. Returns `false`
+  /// when location permission is denied (so the caller can surface a warning)
+  /// and `true` when the stream is running.
+  Future<bool> startCapture(String shiftId) async {
     _shiftId = shiftId;
 
-    // Confirm permission before starting the loop
+    // Confirm we have at least foreground permission before starting. Background
+    // ("Always") permission is requested at shift start; if the guard granted
+    // only "While Using", tracking still works while the app is open.
     final permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied ||
         permission == LocationPermission.deniedForever) {
-      return;
+      return false;
     }
 
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 15), (_) => _capture());
-    // Capture immediately on start
-    _capture();
+    await _sub?.cancel();
+    _sub = Geolocator.getPositionStream(locationSettings: _backgroundSettings())
+        .listen(_onPosition, onError: (_) {
+      // Transient stream errors (brief signal loss) — keep the subscription;
+      // the next fix resumes pings.
+    });
+
+    // Post an immediate first fix so the zone card isn't blank while the stream
+    // spins up (the stream's first emission can lag a few seconds).
+    unawaited(_captureOnce());
+
+    // iOS-only time-based heartbeat (see _kIosHeartbeat) so a stationary guard
+    // keeps reporting at Android's cadence instead of waiting to move 10m.
+    // Android already updates on a timer via AndroidSettings.intervalDuration,
+    // so adding a heartbeat there would just double the pings.
+    if (Platform.isIOS) {
+      _heartbeat?.cancel();
+      _heartbeat = Timer.periodic(_kIosHeartbeat, (_) => unawaited(_captureOnce()));
+    }
+    return true;
   }
 
   void stopCapture() {
-    _timer?.cancel();
-    _timer = null;
+    _sub?.cancel();
+    _sub = null;
+    _heartbeat?.cancel();
+    _heartbeat = null;
     _shiftId = null;
   }
 
-  Future<void> _capture() async {
-    final shiftId = _shiftId;
-    if (shiftId == null) return;
+  /// Platform settings that keep location alive in the background.
+  LocationSettings _backgroundSettings() {
+    const accuracy = LocationAccuracy.high;
+    if (Platform.isAndroid) {
+      return AndroidSettings(
+        accuracy: accuracy,
+        // Desired ~15s cadence; distanceFilter 0 so fixes still arrive while the
+        // guard is stationary (a static post is the common case).
+        intervalDuration: const Duration(seconds: 15),
+        // The foreground service is what survives a locked screen / backgrounded
+        // app. The ongoing notification is OS-mandated and doubles as honest
+        // disclosure to the guard that tracking is on.
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'Shift tracking active',
+          notificationText:
+              'IronLock is recording your patrol location during your shift.',
+          enableWakeLock: true,
+          setOngoing: true,
+        ),
+      );
+    }
+    if (Platform.isIOS) {
+      return AppleSettings(
+        accuracy: accuracy,
+        activityType: ActivityType.otherNavigation,
+        distanceFilter: 10,
+        pauseLocationUpdatesAutomatically: false,
+        // Blue background-location indicator + permission to update in the
+        // background (requires UIBackgroundModes:location + Always auth).
+        showBackgroundLocationIndicator: true,
+        allowBackgroundLocationUpdates: true,
+      );
+    }
+    return const LocationSettings(accuracy: accuracy);
+  }
 
+  void _onPosition(Position position) => unawaited(_postPing(position));
+
+  /// One-shot fix used to seed the first ping immediately on start.
+  Future<void> _captureOnce() async {
     try {
       final position = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
@@ -45,14 +127,24 @@ class GpsService {
           timeLimit: Duration(seconds: 10),
         ),
       );
+      await _postPing(position);
+    } catch (_) {
+      // iOS simulator / no fix yet — the stream will deliver when available.
+    }
+  }
 
+  Future<void> _postPing(Position position) async {
+    final shiftId = _shiftId;
+    if (shiftId == null) return;
+
+    try {
       final ping = {
         'latitude': position.latitude,
         'longitude': position.longitude,
         'accuracy': position.accuracy,
-        // No battery-info package wired (kept dependency-free per project
-        // constraints) — placeholder fraction, not read from the device.
-        'battery': 0.8,
+        // Real device battery as a 0–1 fraction; null when unknown (e.g. the
+        // iOS simulator reports a negative level).
+        'battery': await _readBatteryFraction(),
         'recorded_at': DateTime.now().toUtc().toIso8601String(),
       };
 
@@ -68,7 +160,18 @@ class GpsService {
           : null;
       if (zone != null) _zoneController.add(zone);
     } catch (_) {
-      // Silently ignore — offline queue phase will handle persistence
+      // Silently ignore — offline queue phase will handle persistence.
+    }
+  }
+
+  /// Real battery level as a 0–1 fraction, or null when the platform can't
+  /// report it (e.g. the iOS simulator returns a negative "unknown" level).
+  Future<double?> _readBatteryFraction() async {
+    try {
+      final level = await _battery.batteryLevel;
+      return level < 0 ? null : level / 100.0;
+    } catch (_) {
+      return null;
     }
   }
 

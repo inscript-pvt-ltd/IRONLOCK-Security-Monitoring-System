@@ -29,6 +29,28 @@ class AuthService {
     return apiResponse.data!;
   }
 
+  /// Redeems a Shift Access Link (SSO) one-time token. Public endpoint (no auth
+  /// header). Success returns the **same payload as login** (tokens + hmac_secret
+  /// + guard) and the guard is already `checked_in` server-side. Failures surface
+  /// as the usual `{success:false,error:{code,…}}` envelope — the caller maps the
+  /// SHIFT_ACCESS_* / LOGIN_WINDOW_CLOSED codes to UI.
+  Future<AuthTokenModel> redeemShiftAccess(String token) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      ApiConfig.shiftAccess,
+      data: {
+        'token': token,
+        'device': await DeviceInfoService.toJson(),
+      },
+    );
+
+    final apiResponse = ApiResponse.fromJson(
+      response.data!,
+      (data) => AuthTokenModel.fromJson(data as Map<String, dynamic>),
+    );
+
+    return apiResponse.data!;
+  }
+
   Future<void> logout() async {
     await _dio.post<void>(ApiConfig.logout);
   }

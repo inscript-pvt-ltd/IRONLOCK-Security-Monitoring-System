@@ -1,25 +1,95 @@
 import 'dart:async';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../../config/api_config.dart';
 import '../../models/api_response.dart';
 import '../../models/current_shift_model.dart';
+import '../../providers/alerts_provider.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/wakefulness_provider.dart';
 import '../../services/api_client.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/gps_service.dart';
+import '../../services/push_messaging_service.dart';
+import '../../services/secure_storage_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_shadows.dart';
 import '../../theme/app_typography.dart';
 import '../../theme/responsive.dart';
 import '../../overlays/end_shift_sheet.dart';
+import '../../overlays/permission_gate_overlay.dart';
+import '../../overlays/privacy_notice_overlay.dart';
 import '../../overlays/wakefulness_overlay.dart' hide AppGradients;
 import '../../widgets/app_card.dart';
 import '../../widgets/app_chip.dart';
 import '../photo/photo_screen.dart';
+
+/// Extracts a pending photo request from the (loosely-documented) shapes the
+/// backend may use for `GET /shifts/{id}/photos/pending`. The guide promises a
+/// `request_id` + `nonce_value` but never pins the envelope, so we tolerate:
+/// `{pending:true, request_id, nonce_value}`, a bare `{request_id, nonce_value}`,
+/// a nested `{request|photo_request|photo|pending_request:{...}}`, a
+/// `{requests:[{...}]}` / `{photo_requests:[{...}]}` array (the real backend's
+/// shape — an empty list means nothing pending), or the first element of a bare
+/// list. Returns null when nothing actionable is pending.
+///
+/// Both the request id and its nonce are required — the nonce signs the upload,
+/// so a payload missing either is treated as "nothing to do" rather than
+/// opening a capture that can't be submitted.
+///
+/// `issuedAt` / `responseSeconds` are optional: if the backend ever stamps the
+/// pending request with `issued_at` (or `expires_at`) and `response_seconds`,
+/// they flow through so the capture screen anchors its countdown exactly. Absent
+/// today, in which case the screen falls back to arrival time + 90s default.
+({String requestId, String nonceValue, DateTime? issuedAt, int? responseSeconds})?
+    extractPendingPhoto(dynamic data) {
+  Map<String, dynamic>? m;
+  if (data is Map<String, dynamic>) {
+    if (data['pending'] == false) return null;
+    // The real backend wraps pending requests in a list under `requests`
+    // (or `photo_requests`). An explicit list is authoritative: empty → nothing
+    // pending; otherwise take the first actionable element.
+    final list = data['requests'] ?? data['photo_requests'];
+    if (list is List) {
+      if (list.isEmpty || list.first is! Map) return null;
+      m = (list.first as Map).cast<String, dynamic>();
+    } else {
+      final nested = data['request'] ??
+          data['photo_request'] ??
+          data['photo'] ??
+          data['pending_request'];
+      m = nested is Map<String, dynamic> ? nested : data;
+    }
+  } else if (data is List && data.isNotEmpty && data.first is Map) {
+    m = (data.first as Map).cast<String, dynamic>();
+  }
+  if (m == null) return null;
+  final requestId = (m['request_id'] ?? m['id'])?.toString();
+  final nonceValue = (m['nonce_value'] ?? m['nonce'])?.toString();
+  if (requestId == null || requestId.isEmpty) return null;
+  if (nonceValue == null || nonceValue.isEmpty) return null;
+  // `expires_at` is an alternative anchor: back-compute the issue time from it.
+  final responseSeconds =
+      int.tryParse((m['response_seconds'] ?? '').toString());
+  DateTime? issuedAt = DateTime.tryParse((m['issued_at'] ?? '').toString())?.toUtc();
+  final expiresAt = DateTime.tryParse((m['expires_at'] ?? '').toString())?.toUtc();
+  if (issuedAt == null && expiresAt != null) {
+    issuedAt = expiresAt.subtract(
+      Duration(seconds: responseSeconds ?? kPhotoWindowSeconds),
+    );
+  }
+  return (
+    requestId: requestId,
+    nonceValue: nonceValue,
+    issuedAt: issuedAt,
+    responseSeconds: responseSeconds,
+  );
+}
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -29,16 +99,16 @@ class HomeScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  Timer? _batteryTimer;
   Timer? _pollingTimer;
   StreamSubscription<String>? _zoneSub;
+  // The photo request currently being handled (a PhotoScreen is open for it).
+  // Guards against the 20s poll — which keeps reporting the same request as
+  // pending until it's fulfilled — re-opening a second PhotoScreen on top (H1).
+  String? _handlingPhotoRequestId;
 
   @override
   void initState() {
     super.initState();
-    _batteryTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      ref.read(batteryProvider.notifier).tick();
-    });
     _pollingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
       _pollBackend();
     });
@@ -47,12 +117,51 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       if (!mounted) return;
       final zoneIndex = zone == 'INSIDE_ZONE' ? 0 : zone == 'OUTSIDE_ZONE' ? 1 : 2;
       ref.read(zoneProvider.notifier).set(zoneIndex);
+      ref.read(zoneUpdatedAtProvider.notifier).markNow();
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initOnFirstLaunch());
+  }
+
+  /// Sequentially show the permission gate (every launch until both camera +
+  /// location are granted) then the privacy notice (once per install). Running
+  /// them back-to-back via addPostFrameCallback avoids two routes stacking at
+  /// the same time.
+  Future<void> _initOnFirstLaunch() async {
+    if (!mounted) return;
+
+    // Step 1 — permission gate. Block until camera + location are granted.
+    final locStatus = await Permission.locationWhenInUse.status;
+    final camStatus = await Permission.camera.status;
+    if (!locStatus.isGranted || !camStatus.isGranted) {
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => PermissionGateOverlay(onGranted: () {}),
+        ),
+      );
+    }
+
+    if (!mounted) return;
+
+    // Step 2 — privacy notice (audit L15), shown once per install.
+    if (await SecureStorageService.getPrivacyAccepted()) {
+      ref.read(privacyAcceptedProvider.notifier).accept();
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => PrivacyNoticeOverlay(
+          onAccepted: SecureStorageService.setPrivacyAccepted,
+        ),
+      ),
+    );
   }
 
   @override
   void dispose() {
-    _batteryTimer?.cancel();
     _pollingTimer?.cancel();
     _zoneSub?.cancel();
     super.dispose();
@@ -68,25 +177,68 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final dio = ref.read(dioProvider);
 
-      final welfareRes = await dio.get<Map<String, dynamic>>('/welfare/pending');
-      final welfareData = welfareRes.data?['data'] as Map<String, dynamic>?;
-      if (welfareData?['pending'] == true) {
-        final status = ref.read(wakefulnessProvider).status;
-        if (status == WakefulnessStatus.idle && mounted) {
-          ref.read(wakefulnessProvider.notifier).trigger(
-            welfareData!['check_id'] as String,
-            welfareData['code'] as String,
-          );
+      // Wakefulness: when the backend provisioned a TOTP schedule at shift
+      // start, drive challenges locally from it. The local scheduler is the
+      // fallback for when push can't deliver — when push is genuinely
+      // delivering, the server's FCM challenge is the single authority, so
+      // running the scheduler too would double-fire (a locally-computed code vs
+      // the server's pushed code) for the same window (H2). Fall back to the
+      // non-contractual `/welfare/pending` poll only when no seed was issued
+      // (the local mock).
+      //
+      // Gate on isDelivering, NOT isAvailable: on iOS Firebase core can be
+      // "available" (plist present) yet never get a push (no APNs key), which
+      // would silently suppress the scheduler and drop every check. isDelivering
+      // is true only once a token actually registered.
+      final scheduler = ref.read(wakefulnessScheduleProvider.notifier);
+      final online = ref.read(isOnlineProvider);
+      if (scheduler.isArmed) {
+        if (!online || !PushMessaging.isDelivering) {
+          scheduler.checkSchedule();
+        }
+      } else {
+        final welfareRes = await dio.get<Map<String, dynamic>>('/welfare/pending');
+        final welfareData = welfareRes.data?['data'] as Map<String, dynamic>?;
+        if (welfareData?['pending'] == true) {
+          final checkId = welfareData?['check_id'] as String?;
+          final code = welfareData?['code'] as String?;
+          final status = ref.read(wakefulnessProvider).status;
+          if (checkId != null && code != null && status == WakefulnessStatus.idle && mounted) {
+            ref.read(wakefulnessProvider.notifier).trigger(checkId, code);
+          }
         }
       }
 
-      final photoRes = await dio.get<Map<String, dynamic>>('/photos/pending');
-      final photoData = photoRes.data?['data'] as Map<String, dynamic>?;
-      if (photoData?['pending'] == true && mounted) {
-        ref.read(pendingPhotoProvider.notifier).setPending(
-          true,
-          requestId: photoData!['request_id'] as String,
+      final shiftId = ref.read(shiftProvider).id;
+      if (shiftId != null) {
+        final photoRes = await dio.get<Map<String, dynamic>>(
+          ApiConfig.shiftPhotosPending(shiftId),
         );
+        final pending = extractPendingPhoto(photoRes.data?['data']);
+        // Skip a request we're already handling so a still-pending poll result
+        // doesn't churn the provider while its PhotoScreen is open (H1).
+        if (pending != null &&
+            mounted &&
+            pending.requestId != _handlingPhotoRequestId) {
+          ref.read(pendingPhotoProvider.notifier).setPending(
+                true,
+                requestId: pending.requestId,
+                nonceValue: pending.nonceValue,
+                issuedAt: pending.issuedAt,
+                // Foreground poll — anchor to now when the server gave no time.
+                receivedAt: DateTime.now().toUtc(),
+                responseSeconds: pending.responseSeconds,
+              );
+        }
+
+        // Supervisor review outcomes — surface any new APPROVED/REJECTED (with
+        // the note) as a tray notification + in-app alert. The poll is the
+        // reliable path; it also catches up on reviews a background push
+        // already banner'd (deduped, no double tray thanks to isDelivering).
+        await ref.read(photoReviewProvider.notifier).pollAndIngest(
+              shiftId,
+              pushDelivering: PushMessaging.isDelivering,
+            );
       }
     } on DioException catch (_) {
       // Silently ignore network errors during polling
@@ -110,6 +262,53 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Auto-resume ONLY a genuinely started (`active`) shift whose local state
+    // is out of sync — e.g. a parse error on POST /start, or an app relaunch
+    // mid-shift. `checked_in` means the guard has logged in but NOT pressed
+    // START yet (scheduled → checked_in → active), so it must keep showing the
+    // START button — never auto-resume it into the active/END screen.
+    ref.listen<CurrentShiftModel?>(currentShiftProvider, (_, next) {
+      if (next != null &&
+          next.status == 'active' &&
+          !ref.read(shiftProvider).active) {
+        ref.read(shiftProvider.notifier).resumeFromServer(next);
+      }
+
+      // The server closed the shift on its side while we still show it active:
+      // an AUTO-close (`end_type: auto`) at scheduled_end+grace, or an admin
+      // CANCEL. Reconcile locally (stop GPS, cancel reminder, clear state) and
+      // tell the guard. Gated on end_type=='auto'/cancelled so a guard's OWN end
+      // (end_type guard/early) — which also lands as `completed` here — never
+      // trips this.
+      final serverClosed = next != null &&
+          ref.read(shiftProvider).active &&
+          ((next.status == 'completed' && next.endType == 'auto') ||
+              next.status == 'cancelled');
+      if (serverClosed) {
+        final cancelled = next.status == 'cancelled';
+        ref.read(shiftProvider.notifier).reconcileServerClosed();
+        ref.read(alertsProvider.notifier).prepend(AppAlert(
+              id: 'shift-closed-${next.id}',
+              severity: AlertSeverity.notice,
+              title: cancelled ? 'Shift cancelled' : 'Shift auto-closed',
+              description: cancelled
+                  ? 'Your supervisor cancelled this shift.'
+                  : 'Your shift was automatically closed at its scheduled end time.',
+              time: 'just now',
+            ));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(cancelled
+                  ? 'This shift was cancelled by your supervisor.'
+                  : 'Your shift was automatically closed at its scheduled end.'),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      }
+    });
+
     // Show wakefulness overlay when backend triggers a welfare check.
     ref.listen<WakefulnessState>(wakefulnessProvider, (prev, next) {
       if (prev?.status != WakefulnessStatus.challenge &&
@@ -124,13 +323,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     // Navigate to photo screen when backend requests photo verification.
     ref.listen<PendingPhotoState>(pendingPhotoProvider, (_, next) {
-      if (next.pending && next.requestId != null) {
+      if (next.pending && next.requestId != null && next.nonceValue != null) {
         final requestId = next.requestId!;
+        final nonceValue = next.nonceValue!;
+        final issuedAt = next.issuedAt;
+        final receivedAt = next.receivedAt;
+        final responseSeconds = next.responseSeconds;
+        // Already showing a PhotoScreen for this request — don't stack another
+        // one when the same request is re-delivered by the poll or a push (H1).
+        if (requestId == _handlingPhotoRequestId) return;
+        _handlingPhotoRequestId = requestId;
         ref.read(pendingPhotoProvider.notifier).setPending(false);
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => PhotoScreen(requestId: requestId)),
-        );
+          MaterialPageRoute(
+            builder: (_) => PhotoScreen(
+              requestId: requestId,
+              nonceValue: nonceValue,
+              issuedAt: issuedAt,
+              receivedAt: receivedAt,
+              responseSeconds: responseSeconds,
+            ),
+          ),
+        ).whenComplete(() {
+          // Free the lock once the capture flow closes, so a genuinely new
+          // request for the same id (rare) can re-open later.
+          if (_handlingPhotoRequestId == requestId) {
+            _handlingPhotoRequestId = null;
+          }
+        });
       }
     });
 
@@ -139,6 +360,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final currentShift = ref.watch(currentShiftProvider);
     final battery = ref.watch(batteryProvider);
     final zone = ref.watch(zoneProvider);
+    final zoneUpdatedAt = ref.watch(zoneUpdatedAtProvider);
     final online = ref.watch(isOnlineProvider);
 
     // All horizontal padding flows from one responsive value for alignment.
@@ -165,6 +387,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     )),
                 SizedBox(height: context.s(4)),
                 Text(profile.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: AppType.h2.copyWith(
                       fontSize: context.sp(22),
                       letterSpacing: -0.01,
@@ -185,7 +409,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
       // Zone card (when shift active)
       if (shift.active) ...[
-        _ZoneCard(zone: zone),
+        _ZoneCard(
+          zone: zone,
+          siteName: currentShift?.site?.name,
+          updatedAt: zoneUpdatedAt,
+        ),
         SizedBox(height: context.s(16)),
       ],
 
@@ -206,6 +434,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: Column(
               children: [
                 if (!online) const _OfflineBanner(),
+                if (shift.active && ref.watch(locationDeniedProvider))
+                  const _LocationOffBanner(),
+                if (shift.active && currentShift != null)
+                  _OverdueBanner(scheduledEnd: currentShift.scheduledEnd),
                 Expanded(
                   child: shift.active
                 // ACTIVE: everything scrolls together so nothing clips on any
@@ -331,40 +563,82 @@ class _StatusIconStrip extends StatelessWidget {
     required this.online,
   });
 
-  final double battery;
+  final double? battery;
   final int zone;
   final bool online;
 
   Color get _batteryColor {
-    if (battery > 30) return AppColors.success;
-    if (battery > 15) return AppColors.warning;
+    final b = battery;
+    if (b == null) return AppColors.muted; // unknown
+    if (b > 30) return AppColors.success;
+    if (b > 15) return AppColors.warning;
     return AppColors.danger;
   }
 
   @override
   Widget build(BuildContext context) {
     final gap = context.s(8);
+    // Each tile changes its icon shape (not only its colour) when degraded, so
+    // status is legible to colour-blind users and is announced to VoiceOver /
+    // TalkBack via a semantic label.
+    final b = battery;
+    final batteryLow = b != null && b <= 15;
+    final batteryWarn = b != null && b <= 30;
+    // The aggregate tile must reflect real subsystem health, not just the
+    // network: it's only "normal" when we're online AND inside the zone (0).
+    final systemsNormal = online && zone == 0 && !batteryLow;
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
         _StatusTile(
-          icon: Icons.wifi,
-          color: zone == 2 ? AppColors.danger : AppColors.success,
+          icon: zone == 2 ? Icons.location_off_rounded : Icons.location_on_rounded,
+          // 0 = inside (ok), 1 = outside the geofence (warn), 2 = no signal (bad).
+          color: zone == 0
+              ? AppColors.success
+              : zone == 1
+                  ? AppColors.warning
+                  : AppColors.danger,
+          semanticLabel: zone == 0
+              ? 'GPS active, in zone'
+              : zone == 1
+                  ? 'Outside patrol zone'
+                  : 'GPS signal lost',
         ),
         SizedBox(width: gap),
         _StatusTile(
-          icon: Icons.sync,
+          icon: online ? Icons.sync_rounded : Icons.sync_problem_rounded,
           color: online ? AppColors.success : AppColors.warning,
+          semanticLabel: online ? 'Synced' : 'Offline, sync paused',
         ),
         SizedBox(width: gap),
         _StatusTile(
-          icon: Icons.battery_std_outlined,
+          icon: b == null
+              ? Icons.battery_unknown_rounded
+              : batteryLow
+                  ? Icons.battery_alert_rounded
+                  : batteryWarn
+                      ? Icons.battery_3_bar_rounded
+                      : Icons.battery_full_rounded,
           color: _batteryColor,
+          semanticLabel: b == null ? 'Battery level unknown' : 'Battery ${b.round()} percent',
         ),
         SizedBox(width: gap),
         _StatusTile(
-          icon: Icons.check_circle_outline,
-          color: online ? AppColors.success : AppColors.danger,
+          icon: systemsNormal
+              ? Icons.check_circle_outline_rounded
+              : online
+                  ? Icons.info_outline_rounded
+                  : Icons.error_outline_rounded,
+          color: systemsNormal
+              ? AppColors.success
+              : online
+                  ? AppColors.warning
+                  : AppColors.danger,
+          semanticLabel: systemsNormal
+              ? 'All systems normal'
+              : online
+                  ? 'Check status — see the cards above'
+                  : 'Connection issue',
         ),
       ],
     );
@@ -372,37 +646,45 @@ class _StatusIconStrip extends StatelessWidget {
 }
 
 class _StatusTile extends StatelessWidget {
-  const _StatusTile({required this.icon, required this.color});
+  const _StatusTile({
+    required this.icon,
+    required this.color,
+    required this.semanticLabel,
+  });
   final IconData icon;
   final Color color;
+  final String semanticLabel;
 
   @override
   Widget build(BuildContext context) {
     final size = context.s(42);
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(context.s(13)),
-        border: Border.all(color: AppColors.border, width: 1),
-        boxShadow: AppShadows.card,
-      ),
-      child: Stack(
-        children: [
-          Center(child: Icon(icon, color: color, size: context.s(20))),
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 1,
-            child: const DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: AppGradients.cardTopHighlight,
+    return Semantics(
+      label: semanticLabel,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(context.s(13)),
+          border: Border.all(color: AppColors.border, width: 1),
+          boxShadow: AppShadows.card,
+        ),
+        child: Stack(
+          children: [
+            Center(child: Icon(icon, color: color, size: context.s(20))),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 1,
+              child: const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: AppGradients.cardTopHighlight,
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -412,8 +694,10 @@ class _StatusTile extends StatelessWidget {
 // ── Zone card (when shift active) ─────────────────────────────────────────
 
 class _ZoneCard extends StatefulWidget {
-  const _ZoneCard({required this.zone});
+  const _ZoneCard({required this.zone, this.siteName, this.updatedAt});
   final int zone;
+  final String? siteName;
+  final DateTime? updatedAt;
 
   @override
   State<_ZoneCard> createState() => _ZoneCardState();
@@ -454,6 +738,8 @@ class _ZoneCardState extends State<_ZoneCard> with SingleTickerProviderStateMixi
   Widget build(BuildContext context) {
     return _ZoneCardContent(
       zone: widget.zone,
+      siteName: widget.siteName,
+      updatedAt: widget.updatedAt,
       pulseAnimation: _pulseCtrl,
     );
   }
@@ -463,9 +749,13 @@ class _ZoneCardContent extends StatelessWidget {
   const _ZoneCardContent({
     required this.zone,
     required this.pulseAnimation,
+    this.siteName,
+    this.updatedAt,
   });
   final int zone;
   final AnimationController pulseAnimation;
+  final String? siteName;
+  final DateTime? updatedAt;
 
   String get _zoneLabel {
     switch (zone) {
@@ -559,13 +849,14 @@ class _ZoneCardContent extends StatelessWidget {
                 border: Border.all(color: _zoneBorder, width: 1.5),
               ),
               alignment: Alignment.center,
-              child: Text(
+              child: Icon(
                 zone == 0
-                    ? '✓'
+                    ? Icons.check_rounded
                     : zone == 1
-                        ? '⚠'
-                        : '⊘',
-                style: TextStyle(color: _zoneColor, fontSize: context.sp(18)),
+                        ? Icons.warning_amber_rounded
+                        : Icons.signal_wifi_off_rounded,
+                color: _zoneColor,
+                size: context.sp(20),
               ),
             ),
             SizedBox(width: context.s(16)),
@@ -583,39 +874,60 @@ class _ZoneCardContent extends StatelessWidget {
                   ),
                   SizedBox(height: context.s(4)),
                   Text(
-                    'Westfield Shopping Centre A · on site',
+                    siteName != null && siteName!.isNotEmpty
+                        ? '$siteName · on site'
+                        : 'On site',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: AppType.caption.copyWith(
                       fontSize: context.sp(12),
                       color: AppColors.muted,
                     ),
                   ),
                   SizedBox(height: context.s(4)),
-                  Text(
-                    'Last updated: 15s ago · updating automatically',
-                    style: AppType.caption.copyWith(
-                      fontSize: context.sp(11),
-                      color: AppColors.muted,
-                    ),
-                  ),
-                  if (zone == 1) ...[
-                    SizedBox(height: context.s(8)),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(2),
-                      child: const LinearProgressIndicator(
-                        value: 0.75,
-                        backgroundColor: AppColors.border,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                            Color(0xFFF59E0B)),
-                        minHeight: 3,
-                      ),
-                    ),
-                  ],
+                  _ZoneUpdatedLabel(updatedAt: updatedAt),
                 ],
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+// ── Zone "last updated" label ─────────────────────────────────────────────
+// Shows an honest relative time that ticks live. Stays explicit about the
+// "no fix yet" case rather than inventing a timestamp (the simulator never
+// gets a GPS fix, so this is what shows there).
+
+class _ZoneUpdatedLabel extends StatelessWidget {
+  const _ZoneUpdatedLabel({required this.updatedAt});
+  final DateTime? updatedAt;
+
+  String _ago(DateTime t) {
+    final secs = DateTime.now().difference(t).inSeconds;
+    if (secs < 5) return 'Updated just now · tracking';
+    if (secs < 60) return 'Updated ${secs}s ago · tracking';
+    final mins = secs ~/ 60;
+    if (mins < 60) return 'Updated ${mins}m ago · tracking';
+    final hrs = mins ~/ 60;
+    return 'Updated ${hrs}h ago';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = AppType.caption.copyWith(
+      fontSize: context.sp(11),
+      color: AppColors.muted,
+    );
+    if (updatedAt == null) {
+      return Text('Awaiting first GPS fix…', style: style);
+    }
+    // Rebuild every second so the relative time stays current.
+    return StreamBuilder<int>(
+      stream: Stream.periodic(const Duration(seconds: 1), (i) => i),
+      builder: (context, _) => Text(_ago(updatedAt!), style: style),
     );
   }
 }
@@ -683,6 +995,8 @@ class _ShiftCardState extends ConsumerState<_ShiftCard> {
           ),
           SizedBox(height: context.s(8)),
           Text(a?.site?.name ?? '—',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: AppType.h3.copyWith(
                 fontSize: context.sp(18),
                 fontWeight: FontWeight.w600,
@@ -738,19 +1052,47 @@ class _ShiftCardState extends ConsumerState<_ShiftCard> {
                     fontSize: context.sp(16),
                     color: AppColors.gold,
                     fontWeight: FontWeight.w600,
+                    // Tabular figures keep every digit the same width so the
+                    // timer doesn't shift left/right as the seconds tick.
+                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
                 );
               },
             )
           else
-            Wrap(
-              spacing: context.s(8),
-              runSpacing: context.s(8),
-              children: const [
-                AppChip(label: '✓ GPS Active', variant: AppChipVariant.success),
-                AppChip(label: '● Online', variant: AppChipVariant.info),
-                AppChip(label: 'All synced', variant: AppChipVariant.info),
-              ],
+            // Pre-shift: only show status we can actually verify. GPS isn't
+            // running until the shift starts, so we don't claim it here —
+            // connectivity is real, and readiness reflects the server's
+            // can_start window.
+            Builder(
+              builder: (context) {
+                final online = ref.watch(isOnlineProvider);
+                final canStart = a?.canStart ?? false;
+                return Wrap(
+                  spacing: context.s(8),
+                  runSpacing: context.s(8),
+                  children: [
+                    online
+                        ? const AppChip(
+                            label: 'Online',
+                            variant: AppChipVariant.success,
+                            icon: Icons.cloud_done_outlined)
+                        : const AppChip(
+                            label: 'Offline',
+                            variant: AppChipVariant.warning,
+                            icon: Icons.cloud_off_outlined),
+                    canStart
+                        ? const AppChip(
+                            label: 'Ready to start',
+                            variant: AppChipVariant.success,
+                            icon: Icons.check_circle_outline)
+                        : const AppChip(
+                            label: 'Awaiting window',
+                            variant: AppChipVariant.info,
+                            icon: Icons.schedule),
+                  ],
+                );
+              },
             ),
         ],
       ),
@@ -760,10 +1102,17 @@ class _ShiftCardState extends ConsumerState<_ShiftCard> {
 
 // ── Action buttons ────────────────────────────────────────────────────────
 
-class _ActionButtons extends ConsumerWidget {
+class _ActionButtons extends ConsumerStatefulWidget {
   const _ActionButtons({required this.shift, required this.currentShift});
   final ShiftState shift;
   final CurrentShiftModel? currentShift;
+
+  @override
+  ConsumerState<_ActionButtons> createState() => _ActionButtonsState();
+}
+
+class _ActionButtonsState extends ConsumerState<_ActionButtons> {
+  bool _starting = false;
 
   String _fmtHHmm(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
@@ -772,46 +1121,77 @@ class _ActionButtons extends ConsumerWidget {
   /// explains *why* the button is disabled (15 minutes before the
   /// scheduled start, per the shift-gating contract).
   String? get _startHint {
-    final cs = currentShift;
+    final cs = widget.currentShift;
     if (cs == null) return 'No shift scheduled for today.';
     if (cs.canStart) return null;
-    if (cs.status != 'scheduled') return null;
+    if (cs.status != 'scheduled' && cs.status != 'checked_in') return null;
     final opensAt = cs.scheduledStart.subtract(const Duration(minutes: 15));
     return 'You can begin your shift from ${_fmtHHmm(opensAt)}.';
   }
 
-  Future<void> _startWithPermissions(BuildContext context, WidgetRef ref) async {
-    final status = await Permission.locationWhenInUse.request();
-    if (!context.mounted) return;
-    if (status.isPermanentlyDenied) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Location permission denied — enable it in Settings for zone tracking'),
-          duration: Duration(seconds: 4),
-        ),
-      );
-    }
+  Future<void> _startWithPermissions() async {
+    if (_starting) return;
+    setState(() => _starting = true);
     try {
-      await ref.read(shiftProvider.notifier).start();
-    } on DioException catch (e) {
-      if (!context.mounted) return;
-      final apiError = ApiError.fromDioException(e);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(apiError.message), duration: const Duration(seconds: 4)),
-      );
+      // Location permissions (When-In-Use + the background "Always" upgrade) and
+      // camera are all requested up front at the permission gate on app launch,
+      // so there is no permission prompt here — the shift starts immediately.
+      String? errorMessage;
+      try {
+        await ref.read(shiftProvider.notifier).start();
+      } on DioException catch (e) {
+        // The POST may have reached the server and started the shift even though
+        // the app saw a timeout / slow response / odd body. Capture the message
+        // but don't surface it yet — reconcile with the server first.
+        errorMessage = ApiError.fromDioException(e).message;
+        if (kDebugMode) {
+          debugPrint('[shift] start() DioException type=${e.type} '
+              'status=${e.response?.statusCode} body=${e.response?.data}');
+        }
+      } catch (e) {
+        // Non-Dio error (e.g. response parsing). Fall through to verification.
+        if (kDebugMode) debugPrint('[shift] start() non-Dio error: $e');
+      }
+
+      // Reconcile with the server regardless of how start() finished. If the
+      // backend reports the shift as `active`, go active — this makes the
+      // "backend started but app stuck on a disabled START button" bug impossible
+      // as long as the server reports the shift's true state. Only `active`
+      // counts here: `checked_in` means the start hasn't actually happened.
+      if (!ref.read(shiftProvider).active) {
+        await ref.read(currentShiftProvider.notifier).fetch();
+        final cs = ref.read(currentShiftProvider);
+        if (cs != null && cs.status == 'active') {
+          ref.read(shiftProvider.notifier).resumeFromServer(cs);
+        }
+      }
+
+      // Only show an error if we genuinely failed to start (server doesn't
+      // report it active either).
+      if (!ref.read(shiftProvider).active &&
+          errorMessage != null &&
+          mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(errorMessage), duration: const Duration(seconds: 4)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _starting = false);
     }
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
+    final shift = widget.shift;
     if (!shift.active) {
-      final canStart = currentShift?.canStart ?? false;
+      final canStart = widget.currentShift?.canStart ?? false;
       final hint = _startHint;
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           _CircleStartButton(
-            onTap: canStart ? () => _startWithPermissions(context, ref) : null,
+            loading: _starting,
+            onTap: canStart ? _startWithPermissions : null,
           ),
           if (hint != null) ...[
             SizedBox(height: context.s(12)),
@@ -828,9 +1208,52 @@ class _ActionButtons extends ConsumerWidget {
       );
     }
 
+    // Before the scheduled end, ending counts as "early" and now needs
+    // supervisor approval. The hint + button state below mirror where the
+    // request is in that approval cycle (pending / approved / rejected).
+    final cs = widget.currentShift;
+    final isEarly = cs != null && DateTime.now().isBefore(cs.scheduledEnd);
+    final pending = cs?.earlyEndPending ?? false;
+    final approved = cs?.earlyEndApproved ?? false;
+    final rejected = cs?.earlyEndRejected ?? false;
+
+    // While pending, the END button is locked — the guard must wait for the
+    // supervisor's decision (which arrives on the next 20s poll).
+    String? hint;
+    Color hintColor = AppColors.muted;
+    if (pending) {
+      hint = 'Early-end request sent · waiting for supervisor approval';
+      hintColor = AppColors.warning;
+    } else if (approved) {
+      hint = 'Approved — tap END to finish your shift';
+      hintColor = AppColors.success;
+    } else if (rejected && isEarly) {
+      hint = 'Early-end request declined · you can request again';
+      hintColor = AppColors.warning;
+    } else if (isEarly) {
+      hint = 'Shift ends at ${_fmtHHmm(cs.scheduledEnd)} · ending now needs approval';
+    }
+
     return Center(
-      child: _CircleEndButton(
-        onTap: () => showEndShiftSheet(context),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _CircleEndButton(
+            locked: pending,
+            onTap: pending ? null : () => showEndShiftSheet(context),
+          ),
+          if (hint != null) ...[
+            SizedBox(height: context.s(12)),
+            Text(
+              hint,
+              style: AppType.caption.copyWith(
+                fontSize: context.sp(12),
+                color: hintColor,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -839,8 +1262,9 @@ class _ActionButtons extends ConsumerWidget {
 // ── Circular start button ─────────────────────────────────────────────────
 
 class _CircleStartButton extends StatefulWidget {
-  const _CircleStartButton({required this.onTap});
+  const _CircleStartButton({required this.onTap, this.loading = false});
   final VoidCallback? onTap;
+  final bool loading;
 
   @override
   State<_CircleStartButton> createState() => _CircleStartButtonState();
@@ -854,17 +1278,24 @@ class _CircleStartButtonState extends State<_CircleStartButton> {
     final base = context.s(190);
     final size = base.clamp(150.0, context.screenH * 0.26);
 
-    final enabled = widget.onTap != null;
+    // While starting, the button stays visible (full opacity) but ignores taps
+    // so the network call can't be double-fired.
+    final tappable = widget.onTap != null && !widget.loading;
     return GestureDetector(
-      onTapDown: enabled ? (_) => setState(() => _pressed = true) : null,
-      onTapUp: enabled ? (_) => setState(() => _pressed = false) : null,
-      onTapCancel: enabled ? () => setState(() => _pressed = false) : null,
-      onTap: widget.onTap,
+      onTapDown: tappable
+          ? (_) {
+              HapticFeedback.mediumImpact();
+              setState(() => _pressed = true);
+            }
+          : null,
+      onTapUp: tappable ? (_) => setState(() => _pressed = false) : null,
+      onTapCancel: tappable ? () => setState(() => _pressed = false) : null,
+      onTap: tappable ? widget.onTap : null,
       child: AnimatedScale(
         scale: _pressed ? 0.96 : 1.0,
         duration: const Duration(milliseconds: 100),
         child: Opacity(
-          opacity: enabled ? 1.0 : 0.4,
+          opacity: (tappable || widget.loading) ? 1.0 : 0.4,
           child: Container(
             width: size,
             height: size,
@@ -881,15 +1312,24 @@ class _CircleStartButtonState extends State<_CircleStartButton> {
               ],
             ),
             alignment: Alignment.center,
-            child: Text(
-              'START',
-              style: AppType.bodySemi.copyWith(
-                fontSize: context.sp(26),
-                fontWeight: FontWeight.w800,
-                color: AppColors.text,
-                letterSpacing: 0.32,
-              ),
-            ),
+            child: widget.loading
+                ? SizedBox(
+                    width: context.s(34),
+                    height: context.s(34),
+                    child: const CircularProgressIndicator(
+                      color: AppColors.text,
+                      strokeWidth: 3,
+                    ),
+                  )
+                : Text(
+                    'START',
+                    style: AppType.bodySemi.copyWith(
+                      fontSize: context.sp(26),
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.text,
+                      letterSpacing: 0.32,
+                    ),
+                  ),
           ),
         ),
       ),
@@ -900,8 +1340,11 @@ class _CircleStartButtonState extends State<_CircleStartButton> {
 // ── Circular end button ───────────────────────────────────────────────────
 
 class _CircleEndButton extends StatefulWidget {
-  const _CircleEndButton({required this.onTap});
-  final VoidCallback onTap;
+  const _CircleEndButton({required this.onTap, this.locked = false});
+  // null onTap or locked=true renders the button disabled (e.g. while an
+  // early-end request is awaiting supervisor approval).
+  final VoidCallback? onTap;
+  final bool locked;
 
   @override
   State<_CircleEndButton> createState() => _CircleEndButtonState();
@@ -914,32 +1357,45 @@ class _CircleEndButtonState extends State<_CircleEndButton> {
   Widget build(BuildContext context) {
     final base = context.s(190);
     final size = base.clamp(150.0, context.screenH * 0.26);
+    final disabled = widget.locked || widget.onTap == null;
+    final accent = disabled ? AppColors.muted : AppColors.gold;
 
     return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTap: widget.onTap,
+      onTapDown: disabled
+          ? null
+          : (_) {
+              HapticFeedback.mediumImpact();
+              setState(() => _pressed = true);
+            },
+      onTapUp: disabled ? null : (_) => setState(() => _pressed = false),
+      onTapCancel: disabled ? null : () => setState(() => _pressed = false),
+      onTap: disabled ? null : widget.onTap,
       child: AnimatedScale(
         scale: _pressed ? 0.96 : 1.0,
         duration: const Duration(milliseconds: 100),
-        child: Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0x0DD4AF37),
-            border: Border.all(color: const Color(0x80D4AF37), width: 2),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            'END',
-            style: AppType.bodySemi.copyWith(
-              fontSize: context.sp(26),
-              fontWeight: FontWeight.w800,
-              color: AppColors.gold,
-              letterSpacing: 0.32,
+        child: Opacity(
+          opacity: disabled ? 0.55 : 1.0,
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: disabled ? const Color(0x0AFFFFFF) : const Color(0x0DD4AF37),
+              border: Border.all(color: accent.withValues(alpha: 0.5), width: 2),
             ),
+            alignment: Alignment.center,
+            child: disabled && widget.locked
+                ? Icon(Icons.hourglass_top_rounded,
+                    size: context.sp(34), color: accent)
+                : Text(
+                    'END',
+                    style: AppType.bodySemi.copyWith(
+                      fontSize: context.sp(26),
+                      fontWeight: FontWeight.w800,
+                      color: accent,
+                      letterSpacing: 0.32,
+                    ),
+                  ),
           ),
         ),
       ),
@@ -947,6 +1403,75 @@ class _CircleEndButtonState extends State<_CircleEndButton> {
   }
 }
 
+
+// ── Overdue banner ────────────────────────────────────────────────────────
+// Appears once the shift runs past its scheduled end and is still active —
+// the on-screen half of the "your shift has ended, go end it" reminder. Ticks
+// itself so it shows up without waiting for a provider change.
+
+class _OverdueBanner extends StatefulWidget {
+  const _OverdueBanner({required this.scheduledEnd});
+  final DateTime scheduledEnd;
+
+  @override
+  State<_OverdueBanner> createState() => _OverdueBannerState();
+}
+
+class _OverdueBannerState extends State<_OverdueBanner> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    // Re-evaluate every 30s so the banner appears shortly after the end time
+    // even if nothing else rebuilds the screen.
+    _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  String _fmtHHmm(DateTime dt) =>
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    if (!DateTime.now().isAfter(widget.scheduledEnd)) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        vertical: context.s(8),
+        horizontal: context.s(16),
+      ),
+      color: AppColors.warning.withValues(alpha: 0.14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.schedule_rounded,
+              size: context.s(15), color: AppColors.warning),
+          SizedBox(width: context.s(8)),
+          Flexible(
+            child: Text(
+              'Shift ended at ${_fmtHHmm(widget.scheduledEnd)} — tap END to close it',
+              style: AppType.micro.copyWith(
+                fontSize: context.sp(11),
+                color: AppColors.warning,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 // ── Offline banner ────────────────────────────────────────────────────────
 
@@ -982,41 +1507,134 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
-// ── Sign Out button ───────────────────────────────────────────────────────
+// ── Location-off banner ───────────────────────────────────────────────────
+// Persistent (not a transient snackbar) so a guard working with location denied
+// can't miss that they're untracked. Danger-coloured because, for an on-site
+// verification product, no location is a compliance failure, not a soft warning.
 
-class _SignOutButton extends ConsumerWidget {
+class _LocationOffBanner extends StatelessWidget {
+  const _LocationOffBanner();
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return GestureDetector(
-      onTap: () async {
-        await ref.read(shiftProvider.notifier).end();
-        await ref.read(authProvider.notifier).signOut();
-      },
-      child: Container(
-        width: double.infinity,
-        padding: EdgeInsets.symmetric(vertical: context.s(12)),
-        decoration: BoxDecoration(
-          color: Colors.transparent,
-          border: Border.all(
-            color: const Color(0x40DC2626),
-            width: 1,
-          ),
-          borderRadius: BorderRadius.circular(context.s(12)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.logout, size: context.s(15), color: const Color(0xFFE05555)),
-            SizedBox(width: context.s(8)),
-            Text(
-              'Sign Out',
-              style: AppType.label.copyWith(
-                fontSize: context.sp(13),
-                color: const Color(0xFFE05555),
-                fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        vertical: context.s(6),
+        horizontal: context.s(16),
+      ),
+      color: AppColors.danger.withValues(alpha: 0.14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.location_off_rounded,
+              size: context.s(13), color: AppColors.danger),
+          SizedBox(width: context.s(6)),
+          Flexible(
+            child: Text(
+              'Location tracking OFF — enable it in Settings',
+              textAlign: TextAlign.center,
+              style: AppType.micro.copyWith(
+                fontSize: context.sp(11),
+                color: AppColors.danger,
+                fontWeight: FontWeight.w700,
               ),
             ),
-          ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Sign Out button ───────────────────────────────────────────────────────
+
+class _SignOutButton extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_SignOutButton> createState() => _SignOutButtonState();
+}
+
+class _SignOutButtonState extends ConsumerState<_SignOutButton> {
+  bool _pressed = false;
+
+  Future<void> _confirmAndSignOut() async {
+    // Signing out ends the local shift session and clears credentials, so guard
+    // against an accidental tap with an explicit confirmation.
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierColor: const Color(0xB8000000),
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.border),
+        ),
+        title: Text('Sign out?', style: AppType.h3),
+        content: Text(
+          "You'll need to sign in again to access your shift.",
+          style: AppType.caption.copyWith(
+            fontSize: context.sp(13),
+            color: AppColors.muted,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Cancel',
+                style: AppType.label.copyWith(color: AppColors.muted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Sign Out',
+                style: AppType.label.copyWith(color: const Color(0xFFE05555))),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    // Do NOT call end() here — sign-out must not silently close an active
+    // shift (bypassing early-end approval). signOut() already stops GPS,
+    // cancels the reminder, and clears local state; the backend auto-close
+    // handles any open shift on the server side.
+    await ref.read(authProvider.notifier).signOut();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTap: _confirmAndSignOut,
+      child: AnimatedOpacity(
+        opacity: _pressed ? 0.6 : 1.0,
+        duration: const Duration(milliseconds: 100),
+        child: Container(
+          width: double.infinity,
+          padding: EdgeInsets.symmetric(vertical: context.s(12)),
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            border: Border.all(
+              color: const Color(0x40DC2626),
+              width: 1,
+            ),
+            borderRadius: BorderRadius.circular(context.s(12)),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.logout, size: context.s(15), color: const Color(0xFFE05555)),
+              SizedBox(width: context.s(8)),
+              Text(
+                'Sign Out',
+                style: AppType.label.copyWith(
+                  fontSize: context.sp(13),
+                  color: const Color(0xFFE05555),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

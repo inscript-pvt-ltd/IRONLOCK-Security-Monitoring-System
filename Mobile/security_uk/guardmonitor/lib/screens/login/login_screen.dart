@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/api_response.dart';
 import '../../providers/app_providers.dart';
+import '../../services/secure_storage_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_spacing.dart';
@@ -19,12 +20,26 @@ class LoginScreen extends ConsumerStatefulWidget {
 }
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
-  final _emailCtrl = TextEditingController(text: 'j.smith@ironlock.co.uk');
-  final _passCtrl = TextEditingController(text: 'password123');
+  final _emailCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
   bool _obscure = true;
   bool _rememberMe = true;
   bool _loading = false;
   String? _error;
+  bool _windowExpired = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedEmail();
+  }
+
+  Future<void> _loadSavedEmail() async {
+    final email = await SecureStorageService.getSavedEmail();
+    if (email != null && mounted) {
+      setState(() => _emailCtrl.text = email);
+    }
+  }
 
   @override
   void dispose() {
@@ -41,15 +56,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _signIn() async {
     if (!_canSubmit) return;
 
+    // Drop any stale SSO-link error so it doesn't linger over a password login.
+    ref.read(shiftAccessProvider.notifier).clear();
     setState(() {
       _loading = true;
       _error = null;
+      _windowExpired = false;
     });
 
     try {
       await ref.read(authProvider.notifier).signIn(
         _emailCtrl.text.trim(),
         _passCtrl.text,
+        rememberMe: _rememberMe,
       );
       // authProvider state change triggers navigation in main.dart automatically
     } on DioException catch (e) {
@@ -60,6 +79,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         _error = apiError.code == 'ACCOUNT_LOCKED'
             ? '⚠ Account locked. Please contact your supervisor.'
             : '⚠ ${apiError.message}';
+        _windowExpired = apiError.code == 'LOGIN_WINDOW_CLOSED' &&
+            apiError.details?['reason'] == 'expired';
       });
     } catch (_) {
       if (!mounted) return;
@@ -72,6 +93,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Redeeming an SSO link looks identical to a normal sign-in (same loader);
+    // a redeem failure falls through to the form, which shows its message.
+    final redeeming = ref.watch(shiftAccessProvider).isRedeeming;
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: Stack(
@@ -82,7 +106,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           ),
           // Content
           SafeArea(
-            child: _loading ? _buildLoading() : _buildFormLayout(),
+            child: (_loading || redeeming) ? _buildLoading() : _buildFormLayout(),
           ),
         ],
       ),
@@ -90,21 +114,26 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Widget _buildFormLayout() {
-    return Column(
-      children: [
-        // Scrollable content
-        Expanded(
-          child: SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(
-              context.s(AppSpacing.xl),
-              context.s(36),
-              context.s(AppSpacing.xl),
-              context.s(AppSpacing.base),
-            ),
-            child: ListenableBuilder(
-              listenable: Listenable.merge([_emailCtrl, _passCtrl]),
-              builder: (context, _) {
-                return Column(
+    // A failed SSO-link redeem surfaces here, in the same error box as a failed
+    // password login (the local _error takes precedence if both somehow exist).
+    final shiftAccess = ref.watch(shiftAccessProvider);
+    final errorMessage = _error ?? shiftAccess.message;
+    final windowExpired = _windowExpired || shiftAccess.windowExpired;
+    return ListenableBuilder(
+      listenable: Listenable.merge([_emailCtrl, _passCtrl]),
+      builder: (context, _) {
+        return Column(
+          children: [
+            // Scrollable content
+            Expanded(
+              child: SingleChildScrollView(
+                padding: EdgeInsets.fromLTRB(
+                  context.s(AppSpacing.xl),
+                  context.s(36),
+                  context.s(AppSpacing.xl),
+                  context.s(AppSpacing.base),
+                ),
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     // Logo
@@ -124,9 +153,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     // Password
                     AppInput(
                       controller: _passCtrl,
-                      label: 'Password',
-                      hint: '••••••••',
+                      label: 'Passcode',
+                      hint: '8-digit code',
                       obscureText: _obscure,
+                      keyboardType: TextInputType.number,
                       textInputAction: TextInputAction.done,
                       onSubmitted: (_canSubmit) ? (_) => _signIn() : null,
                       suffix: IconButton(
@@ -139,10 +169,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
 
-                    // Error box
-                    if (_error != null) ...[
+                    // Error box (password login OR a failed SSO-link redeem)
+                    if (errorMessage != null) ...[
                       SizedBox(height: context.s(AppSpacing.md)),
-                      _MessageBox(message: _error!, isError: true),
+                      _MessageBox(message: errorMessage, isError: true),
+                      if (windowExpired) ...[
+                        SizedBox(height: context.s(8)),
+                        _MessageBox(
+                          message: 'Once your supervisor authorises your access, tap Sign In again to retry.',
+                          isError: false,
+                        ),
+                      ],
                     ],
 
                     SizedBox(height: context.s(AppSpacing.base)),
@@ -173,38 +210,38 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
                   ],
-                );
-              },
-            ),
-          ),
-        ),
-
-        // Fixed bottom section with Sign In button and Footer
-        Padding(
-          padding: EdgeInsets.fromLTRB(
-            context.s(AppSpacing.xl),
-            context.s(AppSpacing.base),
-            context.s(AppSpacing.xl),
-            context.s(AppSpacing.xl),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Sign In button
-              AppButton(
-                label: 'Sign In',
-                variant: AppButtonVariant.primary,
-                onPressed: _canSubmit ? _signIn : null,
-                enabled: _canSubmit,
+                ),
               ),
-              SizedBox(height: context.s(AppSpacing.lg)),
+            ),
 
-              // Footer
-              _Footer(),
-            ],
-          ),
-        ),
-      ],
+            // Fixed bottom section with Sign In button and Footer
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                context.s(AppSpacing.xl),
+                context.s(AppSpacing.base),
+                context.s(AppSpacing.xl),
+                context.s(AppSpacing.xl),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Sign In button
+                  AppButton(
+                    label: 'Sign In',
+                    variant: AppButtonVariant.primary,
+                    onPressed: _canSubmit ? _signIn : null,
+                    enabled: _canSubmit,
+                  ),
+                  SizedBox(height: context.s(AppSpacing.lg)),
+
+                  // Footer
+                  _Footer(),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -282,7 +319,7 @@ class _MessageBox extends StatelessWidget {
       ),
       child: Text(
         message,
-        style: AppType.caption.copyWith(fontSize: 13, color: color),
+        style: AppType.caption.copyWith(fontSize: context.sp(13), color: color),
       ),
     );
   }

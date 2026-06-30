@@ -98,6 +98,10 @@ class _AppInputState extends State<AppInput> {
             TextFormField(
               controller: widget.controller,
               obscureText: widget.obscureText,
+              // Obscured fields (the passcode) must not feed the keyboard's
+              // learning/suggestion dictionary — that can cache the credential.
+              autocorrect: !widget.obscureText,
+              enableSuggestions: !widget.obscureText,
               keyboardType: widget.keyboardType,
               textInputAction: widget.textInputAction,
               onFieldSubmitted: widget.onSubmitted,

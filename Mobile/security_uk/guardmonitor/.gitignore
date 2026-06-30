@@ -43,3 +43,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Per-environment dart-define config — keeps environment URLs out of source.
+# (These are config, not secrets.) Only the example shape is committed.
+config/*.json
+!config/example.json

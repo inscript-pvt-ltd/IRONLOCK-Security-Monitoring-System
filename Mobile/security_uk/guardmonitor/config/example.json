@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this to dev.json / prod.json and run with --dart-define-from-file=config/<env>.json. These are CONFIG, not secrets (the base URL is visible in network traffic). Never put tokens or the hmac_secret here — those live in secure storage at runtime.",
+  "ENV": "dev",
+  "API_BASE_URL": "http://127.0.0.1:8000/api/mobile/v1"
+}

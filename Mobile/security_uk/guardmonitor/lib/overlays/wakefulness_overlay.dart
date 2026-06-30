@@ -19,8 +19,9 @@ class WakefulnessOverlay extends ConsumerStatefulWidget {
 }
 
 class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   Timer? _countdown;
+  bool _resolved = false; // guards against handling success/failed twice
   late final AnimationController _shakeCtrl;
   late final Animation<double> _shake;
   late final AnimationController _fadeCtrl;
@@ -28,6 +29,7 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _shakeCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 400),
@@ -43,21 +45,44 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
     _startCountdown();
   }
 
+  /// The 1s timer freezes while the app is backgrounded; on resume, recompute
+  /// the remaining time from the wall-clock deadline so a guard can't pause the
+  /// countdown by locking the screen mid-challenge.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycle) {
+    if (lifecycle == AppLifecycleState.resumed) {
+      if (ref.read(wakefulnessProvider).status == WakefulnessStatus.challenge) {
+        ref.read(wakefulnessProvider.notifier).tick();
+      }
+    }
+  }
+
   void _startCountdown() {
     _countdown?.cancel();
     _countdown = Timer.periodic(const Duration(seconds: 1), (_) {
       final s = ref.read(wakefulnessProvider);
+      // Stop ticking once the challenge is being verified or has resolved; the
+      // outcome side-effects are driven by the status listener in build().
       if (s.status != WakefulnessStatus.challenge) {
         _countdown?.cancel();
         return;
       }
       ref.read(wakefulnessProvider.notifier).tick();
-
-      final updated = ref.read(wakefulnessProvider);
-      if (updated.status == WakefulnessStatus.failed) {
-        _onFailed();
-      }
     });
+  }
+
+  /// Side-effects for a resolved challenge, driven from the status listener so a
+  /// success/failure decided asynchronously by the server verdict is handled the
+  /// same as a synchronous one.
+  void _onResolved(WakefulnessStatus status) {
+    if (_resolved) return;
+    _resolved = true;
+    _countdown?.cancel();
+    if (status == WakefulnessStatus.success) {
+      Future.delayed(const Duration(milliseconds: 900), _close);
+    } else {
+      _onFailed();
+    }
   }
 
   void _onKeyTap(String key) {
@@ -75,13 +100,9 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
 
   void _submit() {
     _countdown?.cancel();
+    // Fire-and-forget: a correct code goes to `verifying` and resolves on the
+    // server verdict; the status listener in build() handles the outcome.
     ref.read(wakefulnessProvider.notifier).submit();
-    final s = ref.read(wakefulnessProvider);
-    if (s.status == WakefulnessStatus.success) {
-      Future.delayed(const Duration(milliseconds: 900), _close);
-    } else {
-      _onFailed();
-    }
   }
 
   void _onFailed() {
@@ -107,9 +128,14 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _countdown?.cancel();
     _shakeCtrl.dispose();
     _fadeCtrl.dispose();
+    // Guarantee return to idle even when the overlay is torn down without going
+    // through _close() (navigation, error, app lifecycle). Calling reset() twice
+    // (here and in _close()) is safe — it's idempotent.
+    ref.read(wakefulnessProvider.notifier).reset();
     super.dispose();
   }
 
@@ -117,6 +143,19 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
   Widget build(BuildContext context) {
     final state = ref.watch(wakefulnessProvider);
     final online = ref.watch(isOnlineProvider);
+
+    // The challenge can resolve to success/failed either synchronously (wrong
+    // code / timeout) or asynchronously (server verdict on a correct code), so
+    // drive the close/alert side-effects off the status transition itself.
+    ref.listen<WakefulnessStatus>(
+      wakefulnessProvider.select((s) => s.status),
+      (prev, next) {
+        if (next == WakefulnessStatus.success ||
+            next == WakefulnessStatus.failed) {
+          _onResolved(next);
+        }
+      },
+    );
 
     return FadeTransition(
       opacity: _fadeCtrl,
@@ -140,13 +179,17 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
 
                     // Hint
                     Text(
-                      'Enter code within 10 seconds',
+                      'Enter code within ${state.responseSeconds} seconds',
                       style: AppType.caption.copyWith(fontSize: 11),
                     ),
                     const SizedBox(height: 8),
 
                     // Countdown ring
-                    _CountdownRing(seconds: state.secondsRemaining, status: state.status),
+                    _CountdownRing(
+                      seconds: state.secondsRemaining,
+                      total: state.responseSeconds,
+                      status: state.status,
+                    ),
                     const SizedBox(height: 8),
 
                     // Pin dots
@@ -298,17 +341,24 @@ class _CodeDisplay extends StatelessWidget {
 // ── Countdown ring ────────────────────────────────────────────────────────
 
 class _CountdownRing extends StatelessWidget {
-  const _CountdownRing({required this.seconds, required this.status});
+  const _CountdownRing({
+    required this.seconds,
+    required this.total,
+    required this.status,
+  });
   final int seconds;
+  final int total;
   final WakefulnessStatus status;
 
   @override
   Widget build(BuildContext context) {
     const circumference = 2 * math.pi * 46;
-    final progress = seconds / 10.0;
+    final progress = total > 0 ? (seconds / total).clamp(0.0, 1.0) : 0.0;
     final dashOffset = circumference * (1 - progress);
 
-    final isUrgent = seconds <= 3;
+    // Urgency scales with the window: last 3s for a short challenge, last 10s
+    // for the standard 60s one.
+    final isUrgent = seconds <= (total <= 15 ? 3 : 10);
     final arcColor = status == WakefulnessStatus.success
         ? AppColors.success
         : isUrgent
@@ -338,15 +388,26 @@ class _CountdownRing extends StatelessWidget {
           arcColor: arcColor,
         ),
         child: Center(
-          child: Text(
-            label,
-            style: AppType.display.copyWith(
-              fontSize: 32,
-              fontWeight: FontWeight.w800,
-              color: labelColor,
-              letterSpacing: -0.02,
-            ),
-          ),
+          // While the server is reconciling a correct code, show a spinner
+          // rather than a frozen number.
+          child: status == WakefulnessStatus.verifying
+              ? const SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    valueColor: AlwaysStoppedAnimation(AppColors.gold),
+                  ),
+                )
+              : Text(
+                  label,
+                  style: AppType.display.copyWith(
+                    fontSize: 32,
+                    fontWeight: FontWeight.w800,
+                    color: labelColor,
+                    letterSpacing: -0.02,
+                  ),
+                ),
         ),
       ),
     );
@@ -601,6 +662,12 @@ class _FooterMessage extends StatelessWidget {
       return Text(
         '✓ Check-in confirmed',
         style: AppType.label.copyWith(color: AppColors.success),
+      );
+    }
+    if (status == WakefulnessStatus.verifying) {
+      return Text(
+        'Checking…',
+        style: AppType.caption.copyWith(color: AppColors.gold),
       );
     }
     return Text(
