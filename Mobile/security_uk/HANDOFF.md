@@ -5,6 +5,50 @@ Each entry: what changed, current state, what's verified, and what's still open.
 
 ---
 
+## 2026-06-30 — Phase 7 Offline Sync (Stages 1–6 built; one trigger open)
+
+Built the **offline capture → flush-on-reconnect** subsystem per
+`guardmonitor/docs/PHASE_7_IMPLEMENTATION_PLAN.md`. Server side was already done + idempotent;
+this is all the on-device half. **131 tests pass · analyze clean.** Committed in 6 staged commits
+on branch `saduka`.
+
+**Storage decision (changed from the plan's literal wiring):** Drift + **SQLCipher**, but via
+sqlite3 3.x **build hooks** (`hooks.user_defines.sqlite3.source: sqlcipher` in pubspec) — the old
+`sqlcipher_flutter_libs` / `open.overrideFor` path was removed in sqlite3 3.0, and the analyzer-8
+toolchain forces sqlite3 3.x. Requires `flutter config --enable-native-assets` (done on this
+machine). **Verified on host: `PRAGMA cipher_version` → 4.16.0 community** (guard test
+`test/data/cipher_probe_test.dart`).
+
+What landed:
+- **`OfflineQueueDb`** (`lib/data/offline_queue_db.dart`): encrypted Drift DB, 4 tables
+  (GpsQueue/WakefulnessQueue/PhotoQueue/NoncePool) + typed CRUD w/ backoff gate. Cipher key in
+  secure storage (`db_cipher_key`), wiped on sign-out; stale/undecryptable file dropped on open.
+- **`sync_retry.dart`**: `classifyFlush()` = the §4 retry table (success/retry/drop;
+  ALREADY_RESOLVED & NONCE_ALREADY_USED = success), `backoffDelay()` exp+jitter cap 5m, max 12.
+- **`SyncFlushService`**: single-flight, connectivity false→true trigger, ordered
+  wakefulness→GPS→photos, best-effort. Started on sign-in (drains backlog + on each reconnect),
+  app-resume flush, stopped + `clearAll()` + photo-file purge on sign-out.
+- **GPS**: a ping the live POST can't deliver is queued (was dropped) → batch `pings[]` flush,
+  chunked ≤200.
+- **Wakefulness**: an offline TOTP answer that can't reach the server is queued (window_reference
+  preserved) → replayed via `submitOffline`.
+- **Photos**: `NoncePoolService` (prefetch/draw OFFLINE_POOL nonces), `TimeAnchorService` (NTP
+  anchor projected to shutter via monotonic clock — tamper-proof, EXIF-aligned),
+  `OfflinePhotoService.enqueueCapture` (sign + persist + queue), `PhotoService.submitOfflinePhotos`
+  (re-sends stored signature **verbatim**). Home poll tops up pool + anchor while online.
+
+⚠️ **OPEN — the offline-photo CAPTURE TRIGGER is not wired.** All photos today are server-initiated
+(online PHOTO_REQUEST, 90s request nonce). Offline photos need a pool-nonce, no-request_id capture —
+but there's no offline trigger in the app, and whether a pool-nonce photo should *answer* a missed
+PHOTO_REQUEST vs be a *standalone scheduled* offline capture is a **product/backend decision**. The
+machinery is complete and tested for whichever path; only the UI entry point + product rule remain.
+
+Other open items (unchanged from before): confirm the new HTTPS host serves the API on-device;
+device-verify the dashboard "offline band" appears after a GPS backlog flush (with Jerry); iOS APNs
+(FCM) still pending.
+
+---
+
 ## 2026-06-26 (cont. 7) — New HTTPS domain + cleartext removed (closes SECURITY #1 / audit C1·H4)
 
 Backend moved to **`https://dashboard.ironlock.co.uk/api/mobile/v1`** (real branded HTTPS host,

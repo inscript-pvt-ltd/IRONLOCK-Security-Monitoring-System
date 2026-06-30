@@ -39,10 +39,15 @@ class IronlockApp extends ConsumerStatefulWidget {
   ConsumerState<IronlockApp> createState() => _IronlockAppState();
 }
 
-class _IronlockAppState extends ConsumerState<IronlockApp> {
+class _IronlockAppState extends ConsumerState<IronlockApp>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    // Flush the offline queue when the app returns to the foreground — covers a
+    // reconnect that happened while we were backgrounded (no connectivity event
+    // is delivered to a suspended app). Cheap no-op if the queue is empty.
+    WidgetsBinding.instance.addObserver(this);
     // Start FCM (token registration + handlers) whenever the guard is signed in.
     // `listenManual(..., fireImmediately: true)` also covers the app being
     // **relaunched into an already-signed-in session** (e.g. reopened mid-shift):
@@ -69,6 +74,20 @@ class _IronlockAppState extends ConsumerState<IronlockApp> {
     // Begin listening for Shift Access Link (SSO) deep links — both the
     // cold-start link (app launched by the link) and warm taps while running.
     ref.read(deepLinkServiceProvider).start();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        ref.read(authProvider).asData?.value == AuthState.signedIn) {
+      ref.read(syncFlushServiceProvider).flush();
+    }
   }
 
   @override

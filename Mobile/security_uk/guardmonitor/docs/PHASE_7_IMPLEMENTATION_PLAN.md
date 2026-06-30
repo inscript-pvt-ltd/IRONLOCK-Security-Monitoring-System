@@ -1,6 +1,12 @@
 # Phase 7 — Offline Sync: Flutter Implementation Plan
 
-**Status:** PLAN — awaiting build. Approved decisions: storage = **Drift + SQLCipher**;
+**Status:** BUILT (Stages 1–6) — 2026-06-30. 131 tests pass, analyze clean. One open item:
+the offline-photo **capture trigger** (§8 note) needs a product/backend decision; all machinery
+is complete and tested. Storage landed as **Drift + SQLCipher via sqlite3 3.x build hooks**
+(`hooks.user_defines.sqlite3.source: sqlcipher`) — the `sqlcipher_flutter_libs`/`open.overrideFor`
+recipe in the plan was removed in sqlite3 3.0; needs `flutter config --enable-native-assets`.
+Verified on host: `cipher_version` 4.16.0.
+Approved decisions: storage = **Drift + SQLCipher**;
 scope = **all three capabilities (GPS, wakefulness, photos) in one pass**.
 **Date:** 2026-06-30.
 **Contracts:** `PHASE_7_FLUTTER_OFFLINE_SYNC.md` (what to build),
@@ -302,12 +308,21 @@ the anchored time (`native_exif` or similar). Add a test asserting `|EXIF − nt
 
 ## 9. Definition of done (from the contract, restated)
 
-- [ ] Captures persist to an **encrypted** queue while offline (GPS, wakefulness, photos +
-      nonce/signature/NTP anchor).
-- [ ] On reconnect, queue drains **wakefulness → GPS → photos**, oldest first.
-- [ ] GPS flushes as a **batch** (`pings[]`), chunked if huge.
-- [ ] Each offline photo uses a **distinct** prefetched nonce + its signature + NTP anchor.
-- [ ] Retry/backoff follows §4.5; terminal 4xx dequeue, success-codes dequeue, no loops.
-- [ ] No wall-clock sent as authoritative time; TOTP window + NTP anchor preserved verbatim.
-- [ ] Online happy-path unchanged; both Android & iOS verified.
-- [ ] `flutter analyze` clean, `flutter test` green, HANDOFF.md updated.
+- [x] Captures persist to an **encrypted** queue while offline (GPS, wakefulness, photos +
+      nonce/signature/NTP anchor). *(GPS + wakefulness wired end-to-end; photo enqueue machinery
+      ready — capture trigger open, see §8.)*
+- [x] On reconnect, queue drains **wakefulness → GPS → photos**, oldest first.
+- [x] GPS flushes as a **batch** (`pings[]`), chunked at ≤200.
+- [x] Each offline photo uses a **distinct** prefetched nonce + its signature + NTP anchor.
+- [x] Retry/backoff follows §4.5; terminal 4xx dequeue, success-codes dequeue, capped at 12.
+- [x] No wall-clock sent as authoritative time; TOTP window + NTP anchor preserved verbatim.
+- [x] Online happy-path unchanged. **Device verification on Android & iOS still pending** (host
+      verified incl. SQLCipher active).
+- [x] `flutter analyze` clean, `flutter test` green (131), HANDOFF.md updated.
+
+### Remaining before "fully shipped"
+
+1. **Offline-photo capture trigger** (§8) — product/backend decision + UI entry point.
+2. **On-device verification** (Android + iOS): build with native-assets, confirm SQLCipher opens
+   on device, force-offline a shift, reconnect, confirm the dashboard "offline band" (with Jerry).
+3. **EXIF check** on a real capture: confirm `|EXIF − ntp_reference| ≤ 30s` (camera plugin EXIF).

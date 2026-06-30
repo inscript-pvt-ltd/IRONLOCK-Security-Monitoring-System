@@ -78,6 +78,16 @@ class OfflinePhotoService {
     ));
   }
 
+  /// Deletes the whole durable `queued_photos/` directory — used on sign-out so a
+  /// guard's un-flushed captures don't linger for the next session. Best-effort.
+  Future<void> purgeFiles() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final queueDir = Directory(p.join(dir.path, 'queued_photos'));
+      if (await queueDir.exists()) await queueDir.delete(recursive: true);
+    } catch (_) {}
+  }
+
   /// Copies capture files into a durable `queued_photos/` dir under app
   /// documents so they survive until the flush (camera temp files may be reaped).
   Future<List<String>> _persistFiles(List<String> paths) async {
