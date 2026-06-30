@@ -3,9 +3,50 @@
 **For:** Jerry (backend/dashboard).
 **From:** Flutter app.
 **Date:** 2026-06-30.
-**Status:** ⛔ blocking the offline-photo capture path. Everything else in Phase 7 (GPS +
-wakefulness offline queue/flush, the photo *flush* + signing machinery) is built and tested.
-**Context docs:** `PHASE_7_FLUTTER_OFFLINE_SYNC.md` (§2c), `PHASE_7_IMPLEMENTATION_PLAN.md` (§8).
+**Status:** ✅ **RESOLVED 2026-06-30 — Option A (offline photo SCHEDULE).** Backend reply below.
+**Context docs:** `PHASE_7_FLUTTER_OFFLINE_SYNC.md` (§2c), `PHASE_7_IMPLEMENTATION_PLAN.md` (§8),
+updated `FLUTTER_API_GUIDE` (Photo Verification → Provisioning; 2026-06-30 changelog).
+
+---
+
+## ✅ Answer (2026-06-30): Option A — a provisioned photo schedule
+
+The backend chose **Option A**: offline photos are triggered by a **photo schedule**, exactly
+analogous to the wakefulness TOTP schedule. Concrete contract:
+
+- **`POST /shifts/{id}/start` now returns a `photos` block** next to `wakefulness`:
+  ```jsonc
+  "photos": {
+    "schedule": [ "2026-06-30T12:28:00Z", "2026-06-30T13:18:00Z" ], // ISO-8601 UTC due-times
+    "response_seconds": 90,            // ONLINE window only (a pushed request); NOT used offline
+    "offline_nonce_ttl_minutes": 15,   // offline: drawn pool nonce validity; capture must fall inside
+    "max_photos_per_capture": 5        // up to 5 images per mark
+  }
+  ```
+- **One schedule drives both paths.** While **online**, a mark arrives as a pushed
+  `PHOTO_REQUEST` (existing flow). While **offline**, the app self-fires the camera at the mark,
+  draws a **pool nonce**, captures, queues, flushes on reconnect — **omit `request_id`**. So the
+  app must **not** self-fire when online (the server push owns it) — same gating as wakefulness
+  (`!online || !PushMessaging.isDelivering`).
+- **No per-mark id, no offline countdown.** Offline validity is purely the 15-min pool-nonce
+  window. The server matches a fired check to a mark by timestamp (±60 s), so we don't echo an id.
+- **No new upload contract.** Upload endpoint, signing, nonce pool, 15-min window are unchanged
+  from Phase 4 — only the *trigger* is now defined. A scheduled offline photo lands as its own
+  evidence record (`request_type = SCHEDULED`, no `request_id`).
+
+→ This maps onto the machinery already built (NoncePoolService, TimeAnchorService,
+OfflinePhotoService.enqueueCapture, the photo flush). Remaining app work = parse the `photos`
+block + a `PhotoScheduleNotifier` (mirror `WakefulnessScheduleNotifier`) + an offline capture UI
+entry. Tracked in `PHASE_7_IMPLEMENTATION_PLAN.md`.
+
+The original question + option analysis is kept below for the record.
+
+---
+
+## (Original question — for the record)
+
+**Status when written:** ⛔ blocking the offline-photo capture path. Everything else in Phase 7
+(GPS + wakefulness offline queue/flush, the photo *flush* + signing machinery) is built and tested.
 
 ---
 
