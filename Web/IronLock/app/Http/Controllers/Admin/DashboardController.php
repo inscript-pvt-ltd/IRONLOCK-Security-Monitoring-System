@@ -8,6 +8,7 @@ use App\Domains\Alerts\Models\Alert;
 use App\Domains\Alerts\Services\AlertService;
 use App\Domains\GPS\Models\GuardLocation;
 use App\Domains\Guards\Models\Guard;
+use App\Domains\Photos\Models\PhotoRequest;
 use App\Domains\Shifts\Models\Shift;
 use App\Domains\Wakefulness\Models\WakefulnessCheck;
 use Illuminate\Http\JsonResponse;
@@ -188,6 +189,22 @@ class DashboardController extends Controller
             ->get()
             ->keyBy('shift_id');
 
+        // Photo-verification tally per active shift (same one-grouped-query, no
+        // N+1 shape as the wakefulness tally above). Mirrors the request-status
+        // buckets used by Shift::photoVerificationTally(): FULFILLED is a passed
+        // check; TIMEOUT/ANOMALY are missed/anomalous.
+        $photoTallies = PhotoRequest::whereIn('shift_id', $shifts->pluck('id'))
+            ->selectRaw(
+                "shift_id,
+                 SUM(status = ?) AS fulfilled,
+                 SUM(status IN (?, ?)) AS missed,
+                 COUNT(*) AS total",
+                [PhotoRequest::STATUS_FULFILLED, PhotoRequest::STATUS_TIMEOUT, PhotoRequest::STATUS_ANOMALY]
+            )
+            ->groupBy('shift_id')
+            ->get()
+            ->keyBy('shift_id');
+
         // Guards currently carrying an open alert → rendered with a bold pin and
         // offered an "Open Alert" deep link on the Live Map side panel.
         $openAlertGuardIds = Alert::whereIn('guard_id', $shifts->pluck('guard_id'))
@@ -195,11 +212,12 @@ class DashboardController extends Controller
             ->pluck('guard_id')
             ->flip();
 
-        $guards = $shifts->map(function (Shift $shift) use ($locations, $wakeTallies, $openAlertGuardIds) {
+        $guards = $shifts->map(function (Shift $shift) use ($locations, $wakeTallies, $photoTallies, $openAlertGuardIds) {
             $location = $locations->get($shift->guard_id);
             $guard = $shift->assignedGuard;
             $comms = !$location || $location->isCommsInterrupted();
             $tally = $wakeTallies->get($shift->id);
+            $photoTally = $photoTallies->get($shift->id);
 
             $zoneStatus = $comms ? 'COMMS_INTERRUPTED' : ($location->zone_status ?? 'UNKNOWN');
 
@@ -221,6 +239,11 @@ class DashboardController extends Controller
                     'confirmed' => (int) ($tally->confirmed ?? 0),
                     'failed' => (int) ($tally->failed ?? 0),
                     'total' => (int) ($tally->total ?? 0),
+                ],
+                'photos' => [
+                    'fulfilled' => (int) ($photoTally->fulfilled ?? 0),
+                    'missed' => (int) ($photoTally->missed ?? 0),
+                    'total' => (int) ($photoTally->total ?? 0),
                 ],
                 'last_seen_at' => $location?->updated_at?->toISOString(),
                 'last_seen_human' => $location?->updated_at?->diffForHumans() ?? 'Never',

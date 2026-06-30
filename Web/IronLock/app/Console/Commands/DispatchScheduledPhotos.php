@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domains\GPS\Models\GuardLocation;
 use App\Domains\Photos\Models\PhotoRequest;
 use App\Domains\Photos\Services\PhotoVerificationService;
 use App\Domains\Shifts\Models\Shift;
@@ -9,44 +10,69 @@ use Carbon\Carbon;
 use Illuminate\Console\Command;
 
 /**
- * Fire randomised verification photo checks on active shifts (spec §8.2).
+ * Fire verification photo checks at their provisioned schedule marks
+ * (Phase 7 Option A; spec §8.2).
  *
- * Unpredictability is the point: a guard must not be able to anticipate when a
- * photo will be demanded. This runs on a short cadence and, for each active
- * shift, fires a SCHEDULED request with a per-run probability — but only if the
- * shift has no outstanding request and its last check was at least
- * MIN_GAP_MINUTES ago, so checks stay spread out rather than clustering.
+ * Each active shift carries a randomised photo schedule (built at start, the
+ * same way wakefulness is) of due-times. This runs every minute and, for each
+ * active shift, dispatches an ONLINE PHOTO_REQUEST when a schedule mark has come
+ * due and has not already fired. The app fires the matching OFFLINE camera
+ * capture (against a pre-fetched OFFLINE_POOL nonce) at the same mark, so the
+ * guard is checked on the same cadence whether or not the device is online.
+ *
+ * Unpredictability still holds: the marks are randomised once at provisioning,
+ * so the guard cannot anticipate them — the previous per-run probability is
+ * superseded by a fixed-but-random schedule (mirrors the wakefulness design).
+ *
+ * Guardrails (mirror DispatchScheduledWakefulness):
+ *  - A shift with a still-PENDING request is skipped, so checks never stack.
+ *  - A mark counts as fired once a request exists for the shift dated at/after
+ *    it (minus a one-run tolerance), so it never double-fires.
+ *  - Only the latest due-but-unfired mark is fired per run; stale marks the
+ *    server slept through are not spammed out one-by-one.
+ *  - A comms-interrupted guard (stale/absent GPS ping) is skipped: an online
+ *    push can't reach an offline device, and the app's own offline capture
+ *    covers them. This is what stops a guard in a dead-signal zone from
+ *    collecting a phantom request every cycle (which the timeout sweep would
+ *    then escalate). On reconnection the dispatcher fires a single fresh request
+ *    for the latest due mark.
  */
 class DispatchScheduledPhotos extends Command
 {
-    /** Minimum spacing between automatic checks on the same shift. */
-    public const MIN_GAP_MINUTES = 45;
-
-    /** Probability (0–100) that an eligible shift is checked on a given run. */
-    public const FIRE_PERCENT = 35;
+    /** Tolerance, in seconds, when matching an existing request to a mark. */
+    private const MATCH_TOLERANCE_SECONDS = 60;
 
     protected $signature = 'photos:dispatch-scheduled
-                            {--force : Fire on every eligible shift regardless of probability}';
+                            {--force : Fire the latest due mark on every active shift, ignoring the schedule due-time}';
 
-    protected $description = 'Fire randomised verification photo checks on active shifts';
+    protected $description = 'Fire verification photo checks at their provisioned schedule marks';
 
     public function handle(PhotoVerificationService $photos): int
     {
         $now = Carbon::now();
-        $gapCutoff = $now->copy()->subMinutes(self::MIN_GAP_MINUTES);
 
         $shifts = Shift::with('assignedGuard')
             ->where('status', Shift::STATUS_ACTIVE)
             ->get();
 
         $fired = 0;
+        $skippedOffline = 0;
 
         foreach ($shifts as $shift) {
             if (!$shift->assignedGuard) {
                 continue;
             }
 
-            // Skip shifts with an outstanding request or a recent check.
+            // Don't request from a guard we can't reach: an online push won't
+            // land on an offline device, and the timeout sweep would only
+            // escalate the resulting silence into a false CRITICAL. The app's
+            // offline capture keeps them covered meanwhile.
+            if ($this->guardIsOffline($shift->guard_id)) {
+                $skippedOffline++;
+                continue;
+            }
+
+            // Never stack: skip a shift that already has an unanswered request.
             $hasPending = PhotoRequest::where('shift_id', $shift->id)
                 ->where('status', PhotoRequest::STATUS_PENDING)
                 ->exists();
@@ -54,15 +80,29 @@ class DispatchScheduledPhotos extends Command
                 continue;
             }
 
-            $recent = PhotoRequest::where('shift_id', $shift->id)
-                ->where('requested_at', '>=', $gapCutoff)
-                ->exists();
-            if ($recent) {
+            $schedule = is_array($shift->photo_schedule) ? $shift->photo_schedule : [];
+            if (empty($schedule) && !$this->option('force')) {
                 continue;
             }
 
-            // Randomised: only a fraction of eligible shifts fire each run.
-            if (!$this->option('force') && random_int(1, 100) > self::FIRE_PERCENT) {
+            // The latest mark that is due (<= now) and not yet fired.
+            $dueMark = null;
+            foreach ($schedule as $markIso) {
+                $mark = $this->parse($markIso);
+                if (!$mark || $mark->greaterThan($now)) {
+                    continue;
+                }
+
+                $alreadyFired = PhotoRequest::where('shift_id', $shift->id)
+                    ->where('requested_at', '>=', $mark->copy()->subSeconds(self::MATCH_TOLERANCE_SECONDS))
+                    ->exists();
+
+                if (!$alreadyFired && ($dueMark === null || $mark->greaterThan($dueMark))) {
+                    $dueMark = $mark;
+                }
+            }
+
+            if ($dueMark === null && !$this->option('force')) {
                 continue;
             }
 
@@ -74,8 +114,33 @@ class DispatchScheduledPhotos extends Command
             }
         }
 
-        $this->info("Dispatched {$fired} scheduled photo check(s).");
+        $this->info("Dispatched {$fired} scheduled photo check(s); skipped {$skippedOffline} offline guard(s).");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * A guard with no recent GPS ping is unreachable by online push. Mirrors
+     * WakefulnessService::guardIsOffline so the two capabilities share the one
+     * comms-interruption rule (GuardLocation::isCommsInterrupted) and never
+     * diverge.
+     */
+    private function guardIsOffline(string $guardId): bool
+    {
+        $location = GuardLocation::where('guard_id', $guardId)->first();
+
+        return !$location || $location->isCommsInterrupted();
+    }
+
+    private function parse(?string $value): ?Carbon
+    {
+        if (empty($value)) {
+            return null;
+        }
+        try {
+            return Carbon::parse($value);
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 }

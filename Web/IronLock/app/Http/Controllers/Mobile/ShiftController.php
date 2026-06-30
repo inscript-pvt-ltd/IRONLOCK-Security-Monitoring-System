@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\Mobile;
 
+use App\Domains\Nonces\Services\NonceService;
+use App\Domains\Photos\Services\PhotoVerificationService;
 use App\Domains\Shifts\Models\Shift;
 use App\Domains\Shifts\Models\ShiftEvent;
 use App\Http\Controllers\Controller;
@@ -134,6 +136,23 @@ class ShiftController extends Controller
                 'totp_digits' => (int) config('ironlock.totp_digits', 4),
                 'response_seconds' => (int) config('ironlock.wakefulness_response_seconds', 60),
                 'schedule' => $shift->wakefulness_schedule ?? [],
+            ],
+            // Photo verification schedule (Phase 7 Option A, contract §6.3/6.4).
+            // The randomised due-times provisioned at start, shared with the
+            // online dispatcher. While OFFLINE the app fires the camera at each
+            // mark against a pre-fetched OFFLINE_POOL nonce (prefetch via
+            // /shifts/{id}/nonces/prefetch) and queues the capture; while ONLINE
+            // the same mark arrives as a pushed PHOTO_REQUEST instead. Offline
+            // captures omit request_id and are judged by reconstructed capture
+            // time against the pool-nonce window below.
+            'photos' => [
+                'schedule' => $shift->photo_schedule ?? [],
+                // Online window: seconds to capture+upload after a pushed request.
+                'response_seconds' => (int) config('ironlock.photo_response_seconds', 90),
+                // Offline window: a drawn pool nonce is valid this many minutes
+                // from issuance; the capture's reconstructed time must fall inside.
+                'offline_nonce_ttl_minutes' => NonceService::OFFLINE_TTL_MINUTES,
+                'max_photos_per_capture' => PhotoVerificationService::MAX_PHOTOS_PER_REQUEST,
             ],
         ]);
     }

@@ -276,7 +276,7 @@ class AlertService
                 : 'Unknown',
             'site_name' => $a->shift?->site?->name ?? '—',
             'title' => $a->title,
-            'age' => $a->raised_at->diffForHumans(),
+            'age' => $a->raised_at?->diffForHumans() ?? '—',
         ])->toArray();
     }
 }

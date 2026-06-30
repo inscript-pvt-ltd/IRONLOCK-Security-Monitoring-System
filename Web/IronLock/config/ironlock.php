@@ -62,9 +62,25 @@ return [
     | removes the 60–90s dead zone where an honest upload was rejected yet still
     | alerted. The OFFLINE pool TTL (15 min) is unaffected.
     |
+    | photo_min_gap_minutes / photo_max_gap_minutes (Phase 7 Option A): the
+    | random spacing between consecutive verification-photo marks on a shift.
+    | The schedule is provisioned at start (Shift::buildPhotoSchedule) and is the
+    | single source of truth for BOTH the online dispatcher (photos:dispatch-
+    | scheduled) and the app's offline camera trigger, so a guard is checked on
+    | the same cadence whether or not the device is connected.
+    |
+    | Defaults to a ~1-hour gap (client requirement), randomised 50–70 min around
+    | the hour. The ±10 min jitter is deliberate: a fixed 60-min rhythm would let
+    | a guard anticipate the next check, defeating the anti-gaming intent of
+    | "randomised live photo verification" (master spec §7.1).
+    |
     */
 
     'photo_response_seconds' => (int) env('IRONLOCK_PHOTO_RESPONSE_SECONDS', 90),
+
+    'photo_min_gap_minutes' => (int) env('IRONLOCK_PHOTO_MIN_GAP', 50),
+
+    'photo_max_gap_minutes' => (int) env('IRONLOCK_PHOTO_MAX_GAP', 70),
 
     /*
     |--------------------------------------------------------------------------

@@ -313,9 +313,11 @@
     function renderPanel(g) {
         const s = statusChip(g);
         const w = g.wakefulness || { confirmed: 0, failed: 0, total: 0 };
+        const p = g.photos || { fulfilled: 0, missed: 0, total: 0 };
         const coords = (g.latitude !== null && g.longitude !== null)
             ? `${g.latitude.toFixed(4)}, ${g.longitude.toFixed(4)}` : 'No fix yet';
         const failedTxt = w.failed > 0 ? ` <span style="color:var(--error-red);">(${w.failed} failed)</span>` : '';
+        const photoMissedTxt = p.missed > 0 ? ` <span style="color:var(--error-red);">(${p.missed} missed)</span>` : '';
         const openAlertBtn = g.has_open_alert
             ? `<a class="gp-btn outline" href="${alertsFeedUrl}">Open Alert →</a>` : '';
 
@@ -338,6 +340,8 @@
                 <div class="gp-value">${fmtTime(g.shift_started_at)} ${g.shift_reference ? '· #' + escapeHtml(g.shift_reference) : ''}</div></div>
             <div class="gp-field"><span class="gp-label">Welfare checks</span>
                 <div class="gp-value">${w.confirmed} / ${w.total} ✓${failedTxt}</div></div>
+            <div class="gp-field"><span class="gp-label">Photo checks</span>
+                <div class="gp-value">${p.fulfilled} / ${p.total} ✓${photoMissedTxt}</div></div>
             <hr class="gp-divider"/>
             <a class="gp-btn primary" href="${shiftTimelineBase}/${g.shift_id}/timeline">View Shift →</a>
             ${openAlertBtn}
