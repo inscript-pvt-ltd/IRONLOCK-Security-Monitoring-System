@@ -2,9 +2,11 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:battery_plus/battery_plus.dart';
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import '../config/api_config.dart';
+import '../data/offline_queue_db.dart';
 import 'api_client.dart';
 
 /// Streams the guard's location to the backend for the whole shift — including
@@ -27,8 +29,12 @@ import 'api_client.dart';
 const Duration _kIosHeartbeat = Duration(seconds: 15);
 
 class GpsService {
-  GpsService(this._dio);
+  GpsService(this._dio, this._queueDb);
   final Dio _dio;
+  // Encrypted offline queue: a ping that can't reach the server is buffered here
+  // and flushed as a batch on reconnect (Phase 7). Nullable so GPS still runs if
+  // the queue is unavailable.
+  final OfflineQueueDb? _queueDb;
   final Battery _battery = Battery();
 
   StreamSubscription<Position>? _sub;
@@ -137,20 +143,26 @@ class GpsService {
     final shiftId = _shiftId;
     if (shiftId == null) return;
 
-    try {
-      final ping = {
-        'latitude': position.latitude,
-        'longitude': position.longitude,
-        'accuracy': position.accuracy,
-        // Real device battery as a 0–1 fraction; null when unknown (e.g. the
-        // iOS simulator reports a negative level).
-        'battery': await _readBatteryFraction(),
-        'recorded_at': DateTime.now().toUtc().toIso8601String(),
-      };
+    // Real device battery as a 0–1 fraction; null when unknown (e.g. the iOS
+    // simulator reports a negative level). Captured once so the live POST and a
+    // queued copy agree.
+    final battery = await _readBatteryFraction();
+    final recordedAt = DateTime.now().toUtc().toIso8601String();
 
+    try {
       final response = await _dio.post<Map<String, dynamic>>(
         ApiConfig.shiftLocations(shiftId),
-        data: {'pings': [ping]},
+        data: {
+          'pings': [
+            {
+              'latitude': position.latitude,
+              'longitude': position.longitude,
+              'accuracy': position.accuracy,
+              'battery': battery,
+              'recorded_at': recordedAt,
+            }
+          ]
+        },
       );
 
       final data = response.data?['data'] as Map<String, dynamic>?;
@@ -160,7 +172,35 @@ class GpsService {
           : null;
       if (zone != null) _zoneController.add(zone);
     } catch (_) {
-      // Silently ignore — offline queue phase will handle persistence.
+      // Offline / server unreachable: buffer the ping in the encrypted queue so
+      // it flushes as a batch on reconnect (Phase 7). Best-effort — never throw.
+      await _enqueuePing(shiftId, position, battery, recordedAt);
+    }
+  }
+
+  /// Persists a ping the live POST couldn't deliver. Swallows its own errors —
+  /// a failed queue write must not break location tracking.
+  Future<void> _enqueuePing(
+    String shiftId,
+    Position position,
+    double? battery,
+    String recordedAt,
+  ) async {
+    final db = _queueDb;
+    if (db == null) return;
+    try {
+      await db.enqueueGps(GpsQueueCompanion.insert(
+        shiftId: shiftId,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        accuracy: Value(position.accuracy),
+        battery: Value(battery),
+        recordedAt: recordedAt,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
+      ));
+    } catch (_) {
+      // Queue unavailable — drop; GPS is best-effort and the server alarms only
+      // on conditions still true on reconnect anyway.
     }
   }
 
@@ -185,7 +225,8 @@ class GpsService {
 }
 
 final gpsServiceProvider = Provider<GpsService>((ref) {
-  final service = GpsService(ref.read(dioProvider));
+  final service =
+      GpsService(ref.read(dioProvider), ref.read(offlineQueueDbProvider));
   ref.onDispose(service.dispose);
   return service;
 });

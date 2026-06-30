@@ -4,9 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'providers/app_providers.dart';
 import 'screens/login/login_screen.dart';
 import 'screens/home/home_screen.dart';
+import 'services/connectivity_service.dart';
 import 'services/deep_link_service.dart';
 import 'services/notification_service.dart';
 import 'services/push_messaging_service.dart';
+import 'services/sync_flush_service.dart';
 import 'theme/app_colors.dart';
 import 'theme/app_theme.dart';
 
@@ -53,6 +55,12 @@ class _IronlockAppState extends ConsumerState<IronlockApp> {
       (prev, next) {
         if (next.asData?.value == AuthState.signedIn) {
           PushMessaging.start(ref);
+          // Phase 7: start the offline-sync flush engine for the session. It
+          // drains any queued backlog now and flushes on every reconnect.
+          // Idempotent — safe on relaunch into an existing session.
+          ref.read(syncFlushServiceProvider).start(connectivityBoolStream());
+        } else {
+          ref.read(syncFlushServiceProvider).stop();
         }
       },
       fireImmediately: true,

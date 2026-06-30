@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/api_config.dart';
 import '../data/offline_queue_db.dart';
+import '../providers/shift_provider.dart';
+import 'api_client.dart';
 import 'sync_retry.dart';
 
 /// Orchestrates draining the offline queue to the (idempotent) server endpoints
@@ -52,6 +55,10 @@ class SyncFlushService {
       _wasOnline = online;
       if (reconnected) unawaited(flush());
     });
+    // Drain any backlog left from a previous session (e.g. the app was killed
+    // mid-shift with queued pings, then relaunched already online — no
+    // offline→online edge would otherwise fire). Cheap no-op if empty.
+    unawaited(flush());
   }
 
   /// Stops watching connectivity. Call on sign-out.
@@ -153,3 +160,19 @@ class SyncFlushService {
     // Stage 5.
   }
 }
+
+/// App-wide flush engine. Constructed once; `start()`/`stop()` are driven by the
+/// auth lifecycle in `main.dart`. `currentShiftId` returns the active shift id
+/// (or null when no shift is running) so GPS/photo flushes target the right shift.
+final syncFlushServiceProvider = Provider<SyncFlushService>((ref) {
+  final service = SyncFlushService(
+    ref.read(offlineQueueDbProvider),
+    ref.read(dioProvider),
+    () {
+      final shift = ref.read(shiftProvider);
+      return shift.active ? shift.id : null;
+    },
+  );
+  ref.onDispose(service.stop);
+  return service;
+});
