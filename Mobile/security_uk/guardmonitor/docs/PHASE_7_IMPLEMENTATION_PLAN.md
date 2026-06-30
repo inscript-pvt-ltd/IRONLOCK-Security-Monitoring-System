@@ -136,20 +136,44 @@ Why columns instead of a generic `queue` blob: typed retry/backoff per row, triv
 - `clearAll()` called from `clearSession`.
 
 ### 4.2 `NoncePoolService` — `lib/services/nonce_pool_service.dart`
-- `Future<void> refillIfLow(shiftId)` — when online and pool `available < threshold`
-  (e.g. <5), `POST /shifts/{id}/nonces/prefetch`, store the 20 returned nonces with
-  their `expires_at`. Call opportunistically: on shift start, and after each online
-  photo capture.
+- `Future<void> refillIfLow(shiftId)` — when online and pool `remaining < 5`,
+  `POST /shifts/{id}/nonces/prefetch` with body `{ "count": 20 }` (server clamps 1–50).
+  Call opportunistically: on shift start, and after each online photo capture.
+  **Confirmed response shape** (`NonceController.php:50-61`):
+
+  ```jsonc
+  { "success": true, "data": {
+      "nonces": [ { "nonce_value": "<64-hex>", "issued_at": "…Z",
+                    "expires_at": "…Z", "type": "OFFLINE_POOL" } /* …count */ ],
+      "expiry_minutes": 15, "remaining": 20 } }
+  ```
+
+  Store each `nonce_value` + `expires_at` (15-min TTL). `remaining` = currently usable
+  pool nonces; refill threshold = `< 5`. A `409 SHIFT_NOT_ACTIVE` → stop, don't retry.
 - `Future<String?> draw(shiftId)` — atomically pick an unexpired, undrawn nonce, mark
   `drawn=1`, return it (null if the pool is dry → offline capture not possible, surface
   to UI: "reconnect to take a verification photo offline" — rare, pool is 20 deep).
 - `purgeExpired()`.
+- **Type discipline (confirmed):** pool nonces are `TYPE_OFFLINE_POOL` — judged against
+  the *reconstructed capture time*, 15-min window. An *online* request nonce on a delayed
+  upload would `NONCE_EXPIRED` (90s, judged at receipt). So offline capture **must** draw
+  a pool nonce and **omit `request_id`**; never reuse an online request nonce offline.
 
 ### 4.3 `TimeAnchorService` — `lib/services/time_anchor_service.dart`
 - `Future<TimeAnchor?> capture()` → `{ ntpIso, stopwatch }`: one SNTP query (cached for
   the shift, re-synced periodically) + a `Stopwatch` started at sync. At photo time:
   `elapsed = stopwatch.elapsed`. Returns null when NTP is unreachable (offline) — caller
-  queues anyway with `ntp_reference=null`.
+  queues anyway with `ntp_reference=null` (server flags `NTP_UNAVAILABLE`/`DELAYED_UPLOAD`).
+- **NTP host (confirmed): client's choice** — server doesn't prescribe one. Use
+  `time.google.com` (leap-smeared, stable) as primary, platform default as fallback.
+- ⚠️ **NTP-vs-EXIF cross-check (new, important):** the server compares our `ntp_reference`
+  against the photo's **EXIF timestamp**; a delta **> 30s** raises
+  `CLOCK_MANIPULATION_SUSPECTED` (`PhotoVerificationService.php:196-203`). Therefore the
+  captured JPEG **must carry an EXIF `DateTimeOriginal`** that matches the NTP anchor
+  within 30s. Action items: (a) confirm the `camera` plugin writes EXIF on each platform;
+  (b) if it doesn't, stamp EXIF ourselves at capture (e.g. `native_exif`) from the same
+  anchored time — **never** from a wall-clock that could be skewed. This is a queue-photo
+  acceptance risk, not just cosmetic (see §8 risk).
 
 ### 4.4 `SyncFlushService` — `lib/services/sync_flush_service.dart`
 The orchestrator. Public API: `Future<void> flush()` and `void start()/stop()`.
@@ -250,17 +274,29 @@ Target: keep the suite green (currently 91 tests) and add ~15–20.
 
 ---
 
-## 8. Risks / open questions for backend (Jerry)
+## 8. Backend questions — ALL RESOLVED (2026-06-30, from backend code)
 
-- **Offline photo = pool nonce, not request nonce?** Confirm a server-initiated
-  `PHOTO_REQUEST` that goes unanswered offline is simply a miss, and only *self-initiated*
-  offline captures use the prefetched pool. (Plan assumes yes per §2c of the contract.)
-- **`/nonces/prefetch` response shape** — confirm it returns `{nonces:[{nonce_value,
-  expires_at}], …}` (or similar) so `NoncePoolService` parses correctly.
-- **`pings[]` batch upper bound?** A long offline stretch at 15s cadence = lots of pings
-  (e.g. 1h ≈ 240). Is there a max batch size, or should we chunk (e.g. 200/req)? Plan
-  will **chunk defensively** at ~200.
-- **NTP source** — any preferred SNTP host, or is `time.google.com`/pool.ntp.org fine?
+- ✅ **Offline photo = pool nonce, not request nonce.** Two nonce types: `TYPE_ONLINE`
+  (90s, judged at receipt) vs `TYPE_OFFLINE_POOL` (15-min, judged vs reconstructed capture
+  time). Offline capture draws a pool nonce + omits `request_id`. An online nonce on a
+  delayed upload → `NONCE_EXPIRED`. (`NonceService.php`, `PhotoVerificationService.php:360-374`)
+- ✅ **`/nonces/prefetch` shape** confirmed — see §4.2. Body `{count}` default 20, clamp
+  1–50; response `data.nonces[].{nonce_value,issued_at,expires_at,type}` + `remaining`.
+- ✅ **`pings[]` no hard cap** — only empty-array is rejected. Each ping does a geofence
+  `ST_CONTAINS` + UPSERT synchronously, so huge batches risk a timeout, not a 4xx. **Chunk
+  at 100–200** (plan uses ~200). Jerry offered to add an explicit server max + clean
+  `VALIDATION_ERROR` if we want a deterministic contract — defer unless flushes time out.
+- ✅ **NTP host = our choice** — server doesn't validate the host; it cross-checks our
+  `ntp_reference` vs the photo **EXIF** time (>30s ⇒ `CLOCK_MANIPULATION_SUSPECTED`). Use
+  `time.google.com` primary. **→ drives the EXIF risk below.**
+
+### Live risk to design around: NTP-vs-EXIF (§4.3)
+
+The photo JPEG must carry an EXIF `DateTimeOriginal` within **30s** of our NTP anchor or
+the server flags `CLOCK_MANIPULATION_SUSPECTED`. First task in Stage 5: verify the `camera`
+plugin's captured file actually contains EXIF on **both** platforms; if not, stamp it from
+the anchored time (`native_exif` or similar). Add a test asserting `|EXIF − ntp_reference|
+≤ 30s` on a queued capture.
 
 ---
 

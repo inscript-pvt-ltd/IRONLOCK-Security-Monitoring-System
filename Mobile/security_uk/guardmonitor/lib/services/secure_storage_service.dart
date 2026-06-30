@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class SecureStorageService {
@@ -17,6 +18,7 @@ class SecureStorageService {
   static const _wakefulnessKey = 'ironlock_wakefulness';
   static const _photoReceiptKey = 'ironlock_photo_receipt';
   static const _seenReviewsKey = 'ironlock_seen_reviews';
+  static const _dbCipherKey = 'ironlock_db_cipher_key';
 
   static Future<void> saveToken(String token) =>
       _storage.write(key: _tokenKey, value: token);
@@ -121,6 +123,22 @@ class SecureStorageService {
     await _storage.write(key: _seenReviewsKey, value: jsonEncode(capped));
   }
 
+  /// Passphrase for the SQLCipher-encrypted offline queue DB (Phase 7). A
+  /// 32-byte random key, base64-encoded, generated once on first use and held in
+  /// the Keychain / EncryptedSharedPreferences. Wiped on sign-out (see
+  /// [clearSession]) so a fresh login opens a fresh, empty queue — the queue is
+  /// best-effort buffer, never the source of truth, so losing it on logout is
+  /// safe by design.
+  static Future<String> getOrCreateDbCipherKey() async {
+    final existing = await _storage.read(key: _dbCipherKey);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final rng = Random.secure();
+    final bytes = List<int>.generate(32, (_) => rng.nextInt(256));
+    final key = base64Encode(bytes);
+    await _storage.write(key: _dbCipherKey, value: key);
+    return key;
+  }
+
   /// Privacy-notice acceptance. Persisted per install (survives sign-out, like
   /// `device_id`) so the guard isn't re-prompted on every session.
   static Future<bool> getPrivacyAccepted() async =>
@@ -141,5 +159,6 @@ class SecureStorageService {
         _storage.delete(key: _wakefulnessKey),
         _storage.delete(key: _photoReceiptKey),
         _storage.delete(key: _seenReviewsKey),
+        _storage.delete(key: _dbCipherKey),
       ]);
 }
