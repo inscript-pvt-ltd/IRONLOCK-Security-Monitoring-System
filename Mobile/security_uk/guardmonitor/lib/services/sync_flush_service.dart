@@ -9,6 +9,7 @@ import '../data/offline_queue_db.dart';
 import '../providers/shift_provider.dart';
 import 'api_client.dart';
 import 'sync_retry.dart';
+import 'wakefulness_service.dart';
 
 /// Orchestrates draining the offline queue to the (idempotent) server endpoints
 /// when connectivity returns. This is the Phase 7 flush engine.
@@ -32,6 +33,8 @@ class SyncFlushService {
   final OfflineQueueDb _db;
   final Dio _dio;
   final String? Function() _currentShiftId;
+
+  late final WakefulnessService _wakefulness = WakefulnessService(_dio);
 
   /// Max GPS pings per POST. The server has no hard cap but processes each ping
   /// synchronously (geofence + UPSERT), so a long offline backlog is chunked to
@@ -148,10 +151,36 @@ class SyncFlushService {
     }
   }
 
-  // ---- Wakefulness (Stage 4) ----------------------------------------------
+  // ---- Wakefulness ---------------------------------------------------------
 
   Future<void> _flushWakefulness() async {
-    // Stage 4.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final due = await _db.dueWakefulness(nowMs);
+    for (final row in due) {
+      if (row.attempts >= kMaxFlushAttempts) {
+        await _db.deleteWakefulness(row.id);
+        continue;
+      }
+      Object? error;
+      try {
+        await _wakefulness.submitOffline(
+          checkId: row.checkId,
+          code: row.code,
+          windowReference: row.windowReference,
+          respondedAt: row.respondedAt,
+        );
+      } catch (e) {
+        error = e;
+      }
+      switch (classifyFlush(error).action) {
+        case FlushAction.success:
+        case FlushAction.drop:
+          await _db.deleteWakefulness(row.id);
+        case FlushAction.retry:
+          final next = nowMs + backoffDelay(row.attempts).inMilliseconds;
+          await _db.bumpWakefulness(row.id, next);
+      }
+    }
   }
 
   // ---- Photos (Stage 5) ----------------------------------------------------

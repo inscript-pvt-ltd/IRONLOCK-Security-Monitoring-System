@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app_providers.dart';
+import '../data/offline_queue_db.dart';
 import '../services/secure_storage_service.dart';
 import '../services/totp_service.dart';
 import '../services/wakefulness_service.dart';
@@ -246,7 +247,32 @@ class WakefulnessNotifier extends Notifier<WakefulnessState> {
             isOffline: s.isOffline,
           );
     } catch (_) {
+      // Server unreachable after the service's retries. For an *offline* TOTP
+      // challenge the guard actually answered (a full 4-digit entry), queue the
+      // answer so it replays on reconnect — validity is proven by the absolute
+      // window, so a late flush still lands on the right step. Online (push)
+      // challenges have no replay path; the server raises its own miss.
+      if (s.isOffline && s.windowReference != null && s.entry.length == 4) {
+        await _enqueueOfflineAnswer(s);
+      }
       return localPass;
+    }
+  }
+
+  /// Buffers an unsent offline wakefulness answer. Best-effort — never throws.
+  Future<void> _enqueueOfflineAnswer(WakefulnessState s) async {
+    try {
+      await ref.read(offlineQueueDbProvider).enqueueWakefulness(
+            WakefulnessQueueCompanion.insert(
+              checkId: s.checkId,
+              code: s.entry,
+              windowReference: s.windowReference!,
+              respondedAt: DateTime.now().toUtc().toIso8601String(),
+              createdAt: DateTime.now().millisecondsSinceEpoch,
+            ),
+          );
+    } catch (_) {
+      // Queue unavailable — drop; wakefulness replay is best-effort.
     }
   }
 }

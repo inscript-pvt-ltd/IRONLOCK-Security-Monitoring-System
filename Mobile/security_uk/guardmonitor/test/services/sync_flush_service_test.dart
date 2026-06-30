@@ -5,14 +5,17 @@ import 'package:guardmonitor/data/offline_queue_db.dart';
 import 'package:guardmonitor/services/sync_flush_service.dart';
 
 /// Builds a Dio whose every request is short-circuited: it records the posted
-/// `pings` and either resolves 200 or rejects with [failStatus]/[failCode].
-({Dio dio, List<List<dynamic>> posted}) _fakeDio({
+/// `pings` (GPS) and request paths, and either resolves 200 or rejects with
+/// [failStatus]/[failCode].
+({Dio dio, List<List<dynamic>> posted, List<String> paths}) _fakeDio({
   int? failStatus,
   String? failCode,
 }) {
   final posted = <List<dynamic>>[];
+  final paths = <String>[];
   final dio = Dio();
   dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+    paths.add(options.path);
     final data = options.data;
     if (data is Map && data['pings'] is List) {
       posted.add(data['pings'] as List);
@@ -41,7 +44,7 @@ import 'package:guardmonitor/services/sync_flush_service.dart';
       ));
     }
   }));
-  return (dio: dio, posted: posted);
+  return (dio: dio, posted: posted, paths: paths);
 }
 
 Future<void> _seedGps(OfflineQueueDb db, int n) async {
@@ -55,6 +58,15 @@ Future<void> _seedGps(OfflineQueueDb db, int n) async {
     ));
   }
 }
+
+Future<void> _seedWake(OfflineQueueDb db, {int createdAt = 0}) =>
+    db.enqueueWakefulness(WakefulnessQueueCompanion.insert(
+      checkId: 'chk1',
+      code: '4821',
+      windowReference: 1782342,
+      respondedAt: '2026-06-30T10:00:00Z',
+      createdAt: createdAt,
+    ));
 
 const _farFuture = 9999999999999;
 
@@ -125,5 +137,58 @@ void main() {
     await svc.flush();
     expect(f.posted, isEmpty);
     expect(await db.dueGps('s1', _farFuture), hasLength(2));
+  });
+
+  group('wakefulness flush', () {
+    test('posts the queued answer and dequeues on success', () async {
+      await _seedWake(db);
+      final f = _fakeDio();
+      final svc = SyncFlushService(db, f.dio, () => 's1');
+      await svc.flush();
+      expect(f.paths.any((p) => p.contains('/wakefulness/chk1/respond')), isTrue);
+      expect(await db.dueWakefulness(_farFuture), isEmpty);
+    });
+
+    test('ALREADY_RESOLVED is treated as success (dequeued)', () async {
+      await _seedWake(db);
+      final svc = SyncFlushService(
+          db, _fakeDio(failStatus: 409, failCode: 'ALREADY_RESOLVED').dio,
+          () => 's1');
+      await svc.flush();
+      expect(await db.dueWakefulness(_farFuture), isEmpty);
+    });
+
+    test('transient 5xx keeps the row and bumps attempts', () async {
+      await _seedWake(db);
+      final svc = SyncFlushService(db, _fakeDio(failStatus: 503).dio, () => 's1');
+      await svc.flush();
+      expect(await db.dueWakefulness(DateTime.now().millisecondsSinceEpoch),
+          isEmpty,
+          reason: 'gated by backoff');
+      final all = await db.dueWakefulness(_farFuture);
+      expect(all.single.attempts, 1);
+    });
+
+    test('flushes even with no active shift (check may be from a past shift)',
+        () async {
+      await _seedWake(db);
+      final f = _fakeDio();
+      final svc = SyncFlushService(db, f.dio, () => null);
+      await svc.flush();
+      expect(await db.dueWakefulness(_farFuture), isEmpty);
+    });
+  });
+
+  test('flush order: wakefulness before GPS', () async {
+    await _seedWake(db);
+    await _seedGps(db, 1);
+    final f = _fakeDio();
+    final svc = SyncFlushService(db, f.dio, () => 's1');
+    await svc.flush();
+    final wakeIdx = f.paths.indexWhere((p) => p.contains('/wakefulness/'));
+    final gpsIdx = f.paths.indexWhere((p) => p.contains('/locations'));
+    expect(wakeIdx, isNonNegative);
+    expect(gpsIdx, isNonNegative);
+    expect(wakeIdx, lessThan(gpsIdx), reason: 'wakefulness flushes first');
   });
 }
