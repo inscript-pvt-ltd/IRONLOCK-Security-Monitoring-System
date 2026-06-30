@@ -58,6 +58,34 @@ void main() {
       expect(shift.displayRef, '#SH-019ED9');
     });
 
+    test('parses a pending early_end_request and exposes status helpers', () {
+      final json = Map<String, dynamic>.from(fullJson)
+        ..['status'] = 'active'
+        ..['early_end_request'] = {
+          'status': 'pending',
+          'reason': 'Illness',
+          'note': 'Feeling unwell',
+        };
+
+      final shift = CurrentShiftModel.fromJson(json);
+
+      expect(shift.earlyEndStatus, 'pending');
+      expect(shift.earlyEndReason, 'Illness');
+      expect(shift.earlyEndNote, 'Feeling unwell');
+      expect(shift.earlyEndPending, isTrue);
+      expect(shift.earlyEndApproved, isFalse);
+      expect(shift.earlyEndRejected, isFalse);
+    });
+
+    test('treats an absent early_end_request as no outstanding request', () {
+      final shift = CurrentShiftModel.fromJson(fullJson);
+
+      expect(shift.earlyEndStatus, isNull);
+      expect(shift.earlyEndPending, isFalse);
+      expect(shift.earlyEndApproved, isFalse);
+      expect(shift.earlyEndRejected, isFalse);
+    });
+
     test('tolerates the lean live-backend payload (no site/geofence/flags)', () {
       final lean = <String, dynamic>{
         'id': '019ed9a0-b6fd-72c8-bf4d-410aa4f498e4',

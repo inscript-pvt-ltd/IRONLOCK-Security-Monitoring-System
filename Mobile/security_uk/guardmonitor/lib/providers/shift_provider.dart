@@ -1,10 +1,11 @@
-import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/current_shift_model.dart';
 import '../services/gps_service.dart';
 import '../services/notification_service.dart';
 import '../services/shift_service.dart';
+import 'ui_providers.dart';
+import 'wakefulness_provider.dart';
 
 // ── Current shift (server source of truth — id, window, can_start/can_end) ─
 
@@ -19,10 +20,34 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       // becomes active/checked_in. Don't let that null-out wipe an in-progress
       // shift — doing so would disable the END button and break auto-resume.
       if (result == null && ref.read(shiftProvider).active) return;
-      state = result;
+      state = _withPreservedPendingLock(result);
     } catch (_) {
       // Not critical — guard can still see the cached state; next poll/resume retries.
     }
+  }
+
+  /// Holds a locally-set `pending` early-end lock across polls until the server
+  /// returns a *terminal* signal for it. Without this, any `GET /shifts/current`
+  /// whose payload omits `early_end_request` would clear the lock via the
+  /// wholesale `state = result`, silently unlocking the END button mid-wait (M1).
+  /// A terminal signal — the server echoing a status (approved/rejected) or the
+  /// shift itself completing/cancelling — is always honoured.
+  CurrentShiftModel? _withPreservedPendingLock(CurrentShiftModel? incoming) {
+    if (incoming == null) return incoming;
+    final wasPending = state?.earlyEndPending ?? false;
+    if (!wasPending) return incoming;
+    // Server spoke about the request (approved/rejected) — honour its decision.
+    if (incoming.earlyEndStatus != null) return incoming;
+    // Shift reached a terminal state — let the real status through.
+    if (incoming.status == 'completed' || incoming.status == 'cancelled') {
+      return incoming;
+    }
+    // Backend just didn't echo the request — keep the local pending lock.
+    return incoming.copyWith(
+      earlyEndStatus: 'pending',
+      earlyEndReason: state?.earlyEndReason,
+      earlyEndNote: state?.earlyEndNote,
+    );
   }
 
   /// Calls `POST /shifts/{id}/start`. Throws [DioException] on
@@ -32,8 +57,11 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
   Future<CurrentShiftModel> start() async {
     final current = state;
     if (current == null) throw StateError('No current shift to start.');
-    final actualStart =
-        await ref.read(shiftServiceProvider).startShift(current.id);
+    final result = await ref.read(shiftServiceProvider).startShift(current.id);
+    // Provision the wakefulness TOTP schedule if the backend returned one.
+    // Best-effort and non-blocking — a failure here must not stop the shift.
+    ref.read(wakefulnessScheduleProvider.notifier)
+        .provisionFromJson(result.wakefulness);
     final updated = CurrentShiftModel(
       id: current.id,
       reference: current.reference,
@@ -42,7 +70,8 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       scheduledEnd: current.scheduledEnd,
       canStart: false,
       canEnd: true,
-      actualStart: actualStart,
+      canRequestEarlyEnd: false,
+      actualStart: result.actualStart,
       site: current.site,
       geofence: current.geofence,
       role: current.role,
@@ -53,7 +82,8 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
   }
 
   /// Calls `POST /shifts/{id}/end`. Throws [DioException] on
-  /// `409 SHIFT_NOT_ENDABLE` etc. so the caller can surface the error.
+  /// `409 SHIFT_NOT_ENDABLE`, `END_BEFORE_SCHEDULED`, `EARLY_END_NOT_APPROVED`
+  /// etc. so the caller can surface the error.
   /// Merges partial response into existing state, same as start().
   Future<CurrentShiftModel> end({
     bool endedEarly = false,
@@ -76,9 +106,11 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       scheduledEnd: current.scheduledEnd,
       canStart: false,
       canEnd: false,
+      canRequestEarlyEnd: false,
       actualStart: result.actualStart ?? current.actualStart,
       actualEnd: result.actualEnd,
       durationHours: result.durationHours,
+      endType: result.endType,
       site: current.site,
       geofence: current.geofence,
       role: current.role,
@@ -86,6 +118,30 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
     );
     state = updated;
     return updated;
+  }
+
+  /// Submits an early-end request for supervisor approval. Optimistically marks
+  /// the local state `pending` so the UI locks immediately; the 20s
+  /// `GET /shifts/current` poll then reconciles with the server's decision.
+  /// Rethrows [DioException] so the caller can surface a failed submission.
+  Future<void> requestEarlyEnd({
+    required String reason,
+    required String note,
+  }) async {
+    final current = state;
+    if (current == null) {
+      throw StateError('No current shift for an early-end request.');
+    }
+    await ref.read(shiftServiceProvider).requestEarlyEnd(
+          current.id,
+          reason: reason,
+          note: note,
+        );
+    state = current.copyWith(
+      earlyEndStatus: 'pending',
+      earlyEndReason: reason,
+      earlyEndNote: note,
+    );
   }
 
   void clear() => state = null;
@@ -171,9 +227,11 @@ class ShiftNotifier extends Notifier<ShiftState> {
       shiftRef: updated?.displayRef ?? fallback?.displayRef ?? state.shiftRef,
     );
     if (shiftId != null) {
-      ref.read(gpsServiceProvider).startCapture(shiftId);
+      ref.read(gpsServiceProvider).startCapture(shiftId).then(
+            (tracking) =>
+                ref.read(locationDeniedProvider.notifier).set(!tracking),
+          );
     }
-    _generateNoncePool();
 
     // Schedule the "shift ended" reminder for the scheduled end time.
     final scheduled = updated ?? fallback;
@@ -185,27 +243,60 @@ class ShiftNotifier extends Notifier<ShiftState> {
     }
   }
 
+  /// Requests supervisor approval to end early. Does NOT end the shift — the
+  /// shift keeps running (GPS, welfare checks) until approval arrives and the
+  /// guard taps END. Rethrows on a failed submission so the sheet can report it.
+  Future<void> requestEarlyEnd({
+    required String reason,
+    required String note,
+  }) async {
+    await ref.read(currentShiftProvider.notifier).requestEarlyEnd(
+          reason: reason,
+          note: note,
+        );
+  }
+
   Future<void> end({
     bool endedEarly = false,
     String? reason,
     String? note,
   }) async {
     final shiftId = state.id;
+    if (shiftId == null) return;
+    // Call the server first so 409 rejections (END_BEFORE_SCHEDULED,
+    // EARLY_END_NOT_APPROVED) propagate to the caller before we tear down
+    // local state. The GPS keeps running for the brief API round-trip, which
+    // is correct — the shift is still active until the server confirms the end.
+    await ref.read(currentShiftProvider.notifier).end(
+      endedEarly: endedEarly,
+      reason: reason,
+      note: note,
+    );
+    // Server confirmed — tear down background work now.
     ref.read(gpsServiceProvider).stopCapture();
-    // The shift is ending — cancel the pending "shift ended" reminder so it
-    // can't fire for an already-closed shift.
     NotificationService.cancelShiftEnd();
+    ref.read(wakefulnessScheduleProvider.notifier).clear();
+    ref.read(wakefulnessProvider.notifier).clearHistory();
+    ref.read(locationDeniedProvider.notifier).set(false);
     state = const ShiftState();
+  }
 
-    if (shiftId != null) {
-      try {
-        await ref.read(currentShiftProvider.notifier).end(
-              endedEarly: endedEarly,
-              reason: reason,
-              note: note,
-            );
-      } catch (_) {}
-    }
+  /// The server closed the shift on its side while the app still showed it
+  /// active — an **auto-close** at `scheduled_end + grace` (`end_type: auto`),
+  /// or an admin **cancel**. Tears down the in-progress work exactly like
+  /// [end] but **without** calling `POST /end` (the shift is already closed
+  /// server-side; ending again would `409 SHIFT_NOT_ENDABLE`). Idempotent —
+  /// a no-op once we're inactive, so it can't double-fire or clash with a
+  /// guard-initiated end (which has already set `active = false` by the time its
+  /// completed shift arrives, and is `end_type: guard`/`early` anyway).
+  void reconcileServerClosed() {
+    if (!state.active) return;
+    ref.read(gpsServiceProvider).stopCapture();
+    NotificationService.cancelShiftEnd();
+    ref.read(wakefulnessScheduleProvider.notifier).clear();
+    ref.read(wakefulnessProvider.notifier).clearHistory();
+    ref.read(locationDeniedProvider.notifier).set(false);
+    state = const ShiftState();
   }
 
   /// Called when the server reports a shift as active but local state shows
@@ -219,8 +310,13 @@ class ShiftNotifier extends Notifier<ShiftState> {
       id: shift.id,
       shiftRef: shift.displayRef,
     );
-    ref.read(gpsServiceProvider).startCapture(shift.id);
-    _generateNoncePool();
+    ref.read(gpsServiceProvider).startCapture(shift.id).then(
+          (tracking) =>
+              ref.read(locationDeniedProvider.notifier).set(!tracking),
+        );
+    // Re-arm the wakefulness TOTP schedule from secure storage (the start
+    // response isn't replayed on resume).
+    ref.read(wakefulnessScheduleProvider.notifier).restore();
 
     // Re-arm the end-of-shift reminder (e.g. after an app relaunch mid-shift).
     NotificationService.scheduleShiftEnd(
@@ -244,39 +340,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
       photosPassed: passed ? state.photosPassed + 1 : state.photosPassed,
     );
   }
-
-  /// No nonce-issuing endpoint exists in the contract (gap flagged to the
-  /// backend dev) — nonces are generated client-side instead of fetched.
-  void _generateNoncePool() {
-    final random = Random.secure();
-    final nonces = List.generate(15, (_) {
-      final bytes = List<int>.generate(16, (_) => random.nextInt(256));
-      return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    });
-    ref.read(noncePoolProvider.notifier).load(nonces);
-  }
 }
 
 final shiftProvider =
     NotifierProvider<ShiftNotifier, ShiftState>(ShiftNotifier.new);
-
-// ── Nonce pool (generated locally at shift start, consumed per photo) ─────
-
-class NoncePoolNotifier extends Notifier<List<String>> {
-  @override
-  List<String> build() => const [];
-
-  void load(List<String> nonces) => state = List.unmodifiable(nonces);
-
-  String? consume() {
-    if (state.isEmpty) return null;
-    final nonce = state.first;
-    state = List.unmodifiable(state.sublist(1));
-    return nonce;
-  }
-
-  bool get isEmpty => state.isEmpty;
-}
-
-final noncePoolProvider =
-    NotifierProvider<NoncePoolNotifier, List<String>>(NoncePoolNotifier.new);

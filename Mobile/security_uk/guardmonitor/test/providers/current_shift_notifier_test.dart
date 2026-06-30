@@ -16,23 +16,26 @@ class _FakeShiftService extends ShiftService {
 
   final CurrentShiftModel? current;
   final DateTime? startAt;
-  final ({DateTime? actualStart, DateTime? actualEnd, double? durationHours})? endResult;
+  final ({DateTime? actualStart, DateTime? actualEnd, double? durationHours, String? endType})? endResult;
 
   @override
   Future<CurrentShiftModel?> fetchCurrent() async => current;
 
   @override
-  Future<DateTime?> startShift(String shiftId) async => startAt;
+  Future<({DateTime? actualStart, Map<String, dynamic>? wakefulness})> startShift(
+          String shiftId) async =>
+      (actualStart: startAt, wakefulness: null);
 
   @override
-  Future<({DateTime? actualStart, DateTime? actualEnd, double? durationHours})>
+  Future<({DateTime? actualStart, DateTime? actualEnd, double? durationHours, String? endType})>
       endShift(
     String shiftId, {
     bool endedEarly = false,
     String? reason,
     String? note,
   }) async =>
-          endResult ?? (actualStart: null, actualEnd: null, durationHours: null);
+          endResult ??
+          (actualStart: null, actualEnd: null, durationHours: null, endType: null);
 }
 
 CurrentShiftModel _seed() => CurrentShiftModel(
@@ -97,7 +100,7 @@ void main() {
       final container = makeContainer(
         _FakeShiftService(
           current: _seed(),
-          endResult: (actualStart: null, actualEnd: endedAt, durationHours: 8.0),
+          endResult: (actualStart: null, actualEnd: endedAt, durationHours: 8.0, endType: 'guard'),
         ),
       );
 
@@ -110,6 +113,23 @@ void main() {
       expect(updated.actualEnd, endedAt);
       expect(updated.durationHours, 8.0);
       expect(updated.reference, 'SH-2847');
+    });
+  });
+
+  group('ShiftNotifier.reconcileServerClosed()', () {
+    test('is a no-op when inactive — the guard that stops it clashing with a '
+        'guard-initiated end', () {
+      final container = makeContainer(_FakeShiftService(current: null));
+      expect(container.read(shiftProvider).active, isFalse);
+
+      // Must not throw and must stay inactive. The early `if (!active) return`
+      // is what prevents a normal END (whose completed shift arrives while the
+      // home listener still sees active mid-teardown) from double-firing — and
+      // means it only reads GPS/notification providers when there's genuinely an
+      // active shift to tear down.
+      container.read(shiftProvider.notifier).reconcileServerClosed();
+
+      expect(container.read(shiftProvider).active, isFalse);
     });
   });
 }

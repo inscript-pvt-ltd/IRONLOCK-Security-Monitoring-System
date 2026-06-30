@@ -5,12 +5,14 @@
 /// exactly as before — no consumer needed to change.
 ///
 ///  - auth_provider.dart   → AuthNotifier/authProvider, GuardProfile/guardProfileProvider
-///  - shift_provider.dart  → CurrentShift*, Shift*, noncePoolProvider
+///  - shift_provider.dart  → CurrentShift*, Shift*
 ///  - photo_provider.dart  → Photo*, PendingPhoto*
 ///  - ui_providers.dart    → zone, battery, privacy, activeTab
 library;
 
 export 'auth_provider.dart';
+export 'shift_access_provider.dart';
 export 'shift_provider.dart';
 export 'photo_provider.dart';
+export 'photo_review_provider.dart';
 export 'ui_providers.dart';

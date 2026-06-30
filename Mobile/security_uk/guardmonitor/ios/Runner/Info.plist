@@ -7,7 +7,47 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Ironlock Guard Monitor uses your location to verify you are on site and track your patrol zone during your shift.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Ironlock Guard Monitor uses your location to verify you are on site and track your patrol zone during your shift.</string>
+	<string>Ironlock Guard Monitor uses your location to verify you are on site and track your patrol zone during your shift, including while the app is in the background.</string>
+	<!-- Background patrol tracking: continue location updates when the app is
+	     backgrounded or the screen is locked during a shift.
+	     `remote-notification` lets FCM/APNs wake the app for background data
+	     pushes (wakefulness / photo requests). NOTE: background push only works
+	     once the APNs auth key is uploaded to Firebase and the Push Notifications
+	     capability + `aps-environment` entitlement are added under an Apple
+	     Developer account — see docs/IOS_PARITY_TODO.md. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>remote-notification</string>
+	</array>
+	<!-- The production backend is HTTPS (dashboard.ironlock.co.uk), so App
+	     Transport Security stays fully ON for the internet — no cleartext
+	     exception for any real host. NSAllowsLocalNetworking only permits the
+	     local mock backend (http://127.0.0.1:8000) during dev; it does NOT relax
+	     ATS for remote hosts. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- Shift Access Link (SSO): custom URL scheme ironlock://shift-access/<token>.
+	     Opens the app from a supervisor one-time link without an Apple Developer
+	     account (the https page redirects to this scheme). Universal Links — the
+	     tap-the-https-link path — need the Associated Domains entitlement (Apple
+	     account) + the server's apple-app-site-association; add those later. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.ironlock.guardmonitor.shiftaccess</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ironlock</string>
+			</array>
+		</dict>
+	</array>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

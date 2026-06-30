@@ -41,14 +41,14 @@ Quality gates before any change is "done": `flutter analyze` (zero issues) **and
 lib/
   main.dart                    # ProviderScope root; auth-gated AnimatedSwitcher
   config/
-    api_config.dart            # All endpoint paths + HMAC secret constant
+    api_config.dart            # All endpoint paths (no secrets — the photo HMAC key is the per-login hmac_secret)
   models/                      # Pure data classes with fromJson — no business logic
     current_shift_model.dart   # CurrentShiftModel + ShiftSiteModel/ShiftGeofenceModel
     api_response.dart          # ApiResponse<T> (success envelope) + ApiError
   providers/
     app_providers.dart         # Barrel — re-exports the four files below (import this)
     auth_provider.dart         # AuthNotifier/authProvider + GuardProfile/guardProfileProvider
-    shift_provider.dart        # CurrentShift*, Shift*, noncePoolProvider
+    shift_provider.dart        # CurrentShift*, Shift*
     photo_provider.dart        # Photo*, PendingPhoto*
     ui_providers.dart          # zone, zoneUpdatedAt, battery (real), privacy, activeTab
     alerts_provider.dart       # AlertsNotifier + AppAlert model
@@ -67,7 +67,7 @@ lib/
     shift_service.dart         # endShift() sends {ended_early, reason?, note?} in the POST body
     wakefulness_service.dart
     photo_service.dart         # HMAC-SHA256 signing on every upload (extra, non-contractual)
-    gps_service.dart           # 15-second timer; streams zone state back to UI; real battery in pings
+    gps_service.dart           # Background position stream (foreground service / iOS bg location); streams zone state; real battery in pings
     notification_service.dart  # Local scheduled "shift ended" reminder (flutter_local_notifications)
     device_info_service.dart   # Persisted device_id + device_name/platform/app_version
     connectivity_service.dart  # connectivity_plus stream → isOnlineProvider
@@ -89,8 +89,7 @@ Riverpod 3, `NotifierProvider` only — no `StateProvider`, no `FutureProvider`.
 - `batteryProvider` — `double?` real device battery via `battery_plus` (refreshes on a 30s poll + charge-state changes). `null` = unknown (e.g. iOS simulator reports no battery), surfaced honestly in the status strip rather than faked
 - `privacyAcceptedProvider`, `activeTabProvider`
 - `photoProvider` (`PhotoNotifier`) — countdown + upload status FSM
-- `pendingPhotoProvider` — `PendingPhotoState {pending, requestId}`; set by polling, consumed by `HomeScreen` ref.listen
-- `noncePoolProvider` — `List<String>` generated client-side at shift start (no nonce-issuing endpoint in the contract); consumed one per upload
+- `pendingPhotoProvider` — `PendingPhotoState {pending, requestId, nonceValue}`; set by polling/push, consumed by `HomeScreen` ref.listen (which dedupes by `requestId` so a still-pending poll can't stack a second `PhotoScreen`)
 
 **Other providers:** `wakefulnessProvider` (wakefulness_provider.dart), `alertsProvider` (alerts_provider.dart), `gpsServiceProvider` (gps_service.dart), `isOnlineProvider` / `networkStatusProvider` (connectivity_service.dart).
 
@@ -102,7 +101,7 @@ The server is the source of truth for whether a shift can start: `GET /shifts/cu
 1. `currentShiftProvider.notifier.start()` → `POST /shifts/{id}/start`; throws on `409 SHIFT_NOT_STARTABLE` (e.g. a race where the window closed between poll and tap), which `_ActionButtons` catches and shows as a snackbar
 2. Local `ShiftState` is set from the server's returned shift (`actual_start`, `id`, `displayRef`)
 3. `GpsService.startCapture(shiftId)` — begins 15-second GPS loop
-4. `_generateNoncePool()` — generates 15 random hex nonces client-side (no nonce-issuing endpoint exists in the contract — flagged gap)
+4. `wakefulnessScheduleProvider.provisionFromJson(start.wakefulness)` — persists the TOTP seed + schedule the backend returns at start (the offline wakefulness path)
 5. `NotificationService.scheduleShiftEnd(scheduledEnd)` — schedules the local "shift ended" reminder
 
 `ShiftNotifier.end({endedEarly, reason, note})` stops the GPS service, **cancels the scheduled reminder**, clears state, then calls `currentShiftProvider.notifier.end(...)` → `POST /shifts/{id}/end` with `{ended_early, reason?, note?}`.
@@ -116,14 +115,15 @@ The server is the source of truth for whether a shift can start: `GET /shifts/cu
 
 **Backend polling** (`HomeScreen._pollBackend`, every 20 seconds):
 - Always: `currentShiftProvider.notifier.fetch()` to keep `can_start`/`can_end` live
-- `GET /welfare/pending` → if `{pending:true, check_id, code}`, calls `wakefulnessProvider.notifier.trigger(checkId, code)` which shows `WakefulnessOverlay` via `ref.listen` in `build()`. The code is server-issued but shown on screen for the guard to read and type back — it's an attentiveness check, not a secret
-- `GET /photos/pending` → if `{pending:true, request_id}`, calls `pendingPhotoProvider.notifier.setPending(true, requestId:)` which navigates to `PhotoScreen(requestId:)` via `ref.listen`
+- **Wakefulness** — if a TOTP schedule was provisioned at shift start (`wakefulnessScheduleProvider.isArmed`), challenges are driven locally from it. The local scheduler is the **offline fallback**: it only runs when we're **offline or push is unavailable** — when online with FCM configured, the server's `WAKEFULNESS_CHALLENGE` push is the single authority, so running both would double-fire (a locally-computed code vs the server's pushed code) for one window. When no seed was issued (the local mock), it falls back to `GET /welfare/pending` → `wakefulnessProvider.notifier.trigger(checkId, code)`. Either way `WakefulnessNotifier` dedupes by `check_id`, so a check can't be raised twice across the push and scheduler paths.
+- **Photo** — `GET /shifts/{id}/photos/pending` → if `{pending:true, request_id, nonce_value}`, calls `pendingPhotoProvider.notifier.setPending(true, requestId:, nonceValue:)` which navigates to `PhotoScreen` via `ref.listen`. The listen dedupes by `requestId` (a still-pending poll re-reporting the same request must not stack a second screen).
+- **Push (FCM)** delivers the same two checks while backgrounded/locked — `push_router.dart` parses the payload and drives the identical providers, so push and poll converge. See `docs/FCM_SETUP.md`.
 
 **Welfare check outcome**: `WakefulnessNotifier.submit()` compares the entry against the server-issued code synchronously (so the overlay gets an instant result), then fires `POST /wakefulness/{checkId}/respond` in the background for the authoritative record, and calls `shiftProvider.notifier.recordWelfareCheck(passed:)` for the end-shift summary.
 
 **Photo upload outcome** is recorded in two places by `PhotoScreen._upload()`:
-- `PhotoService.uploadPhoto()` → multipart `POST /shifts/{id}/photos` with `request_id` + nonce/HMAC signature (extra, non-contractual anti-replay fields)
-- `shiftProvider.notifier.recordPhoto(passed:)` → increments counters for end-shift summary
+- `PhotoService.uploadPhoto()` → multipart `POST /shifts/{id}/photos` with the server-issued `nonce_value` (delivered on the request), `request_id`, `captured_at`, optional lat/long, and an HMAC-SHA256 `signature` over the 6 `\n`-joined fields keyed by the per-login `hmac_secret`. A `422 PHOTO_REJECTED` becomes a typed `PhotoRejectedException(reason)`
+- `shiftProvider.notifier.recordPhoto(passed:)` → increments counters for the end-shift summary. **Both `VALIDATED` and `FLAGGED` count as a completed photo** (flagged is accepted/stored — "no action needed"); only a rejection or transport failure is a miss
 
 ## Services Layer
 
@@ -133,11 +133,11 @@ The server is the source of truth for whether a shift can start: `GET /shifts/cu
 
 **`device_info_service.dart`** — `DeviceInfoService` provides the `device` object sent on login/refresh (`device_id, device_name, platform, app_version`). `device_id` is a random 32-char hex string generated once and persisted via `SecureStorageService` (survives sign-out, per the contract's "stable for the install" requirement) — no `device_info_plus`/`uuid` packages, just `dart:io` + `Random.secure()`.
 
-**`gps_service.dart`** — `GpsService` holds a `Timer` and broadcasts zone state via `zoneStream`. `HomeScreen` subscribes and calls `zoneProvider.notifier.set(index)` **and** `zoneUpdatedAtProvider.notifier.markNow()` so the zone card can show an honest "updated Xs ago". Each ping includes the **real** device battery as a 0–1 fraction (via `battery_plus`; `null` when unknown). On iOS simulator, `Geolocator.getCurrentPosition()` will throw — GPS loop continues silently, so the zone stays at its default and the card shows "Awaiting first GPS fix…".
+**`gps_service.dart`** — `GpsService` runs a **background-capable** `Geolocator.getPositionStream` (not a foreground `Timer`) so location keeps reporting when the screen is locked or the app is backgrounded: Android via a **foreground service** (`AndroidSettings.foregroundNotificationConfig` → ongoing "Shift tracking active" notification), iOS via **background location** (`AppleSettings(allowBackgroundLocationUpdates: true, …)` + `UIBackgroundModes: location`). A one-shot `getCurrentPosition` seeds the first ping. Each ping posts lat/long/accuracy + **real** battery (0–1, `null` when unknown) and broadcasts zone state via `zoneStream`; `HomeScreen` calls `zoneProvider.notifier.set(index)` + `zoneUpdatedAtProvider.notifier.markNow()`. `startCapture()` returns `false` when permission is denied (drives the `locationDeniedProvider` banner). Background **location** is solved app-side; background **welfare/photo** polling still needs server push (see `docs/BACKEND_REQUIREMENTS.md` §H5). Permissions: `_startWithPermissions` requests `locationWhenInUse` then `locationAlways` (background). On iOS simulator the stream yields no fixes — zone stays at "Awaiting first GPS fix…".
 
-**`photo_service.dart`** — every upload includes the contract's `photo, request_id, captured_at, latitude?, longitude?`, plus `nonce` (consumed from pool) and `signature = HMAC-SHA256(IRONLOCK_PHOTO_SECRET_v1, "nonce:shiftId:capturedAt")` as extra anti-replay fields kept alongside the spec per project decision — the backend may ignore them. The secret is in `ApiConfig.photoHmacSecret`.
+**`photo_service.dart`** — every upload includes `photo, nonce_value, request_id?, captured_at, latitude?, longitude?` plus a `signature = HMAC-SHA256(hmac_secret, [nonce_value, request_id, captured_at, latitude, longitude, sha256_hex(image_bytes)].join('\n'))`. The `nonce_value` is **server-issued** (delivered with each online request) — there is no client-side nonce generation. The signing key is the per-login `hmac_secret` stored in secure storage (never logged); a missing key short-circuits to a `PhotoRejectedException('HMAC_INVALID')` rather than firing a doomed upload.
 
-**`secure_storage_service.dart`** — stores `ironlock_auth_token`, `ironlock_refresh_token`, `ironlock_guard_email`, `ironlock_expires_at`, `ironlock_device_id`. `clearSession()` (called on sign-out) deliberately leaves `device_id` untouched.
+**`secure_storage_service.dart`** — stores `ironlock_auth_token`, `ironlock_refresh_token`, `ironlock_guard_email`, `ironlock_expires_at`, `ironlock_device_id`, the per-login `hmac_secret` (photo signing key), and the persisted `wakefulness` provisioning (TOTP seed + schedule). `clearSession()` (called on sign-out) wipes the session keys including `hmac_secret`/`wakefulness` but deliberately leaves `device_id` untouched.
 
 ## Photo Screen (PHO-004)
 
@@ -160,7 +160,7 @@ Key behaviours:
 - `GET /shifts/current` computes `can_start`/`can_end` server-side: `can_start` is true from 15 minutes before `scheduled_start` until `scheduled_end` while `status === 'scheduled'`; `can_end` is true while `status === 'active'`
 - `POST /shifts/{id}/start` / `/end` return `409 SHIFT_NOT_STARTABLE` / `SHIFT_NOT_ENDABLE` outside those windows
 - `/shifts/{id}/locations`, `/wakefulness/{checkId}/respond`, `/shifts/{id}/photos` (Phase 3.3) simulate working responses rather than `501` so those screens stay testable locally
-- `/welfare/pending` and `/photos/pending` are a non-contractual interim polling mechanism (not in the real spec — push notifications will replace this later): consume-on-read, and now also emit `check_id`/`code` and `request_id` respectively when pending
+- `/welfare/pending` and `/photos/pending` are a non-contractual interim polling mechanism for the **mock only** (not in the real spec): consume-on-read, emitting `check_id`/`code` and `request_id` respectively when pending. The real backend instead drives wakefulness from the TOTP schedule returned at shift start (+ FCM push) and photo from `GET /shifts/{id}/photos/pending` (+ FCM push). ⚠️ The app's photo poll now calls the per-shift `/shifts/{id}/photos/pending`, so the flat mock `/photos/pending` is no longer hit — update the mock if you need to exercise the photo flow locally
 - Admin triggers: `POST /admin/trigger-welfare` and `POST /admin/trigger-photo` (root-level, no `/api/mobile/v1` prefix, no auth required)
 
 **After restarting the backend**, the app's cached token becomes invalid. The guard must sign out and back in.

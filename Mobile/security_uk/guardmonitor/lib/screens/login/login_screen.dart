@@ -56,6 +56,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   Future<void> _signIn() async {
     if (!_canSubmit) return;
 
+    // Drop any stale SSO-link error so it doesn't linger over a password login.
+    ref.read(shiftAccessProvider.notifier).clear();
     setState(() {
       _loading = true;
       _error = null;
@@ -91,6 +93,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Redeeming an SSO link looks identical to a normal sign-in (same loader);
+    // a redeem failure falls through to the form, which shows its message.
+    final redeeming = ref.watch(shiftAccessProvider).isRedeeming;
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: Stack(
@@ -101,7 +106,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
           ),
           // Content
           SafeArea(
-            child: _loading ? _buildLoading() : _buildFormLayout(),
+            child: (_loading || redeeming) ? _buildLoading() : _buildFormLayout(),
           ),
         ],
       ),
@@ -109,6 +114,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   }
 
   Widget _buildFormLayout() {
+    // A failed SSO-link redeem surfaces here, in the same error box as a failed
+    // password login (the local _error takes precedence if both somehow exist).
+    final shiftAccess = ref.watch(shiftAccessProvider);
+    final errorMessage = _error ?? shiftAccess.message;
+    final windowExpired = _windowExpired || shiftAccess.windowExpired;
     return ListenableBuilder(
       listenable: Listenable.merge([_emailCtrl, _passCtrl]),
       builder: (context, _) {
@@ -159,11 +169,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
 
-                    // Error box
-                    if (_error != null) ...[
+                    // Error box (password login OR a failed SSO-link redeem)
+                    if (errorMessage != null) ...[
                       SizedBox(height: context.s(AppSpacing.md)),
-                      _MessageBox(message: _error!, isError: true),
-                      if (_windowExpired) ...[
+                      _MessageBox(message: errorMessage, isError: true),
+                      if (windowExpired) ...[
                         SizedBox(height: context.s(8)),
                         _MessageBox(
                           message: 'Once your supervisor authorises your access, tap Sign In again to retry.',

@@ -1,5 +1,8 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../models/api_response.dart';
+import '../models/current_shift_model.dart';
 import '../providers/app_providers.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_gradients.dart';
@@ -42,6 +45,7 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
 
   String? _reason;
   final _noteCtrl = TextEditingController();
+  bool _submitting = false;
 
   @override
   void dispose() {
@@ -63,16 +67,95 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
     return '${d.inHours}h ${d.inMinutes % 60}m';
   }
 
-  void _confirm({required bool isEarly}) {
-    Navigator.of(context).pop();
-    ref.read(shiftProvider.notifier).end(
-          endedEarly: isEarly,
-          reason: isEarly ? _reason : null,
-          note: isEarly ? _noteCtrl.text.trim() : null,
-        );
-    ref.read(zoneProvider.notifier).set(0);
-    ref.read(zoneUpdatedAtProvider.notifier).reset();
-    ref.read(activeTabProvider.notifier).setTab(0);
+  /// Early ends now go through supervisor approval: this submits the request
+  /// (reason + note) and leaves the shift running. The guard ends it only once
+  /// approval comes back on the next `GET /shifts/current` poll.
+  Future<void> _submitRequest() async {
+    if (_submitting) return;
+    setState(() => _submitting = true);
+    try {
+      await ref.read(shiftProvider.notifier).requestEarlyEnd(
+            reason: _reason!,
+            note: _noteCtrl.text.trim(),
+          );
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Early-end request sent — waiting for supervisor approval.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    } on DioException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(ApiError.fromDioException(e).message),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not send the request. Please try again.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  /// Actually closes the shift. Used for a normal (on-time) end, and for an
+  /// early end that has already been approved (reason/note carried from the
+  /// approved request). Surfaces named 409 errors so the guard knows exactly
+  /// why the server rejected the end rather than seeing a raw API message.
+  Future<void> _confirmEnd({required bool isEarly, String? reason, String? note}) async {
+    if (_submitting) return;
+    setState(() => _submitting = true);
+    try {
+      await ref.read(shiftProvider.notifier).end(
+            endedEarly: isEarly,
+            reason: reason,
+            note: note,
+          );
+      if (!mounted) return;
+      ref.read(zoneProvider.notifier).set(0);
+      ref.read(zoneUpdatedAtProvider.notifier).reset();
+      ref.read(activeTabProvider.notifier).setTab(0);
+      Navigator.of(context).pop();
+    } on DioException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      final apiError = ApiError.fromDioException(e);
+      final message = switch (apiError.code) {
+        'END_BEFORE_SCHEDULED' =>
+          "Your shift hasn't reached its scheduled end time. If you need to "
+              "leave early, submit an early-end request.",
+        'EARLY_END_NOT_APPROVED' =>
+          "Your early-end request hasn't been approved yet. Keep working until "
+              "a supervisor approves it.",
+        'EARLY_END_NOT_APPLICABLE' =>
+          'No active early-end request to fulfil. Submit a request first.',
+        _ => apiError.message,
+      };
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('⚠ $message'),
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Connection error. Please try again.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    }
   }
 
   @override
@@ -81,10 +164,29 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
     final zone = ref.watch(zoneProvider);
     final currentShift = ref.watch(currentShiftProvider);
 
-    // "Early" = ending while we're still inside the scheduled window. The
-    // server is the real authority, but this drives whether we require a reason.
+    // "Early" = ending while we're still inside the scheduled window. Used for
+    // the title label and as a fallback for needsRequest when the server hasn't
+    // sent can_request_early_end yet.
     final isEarly = currentShift != null &&
         DateTime.now().isBefore(currentShift.scheduledEnd);
+
+    // Early ends require supervisor approval. The status (mirrored from the
+    // server on each poll) decides which face of the sheet we show.
+    final pending = currentShift?.earlyEndPending ?? false;
+    final approved = currentShift?.earlyEndApproved ?? false;
+    // Prefer the server flag so timing + existing-request state is computed
+    // server-side (immune to device clock skew). Fall back to device-clock
+    // isEarly when the server hasn't sent the flag yet (older backend).
+    final needsRequest =
+        currentShift?.canRequestEarlyEnd ?? (isEarly && !pending && !approved);
+
+    final title = pending
+        ? 'Awaiting Approval'
+        : approved
+            ? 'Approved — End Shift'
+            : isEarly
+                ? 'End Shift Early?'
+                : 'End Shift?';
 
     return Container(
       decoration: const BoxDecoration(
@@ -120,7 +222,7 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
                   ),
                 ),
 
-                Text(isEarly ? 'End Shift Early?' : 'End Shift?', style: AppType.h2),
+                Text(title, style: AppType.h2),
                 const SizedBox(height: AppSpacing.base),
 
                 // Summary rows
@@ -139,8 +241,12 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
                 ),
                 AppSummaryRow(
                   label: 'Location',
-                  value: zone == 2 ? 'Interrupted' : 'Active throughout',
-                  valueColor: zone == 2 ? AppColors.warning : null,
+                  value: zone == 0
+                      ? 'Active throughout'
+                      : zone == 1
+                          ? 'Left zone'
+                          : 'Interrupted',
+                  valueColor: zone != 0 ? AppColors.warning : null,
                 ),
                 AppSummaryRow(
                   label: 'Welfare checks',
@@ -164,27 +270,54 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
                   isLast: true,
                 ),
 
-                // Early-end reason capture — required so an early finish is
-                // recorded and accountable for the supervisor, not silent.
-                if (isEarly) _buildEarlyReason(context),
+                // Status-driven body:
+                //  • pending  → read-only "waiting for approval" notice
+                //  • approved → show the approved reason, then allow End
+                //  • needsRequest → capture reason + note for a fresh request
+                if (pending)
+                  _buildPendingNotice(context)
+                else if (approved)
+                  _buildApprovedNotice(context, currentShift!)
+                else if (needsRequest)
+                  // Early-end reason capture — required so an early finish is
+                  // recorded and accountable for the supervisor, not silent.
+                  _buildEarlyReason(context),
 
                 const SizedBox(height: AppSpacing.xl),
 
-                isEarly
-                    ? AppButton(
-                        label: 'End Shift Early',
-                        variant: AppButtonVariant.danger,
-                        enabled: _earlyValid,
-                        onPressed: () => _confirm(isEarly: true),
-                      )
-                    : AppButton(
-                        label: 'Confirm End Shift',
-                        variant: AppButtonVariant.danger,
-                        onPressed: () => _confirm(isEarly: false),
-                      ),
+                if (pending)
+                  // Nothing to confirm yet — the guard waits. Only Close below.
+                  const SizedBox.shrink()
+                else if (approved)
+                  AppButton(
+                    label: _submitting ? 'Ending…' : 'End Shift',
+                    variant: AppButtonVariant.danger,
+                    onPressed: _submitting
+                        ? null
+                        : () => _confirmEnd(
+                              isEarly: true,
+                              reason: currentShift!.earlyEndReason ?? _reason,
+                              note: currentShift.earlyEndNote ??
+                                  _noteCtrl.text.trim(),
+                            ),
+                  )
+                else if (needsRequest)
+                  AppButton(
+                    label: _submitting ? 'Sending…' : 'Request Early End',
+                    variant: AppButtonVariant.danger,
+                    enabled: _earlyValid && !_submitting,
+                    onPressed: _submitRequest,
+                  )
+                else
+                  AppButton(
+                    label: _submitting ? 'Ending…' : 'Confirm End Shift',
+                    variant: AppButtonVariant.danger,
+                    onPressed:
+                        _submitting ? null : () => _confirmEnd(isEarly: false),
+                  ),
                 const SizedBox(height: AppSpacing.sm),
                 AppButton(
-                  label: 'Cancel',
+                  label: pending ? 'Close' : 'Cancel',
                   variant: AppButtonVariant.secondary,
                   onPressed: () => Navigator.of(context).pop(),
                 ),
@@ -255,6 +388,88 @@ class _EndShiftSheetState extends ConsumerState<EndShiftSheet> {
           ),
         ],
       ],
+    );
+  }
+
+  // Shown while a request is pending — the guard cannot end yet.
+  Widget _buildPendingNotice(BuildContext context) {
+    final reason = ref.read(currentShiftProvider)?.earlyEndReason;
+    return _noticeCard(
+      context,
+      icon: Icons.hourglass_top_rounded,
+      tint: AppColors.warning,
+      title: 'WAITING FOR SUPERVISOR APPROVAL',
+      body: reason == null
+          ? 'Your early-end request has been sent. You can end the shift once a '
+              'supervisor approves it — keep working until then.'
+          : 'Your early-end request ($reason) has been sent. You can end the '
+              'shift once a supervisor approves it — keep working until then.',
+    );
+  }
+
+  // Shown once a supervisor has approved — the End button is now live.
+  Widget _buildApprovedNotice(BuildContext context, CurrentShiftModel currentShift) {
+    final reason = currentShift.earlyEndReason;
+    final note = currentShift.earlyEndNote;
+    final detail = StringBuffer(
+      'A supervisor approved your early end. Tap “End Shift” to finish.',
+    );
+    if (reason != null) detail.write('\n\nReason: $reason');
+    if (note != null && note.isNotEmpty) detail.write('\nNote: $note');
+    return _noticeCard(
+      context,
+      icon: Icons.verified_rounded,
+      tint: AppColors.success,
+      title: 'APPROVED',
+      body: detail.toString(),
+    );
+  }
+
+  Widget _noticeCard(
+    BuildContext context, {
+    required IconData icon,
+    required Color tint,
+    required String title,
+    required String body,
+  }) {
+    return Container(
+      margin: EdgeInsets.only(top: context.s(20)),
+      padding: EdgeInsets.all(context.s(14)),
+      decoration: BoxDecoration(
+        color: const Color(0xCC0A1931),
+        borderRadius: BorderRadius.circular(context.s(12)),
+        border: Border.all(color: tint.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: context.sp(20), color: tint),
+          SizedBox(width: context.s(12)),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: AppType.section.copyWith(
+                    fontSize: context.sp(11),
+                    color: tint,
+                  ),
+                ),
+                SizedBox(height: context.s(6)),
+                Text(
+                  body,
+                  style: AppType.body.copyWith(
+                    fontSize: context.sp(13),
+                    color: AppColors.muted,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

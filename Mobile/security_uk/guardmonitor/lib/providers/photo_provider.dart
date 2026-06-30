@@ -2,28 +2,58 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // ── Photo verification ────────────────────────────────────────────────────
 
-enum PhotoStatus { idle, capturing, uploading, validated, flagged, failed, expired }
+/// Total response window for an online photo request, in seconds. The server
+/// gives the guard 90s from when it *raises* the request before it times out
+/// (the nonce itself is valid 60s) — see FLUTTER_API_GUIDE "Photo Verification".
+/// The countdown is anchored to the request's arrival/issue time, not to when
+/// the camera screen opens.
+const int kPhotoWindowSeconds = 90;
+
+enum PhotoStatus { idle, capturing, reviewing, uploading, validated, flagged, failed, expired }
 
 class PhotoState {
   const PhotoState({
     this.status = PhotoStatus.idle,
-    this.secondsRemaining = 78,
+    this.secondsRemaining = kPhotoWindowSeconds,
+    this.windowSeconds = kPhotoWindowSeconds,
     this.expireCountdown = 30,
   });
   final PhotoStatus status;
   final int secondsRemaining;
+  // Full window length for this request — the progress-bar denominator. Usually
+  // [kPhotoWindowSeconds] but parameterised so a server-supplied window can
+  // override it without touching the UI.
+  final int windowSeconds;
   final int expireCountdown;
 
   PhotoState copyWith({
     PhotoStatus? status,
     int? secondsRemaining,
+    int? windowSeconds,
     int? expireCountdown,
   }) =>
       PhotoState(
         status: status ?? this.status,
         secondsRemaining: secondsRemaining ?? this.secondsRemaining,
+        windowSeconds: windowSeconds ?? this.windowSeconds,
         expireCountdown: expireCountdown ?? this.expireCountdown,
       );
+}
+
+/// Seconds left in a photo response window, anchored to when the request was
+/// issued/arrived rather than when the guard opened the camera. Precedence:
+/// the server `issued_at` if it ever sends one, else the app's stamped arrival,
+/// else (no anchor at all) the full window. Never negative.
+int photoSecondsRemaining({
+  DateTime? issuedAt,
+  DateTime? receivedAt,
+  int windowSeconds = kPhotoWindowSeconds,
+  required DateTime now,
+}) {
+  final anchor = issuedAt ?? receivedAt;
+  if (anchor == null) return windowSeconds;
+  final remaining = windowSeconds - now.difference(anchor).inSeconds;
+  return remaining < 0 ? 0 : remaining;
 }
 
 class PhotoNotifier extends Notifier<PhotoState> {
@@ -32,7 +62,12 @@ class PhotoNotifier extends Notifier<PhotoState> {
 
   void tick() {
     final s = state;
-    if (s.status == PhotoStatus.idle || s.status == PhotoStatus.capturing) {
+    // The response window keeps counting down while the guard lines up the shot
+    // (idle), the photo is being taken (capturing), AND while they review it
+    // (reviewing) — the whole capture+confirm must fit inside the one window.
+    if (s.status == PhotoStatus.idle ||
+        s.status == PhotoStatus.capturing ||
+        s.status == PhotoStatus.reviewing) {
       final remaining = s.secondsRemaining - 1;
       if (remaining <= 0) {
         state = s.copyWith(status: PhotoStatus.expired, secondsRemaining: 0);
@@ -49,11 +84,41 @@ class PhotoNotifier extends Notifier<PhotoState> {
     }
   }
 
-  void capture() => state = state.copyWith(status: PhotoStatus.uploading);
+  /// Open a request's window with a pre-computed remaining time (anchored to the
+  /// request's arrival, not now). [remaining] ≤ 0 opens straight into `expired`.
+  void startWindow({required int remaining, int windowSeconds = kPhotoWindowSeconds}) {
+    state = remaining <= 0
+        ? PhotoState(
+            status: PhotoStatus.expired,
+            secondsRemaining: 0,
+            windowSeconds: windowSeconds,
+          )
+        : PhotoState(
+            status: PhotoStatus.idle,
+            secondsRemaining: remaining,
+            windowSeconds: windowSeconds,
+          );
+  }
+
+  void startCapture() => state = state.copyWith(status: PhotoStatus.capturing);
+
+  /// Photo taken, awaiting the guard's Retake / Use Photo decision.
+  void review() => state = state.copyWith(status: PhotoStatus.reviewing);
+
+  /// Back to the live camera WITHOUT resetting the countdown — the server's
+  /// response window is fixed, so a retake spends the same remaining seconds.
+  void retake() => state = state.copyWith(status: PhotoStatus.idle);
+
+  void uploading() => state = state.copyWith(status: PhotoStatus.uploading);
 
   void setResult(PhotoStatus result) => state = state.copyWith(status: result);
 
-  void tryAgain() => state = const PhotoState();
+  /// Full reset (fresh timer) — used when re-starting after a flagged/failed
+  /// attempt. Restores the full window for the current request.
+  void tryAgain() => state = PhotoState(
+        secondsRemaining: state.windowSeconds,
+        windowSeconds: state.windowSeconds,
+      );
 }
 
 final photoProvider =
@@ -62,17 +127,50 @@ final photoProvider =
 // ── Pending backend-triggered photo request ───────────────────────────────
 
 class PendingPhotoState {
-  const PendingPhotoState({this.pending = false, this.requestId});
+  const PendingPhotoState({
+    this.pending = false,
+    this.requestId,
+    this.nonceValue,
+    this.issuedAt,
+    this.receivedAt,
+    this.responseSeconds,
+  });
   final bool pending;
   final String? requestId;
+  // Server-issued nonce delivered with an online photo request — required to
+  // sign the upload. Comes from `GET /shifts/{id}/photos/pending`.
+  final String? nonceValue;
+  // Server issue time of the request, when the backend sends one (`issued_at`).
+  // Null today; honoured for exact server-anchored timing when present.
+  final DateTime? issuedAt;
+  // When the app first saw the request (foreground push/poll). The countdown
+  // falls back to this when there's no `issuedAt`.
+  final DateTime? receivedAt;
+  // Server-supplied window length, when sent (`response_seconds`). Null → the
+  // default [kPhotoWindowSeconds].
+  final int? responseSeconds;
 }
 
 class PendingPhotoNotifier extends Notifier<PendingPhotoState> {
   @override
   PendingPhotoState build() => const PendingPhotoState();
 
-  void setPending(bool val, {String? requestId}) =>
-      state = PendingPhotoState(pending: val, requestId: requestId);
+  void setPending(
+    bool val, {
+    String? requestId,
+    String? nonceValue,
+    DateTime? issuedAt,
+    DateTime? receivedAt,
+    int? responseSeconds,
+  }) =>
+      state = PendingPhotoState(
+        pending: val,
+        requestId: requestId,
+        nonceValue: nonceValue,
+        issuedAt: issuedAt,
+        receivedAt: receivedAt,
+        responseSeconds: responseSeconds,
+      );
 }
 
 final pendingPhotoProvider =

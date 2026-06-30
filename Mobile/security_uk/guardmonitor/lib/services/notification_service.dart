@@ -99,4 +99,49 @@ class NotificationService {
     await init();
     await _plugin.cancel(id: _endShiftId);
   }
+
+  /// Fire a one-off tray notification that a submitted photo was reviewed. Used
+  /// by the poll path so the guard is notified even when push can't deliver
+  /// (e.g. iOS without APNs); the push path relies on the OS drawing the
+  /// notification block itself. [requestId] derives a stable id so re-firing the
+  /// same review replaces rather than stacks.
+  static Future<void> showPhotoReview({
+    required String decision,
+    String? note,
+    required String requestId,
+  }) async {
+    await init();
+    await requestPermission();
+
+    final approved = decision.toUpperCase() == 'APPROVED';
+    final title = approved ? 'Photo approved' : 'Photo rejected';
+    final body = approved
+        ? 'Your verification photo was approved.'
+        : (note != null && note.isNotEmpty)
+            ? 'Rejected: $note'
+            : 'Your verification photo was rejected.';
+
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        'photo_reviews',
+        'Photo reviews',
+        channelDescription: 'Tells you when a supervisor reviews your photo',
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+      iOS: DarwinNotificationDetails(),
+    );
+
+    try {
+      await _plugin.show(
+        // Stable per-review id (positive) so the same review can't stack.
+        id: 2000 + (requestId.hashCode & 0xFFF),
+        title: title,
+        body: body,
+        notificationDetails: details,
+      );
+    } catch (e) {
+      if (kDebugMode) debugPrint('[notif] showPhotoReview failed: $e');
+    }
+  }
 }

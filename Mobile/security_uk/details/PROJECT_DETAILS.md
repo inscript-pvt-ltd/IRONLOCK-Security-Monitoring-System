@@ -210,6 +210,128 @@ actually wired up today.
 > Append a new entry here at the end of every session. Keep each entry short: what
 > changed, why, and what's left open. Most recent entry at the top.
 
+### 2026-06-22 — Low-severity audit fixes, round 2 (deferred items)
+
+- Worked through the 9 previously-deferred Lows one by one:
+  - **L6** — Android `MainActivity` now sets `FLAG_SECURE` (blocks screenshots/
+    screen-recording, hides recents thumbnail). Root detection still deferred
+    (needs a dependency + policy).
+  - **L9** — `AuthNotifier.build()` wraps the secure-storage read; a storage
+    error returns `signedOut` instead of throwing into `AsyncError`.
+  - **L11** — photo capture prefers the **front** camera (presence/identity),
+    falling back to the first available.
+  - **L15** — privacy notice now shows once per install (persisted in secure
+    storage `ironlock_privacy_accepted`) via `HomeScreen._maybeShowPrivacyNotice`;
+    consent captured + recorded. Legal content remains the business's to confirm.
+- Consciously kept (reviewed, not skipped): **L4** (backend must stamp time),
+  **L5** (inexact alarm fine — auto-close is the guarantee), **L7** (tap already
+  foregrounds the active screen), **L8** (reactive 401-refresh is correct),
+  **L10** (needs Inter `.ttf` assets — provide files and pubspec wiring follows).
+- `flutter analyze` → no issues. `flutter test` → **19/19** (privacy overlay
+  doesn't affect the signed-out login tests). `SECURITY_AUDIT.md` status section
+  updated: **11 Lows fixed in-app, 5 remaining**.
+
+### 2026-06-22 — Low-severity audit fixes (7 of 16)
+
+- Fixed the clean, low-risk app-side Low items from `SECURITY_AUDIT.md`:
+  - **L1/L12** — `GuardProfile.fromEmail` and `setFromApi` no longer `RangeError`
+    on leading-separator / empty name fields (degrade to `Guard`/`G`).
+  - **L2** — `signOut()` now `stopCapture()`s GPS + `cancelShiftEnd()`s the
+    reminder (idempotent) so a forced sign-out mid-shift can't leak them.
+  - **L3** — `NoncePoolNotifier.consume()` refills instead of returning `null`,
+    so no photo uploads unsigned.
+  - **L13** — removed the 5 fabricated default alerts; `alertsProvider` starts
+    empty (no path can show a fake "supervisor notified" alert).
+  - **L14** — status strip is honest: GPS tile is 3-state (in-zone/outside/
+    no-signal), and "All systems normal" needs `online && in-zone && battery ok`
+    (full no-fix honesty still needs M6 — zone default).
+  - **L16** — `AppInput` disables autocorrect/suggestions on obscured (passcode)
+    fields.
+- Deferred 9 Lows with reasons (backend-owned L4; design-acceptable L5/L9;
+  needs-assets L10; product/legal L6/L11/L15; architecture L7; future L8).
+- Added `test/providers/guard_profile_from_email_test.dart` (5 cases).
+  `flutter analyze` → no issues. `flutter test` → **19/19**.
+- `SECURITY_AUDIT.md` updated with a "Remediation status — Low-severity pass"
+  section (what's fixed / deferred + re-audit note). Critical/High/Medium untouched.
+
+### 2026-06-22 — Security & logic audit written up
+
+- Audited auth, shift lifecycle, GPS, welfare, photo, secure storage, and the
+  new early-end flow for loopholes (five passes; **every file in `lib/`** read,
+  plus manifests, native glue, Gradle/pubspec/analyzer config). Results captured
+  in a new **`guardmonitor/docs/SECURITY_AUDIT.md`** (33 findings, severity-ranked,
+  each tagged App/Backend with a concrete fix).
+- Headline holes: cleartext HTTP exposes password+JWT (C1); photo HMAC/nonce
+  scheme is theater — baked-in secret + client-issued nonces (C2); early-vs-normal
+  end is decided by the **device clock** so the approval requirement is bypassable
+  (H1); welfare pass/fail is client-recorded and the server result ignored (H2);
+  JWT refresh forces a sign-out on **any** error from the retried request (H3).
+- Second pass added: iOS has **no ATS exception** so the app can't reach the http
+  backend on iOS at all (H4); **no background execution** — GPS + welfare polling
+  stop when the app is backgrounded/locked, gutting on-site monitoring (H5); zone
+  defaults to "inside" and an out-of-zone guard shows as "Active throughout" in the
+  end summary (M6); photo upload omits lat/long (M5); plus several Low items.
+- No code changed this session — audit/doc only. Quick-win app fixes identified
+  (H3, M2 welfare stall, M3 poll TypeError, L1 login crash) pending the user's go.
+
+### 2026-06-22 — Early-end now requires supervisor approval
+
+- **Flow change**: ending a shift before `scheduled_end` no longer ends it
+  immediately. The guard now **requests** an early end (reason + note) → the
+  request is **locked waiting** for a supervisor/admin to approve → once
+  approved, the END button unlocks and the guard taps END to actually finish.
+  Decision is delivered via the existing 20s `GET /shifts/current` poll (no new
+  polling loop). Mock backend was **not** touched — app runs against the real
+  backend; the work is app-side + a spec for the backend dev.
+- **App changes**:
+  - `api_config.dart`: new `shiftEarlyEndRequest(id)` → `POST /shifts/{id}/early-end-request`.
+  - `current_shift_model.dart`: parses `early_end_request {status,reason,note}`
+    into `earlyEndStatus/Reason/Note` + `earlyEndPending/Approved/Rejected`
+    helpers; added a `copyWith`.
+  - `shift_service.dart`: `requestEarlyEnd(id, reason, note)` (submits the
+    request; does NOT end the shift).
+  - `shift_provider.dart`: `CurrentShiftNotifier.requestEarlyEnd()` (optimistic
+    `pending`, reconciled by poll) + `ShiftNotifier.requestEarlyEnd()` delegate.
+  - `end_shift_sheet.dart`: status-driven — capture reason→"Request Early End";
+    `pending`→read-only "awaiting approval" notice (Close only); `approved`→
+    approved notice + live "End Shift" (reuses stored reason/note). Normal
+    on-time end path unchanged.
+  - `home_screen.dart`: END circle **locks** (hourglass) while pending; hint
+    text reflects pending/approved/rejected; `_CircleEndButton` gained a
+    disabled/`locked` state.
+- **Spec for backend dev**: `guardmonitor/docs/BACKEND_SHIFT_END_SPEC.md` new
+  **§0** — `POST /shifts/{id}/early-end-request`, the supervisor approve/reject
+  decision, and the `early_end_request` object on `GET /shifts/current`. Stresses
+  the server must reject `POST /end` (ended_early) without an `approved` request
+  so a tampered client can't bypass approval. §5 updated to the new app behaviour.
+- `flutter analyze` → no issues. `flutter test` → 14/14 (added 2 early-end
+  parse tests to the model suite).
+- Open (backend): build §0 endpoints + expose `early_end_request` on
+  `/shifts/current`; same prior backend items (auto-close job, `/shifts/current`
+  null-for-active bug, `reference` field, HTTPS).
+
+### 2026-06-22 — Git cleanup, connectivity fix
+
+- **Build artifacts removed from git history**: the 8 local commits (never pushed) had
+  committed `build/`, `.dart_tool/`, `android/.gradle/`, `ios/Pods/`, and
+  `mock-backend/node_modules/` — including `libflutter.so` (374 MB) and `app-debug.apk`
+  (101 MB) which exceeded GitHub's 100 MB hard limit and blocked every push attempt.
+  Fixed by soft-resetting to the last remote commit (`a8ed6b3`), stripping all build
+  artifacts from the index, and recommitting only real source files as one clean commit.
+- **Root `.gitignore` added** at `IRONLOCK-Security-Monitoring-System/.gitignore`:
+  covers `**/build/`, `**/.dart_tool/`, `**/.gradle/`, `**/ios/Pods/`,
+  `**/node_modules/`, `.DS_Store`, `.idea/`, `*.iml`, and Claude Code local settings
+  (`**/.claude/settings.local.json`, `**/.agents/`). This prevents a recurrence.
+- **Connectivity false-offline bug fixed** (`connectivity_service.dart`): the
+  `StreamProvider` was backed only by `onConnectivityChanged`, which fires on changes
+  only — not on initial subscription. On iOS simulator + WiFi, this meant the stream
+  never fired (or fired once with `none`), leaving the UI latched to "Offline". Fixed by
+  converting to an `async*` generator that first yields `checkConnectivity()` (immediate
+  current state) then `yield*` the change stream. WiFi now shows "Online" correctly.
+- `flutter analyze` → no issues. `flutter test` → 12/12 passing.
+- Open: same backend items as before (auto-close job, `/shifts/current` null-for-active
+  bug, `reference` field deploy, HTTPS).
+
 ### 2026-06-18 — Shift start/login fixes, Remember Me, server times, `reference` field
 
 - **Remember Me** wired end-to-end: `login_screen.dart` pre-fills the saved email and

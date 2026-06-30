@@ -123,9 +123,15 @@ class _JwtInterceptor extends Interceptor {
         if (parsed != null) await SecureStorageService.saveExpiresAt(parsed);
       }
 
-      // Retry the original request with the new token
-      final retried = await _retry(err.requestOptions, newToken);
-      handler.resolve(retried);
+      // Retry the original request with the new token. Wrap in its own
+      // try/catch: a failure here (4xx/5xx on the endpoint) is a real
+      // request error, NOT a session failure — don't sign the user out.
+      try {
+        final retried = await _retry(err.requestOptions, newToken);
+        handler.resolve(retried);
+      } catch (retryErr) {
+        handler.next(retryErr is DioException ? retryErr : err);
+      }
 
       // Drain any requests that queued while we were refreshing
       for (final pending in _pendingRetries) {

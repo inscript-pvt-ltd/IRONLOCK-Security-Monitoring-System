@@ -5,23 +5,91 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../../config/api_config.dart';
 import '../../models/api_response.dart';
 import '../../models/current_shift_model.dart';
+import '../../providers/alerts_provider.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/wakefulness_provider.dart';
 import '../../services/api_client.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/gps_service.dart';
+import '../../services/push_messaging_service.dart';
+import '../../services/secure_storage_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_shadows.dart';
 import '../../theme/app_typography.dart';
 import '../../theme/responsive.dart';
 import '../../overlays/end_shift_sheet.dart';
+import '../../overlays/permission_gate_overlay.dart';
+import '../../overlays/privacy_notice_overlay.dart';
 import '../../overlays/wakefulness_overlay.dart' hide AppGradients;
 import '../../widgets/app_card.dart';
 import '../../widgets/app_chip.dart';
 import '../photo/photo_screen.dart';
+
+/// Extracts a pending photo request from the (loosely-documented) shapes the
+/// backend may use for `GET /shifts/{id}/photos/pending`. The guide promises a
+/// `request_id` + `nonce_value` but never pins the envelope, so we tolerate:
+/// `{pending:true, request_id, nonce_value}`, a bare `{request_id, nonce_value}`,
+/// a nested `{request|photo_request|photo|pending_request:{...}}`, a
+/// `{requests:[{...}]}` / `{photo_requests:[{...}]}` array (the real backend's
+/// shape — an empty list means nothing pending), or the first element of a bare
+/// list. Returns null when nothing actionable is pending.
+///
+/// Both the request id and its nonce are required — the nonce signs the upload,
+/// so a payload missing either is treated as "nothing to do" rather than
+/// opening a capture that can't be submitted.
+///
+/// `issuedAt` / `responseSeconds` are optional: if the backend ever stamps the
+/// pending request with `issued_at` (or `expires_at`) and `response_seconds`,
+/// they flow through so the capture screen anchors its countdown exactly. Absent
+/// today, in which case the screen falls back to arrival time + 90s default.
+({String requestId, String nonceValue, DateTime? issuedAt, int? responseSeconds})?
+    extractPendingPhoto(dynamic data) {
+  Map<String, dynamic>? m;
+  if (data is Map<String, dynamic>) {
+    if (data['pending'] == false) return null;
+    // The real backend wraps pending requests in a list under `requests`
+    // (or `photo_requests`). An explicit list is authoritative: empty → nothing
+    // pending; otherwise take the first actionable element.
+    final list = data['requests'] ?? data['photo_requests'];
+    if (list is List) {
+      if (list.isEmpty || list.first is! Map) return null;
+      m = (list.first as Map).cast<String, dynamic>();
+    } else {
+      final nested = data['request'] ??
+          data['photo_request'] ??
+          data['photo'] ??
+          data['pending_request'];
+      m = nested is Map<String, dynamic> ? nested : data;
+    }
+  } else if (data is List && data.isNotEmpty && data.first is Map) {
+    m = (data.first as Map).cast<String, dynamic>();
+  }
+  if (m == null) return null;
+  final requestId = (m['request_id'] ?? m['id'])?.toString();
+  final nonceValue = (m['nonce_value'] ?? m['nonce'])?.toString();
+  if (requestId == null || requestId.isEmpty) return null;
+  if (nonceValue == null || nonceValue.isEmpty) return null;
+  // `expires_at` is an alternative anchor: back-compute the issue time from it.
+  final responseSeconds =
+      int.tryParse((m['response_seconds'] ?? '').toString());
+  DateTime? issuedAt = DateTime.tryParse((m['issued_at'] ?? '').toString())?.toUtc();
+  final expiresAt = DateTime.tryParse((m['expires_at'] ?? '').toString())?.toUtc();
+  if (issuedAt == null && expiresAt != null) {
+    issuedAt = expiresAt.subtract(
+      Duration(seconds: responseSeconds ?? kPhotoWindowSeconds),
+    );
+  }
+  return (
+    requestId: requestId,
+    nonceValue: nonceValue,
+    issuedAt: issuedAt,
+    responseSeconds: responseSeconds,
+  );
+}
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -33,6 +101,10 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   Timer? _pollingTimer;
   StreamSubscription<String>? _zoneSub;
+  // The photo request currently being handled (a PhotoScreen is open for it).
+  // Guards against the 20s poll — which keeps reporting the same request as
+  // pending until it's fulfilled — re-opening a second PhotoScreen on top (H1).
+  String? _handlingPhotoRequestId;
 
   @override
   void initState() {
@@ -47,6 +119,45 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ref.read(zoneProvider.notifier).set(zoneIndex);
       ref.read(zoneUpdatedAtProvider.notifier).markNow();
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initOnFirstLaunch());
+  }
+
+  /// Sequentially show the permission gate (every launch until both camera +
+  /// location are granted) then the privacy notice (once per install). Running
+  /// them back-to-back via addPostFrameCallback avoids two routes stacking at
+  /// the same time.
+  Future<void> _initOnFirstLaunch() async {
+    if (!mounted) return;
+
+    // Step 1 — permission gate. Block until camera + location are granted.
+    final locStatus = await Permission.locationWhenInUse.status;
+    final camStatus = await Permission.camera.status;
+    if (!locStatus.isGranted || !camStatus.isGranted) {
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => PermissionGateOverlay(onGranted: () {}),
+        ),
+      );
+    }
+
+    if (!mounted) return;
+
+    // Step 2 — privacy notice (audit L15), shown once per install.
+    if (await SecureStorageService.getPrivacyAccepted()) {
+      ref.read(privacyAcceptedProvider.notifier).accept();
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => PrivacyNoticeOverlay(
+          onAccepted: SecureStorageService.setPrivacyAccepted,
+        ),
+      ),
+    );
   }
 
   @override
@@ -66,25 +177,68 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final dio = ref.read(dioProvider);
 
-      final welfareRes = await dio.get<Map<String, dynamic>>('/welfare/pending');
-      final welfareData = welfareRes.data?['data'] as Map<String, dynamic>?;
-      if (welfareData?['pending'] == true) {
-        final status = ref.read(wakefulnessProvider).status;
-        if (status == WakefulnessStatus.idle && mounted) {
-          ref.read(wakefulnessProvider.notifier).trigger(
-            welfareData!['check_id'] as String,
-            welfareData['code'] as String,
-          );
+      // Wakefulness: when the backend provisioned a TOTP schedule at shift
+      // start, drive challenges locally from it. The local scheduler is the
+      // fallback for when push can't deliver — when push is genuinely
+      // delivering, the server's FCM challenge is the single authority, so
+      // running the scheduler too would double-fire (a locally-computed code vs
+      // the server's pushed code) for the same window (H2). Fall back to the
+      // non-contractual `/welfare/pending` poll only when no seed was issued
+      // (the local mock).
+      //
+      // Gate on isDelivering, NOT isAvailable: on iOS Firebase core can be
+      // "available" (plist present) yet never get a push (no APNs key), which
+      // would silently suppress the scheduler and drop every check. isDelivering
+      // is true only once a token actually registered.
+      final scheduler = ref.read(wakefulnessScheduleProvider.notifier);
+      final online = ref.read(isOnlineProvider);
+      if (scheduler.isArmed) {
+        if (!online || !PushMessaging.isDelivering) {
+          scheduler.checkSchedule();
+        }
+      } else {
+        final welfareRes = await dio.get<Map<String, dynamic>>('/welfare/pending');
+        final welfareData = welfareRes.data?['data'] as Map<String, dynamic>?;
+        if (welfareData?['pending'] == true) {
+          final checkId = welfareData?['check_id'] as String?;
+          final code = welfareData?['code'] as String?;
+          final status = ref.read(wakefulnessProvider).status;
+          if (checkId != null && code != null && status == WakefulnessStatus.idle && mounted) {
+            ref.read(wakefulnessProvider.notifier).trigger(checkId, code);
+          }
         }
       }
 
-      final photoRes = await dio.get<Map<String, dynamic>>('/photos/pending');
-      final photoData = photoRes.data?['data'] as Map<String, dynamic>?;
-      if (photoData?['pending'] == true && mounted) {
-        ref.read(pendingPhotoProvider.notifier).setPending(
-          true,
-          requestId: photoData!['request_id'] as String,
+      final shiftId = ref.read(shiftProvider).id;
+      if (shiftId != null) {
+        final photoRes = await dio.get<Map<String, dynamic>>(
+          ApiConfig.shiftPhotosPending(shiftId),
         );
+        final pending = extractPendingPhoto(photoRes.data?['data']);
+        // Skip a request we're already handling so a still-pending poll result
+        // doesn't churn the provider while its PhotoScreen is open (H1).
+        if (pending != null &&
+            mounted &&
+            pending.requestId != _handlingPhotoRequestId) {
+          ref.read(pendingPhotoProvider.notifier).setPending(
+                true,
+                requestId: pending.requestId,
+                nonceValue: pending.nonceValue,
+                issuedAt: pending.issuedAt,
+                // Foreground poll — anchor to now when the server gave no time.
+                receivedAt: DateTime.now().toUtc(),
+                responseSeconds: pending.responseSeconds,
+              );
+        }
+
+        // Supervisor review outcomes — surface any new APPROVED/REJECTED (with
+        // the note) as a tray notification + in-app alert. The poll is the
+        // reliable path; it also catches up on reviews a background push
+        // already banner'd (deduped, no double tray thanks to isDelivering).
+        await ref.read(photoReviewProvider.notifier).pollAndIngest(
+              shiftId,
+              pushDelivering: PushMessaging.isDelivering,
+            );
       }
     } on DioException catch (_) {
       // Silently ignore network errors during polling
@@ -119,6 +273,40 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           !ref.read(shiftProvider).active) {
         ref.read(shiftProvider.notifier).resumeFromServer(next);
       }
+
+      // The server closed the shift on its side while we still show it active:
+      // an AUTO-close (`end_type: auto`) at scheduled_end+grace, or an admin
+      // CANCEL. Reconcile locally (stop GPS, cancel reminder, clear state) and
+      // tell the guard. Gated on end_type=='auto'/cancelled so a guard's OWN end
+      // (end_type guard/early) — which also lands as `completed` here — never
+      // trips this.
+      final serverClosed = next != null &&
+          ref.read(shiftProvider).active &&
+          ((next.status == 'completed' && next.endType == 'auto') ||
+              next.status == 'cancelled');
+      if (serverClosed) {
+        final cancelled = next.status == 'cancelled';
+        ref.read(shiftProvider.notifier).reconcileServerClosed();
+        ref.read(alertsProvider.notifier).prepend(AppAlert(
+              id: 'shift-closed-${next.id}',
+              severity: AlertSeverity.notice,
+              title: cancelled ? 'Shift cancelled' : 'Shift auto-closed',
+              description: cancelled
+                  ? 'Your supervisor cancelled this shift.'
+                  : 'Your shift was automatically closed at its scheduled end time.',
+              time: 'just now',
+            ));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(cancelled
+                  ? 'This shift was cancelled by your supervisor.'
+                  : 'Your shift was automatically closed at its scheduled end.'),
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      }
     });
 
     // Show wakefulness overlay when backend triggers a welfare check.
@@ -135,13 +323,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     // Navigate to photo screen when backend requests photo verification.
     ref.listen<PendingPhotoState>(pendingPhotoProvider, (_, next) {
-      if (next.pending && next.requestId != null) {
+      if (next.pending && next.requestId != null && next.nonceValue != null) {
         final requestId = next.requestId!;
+        final nonceValue = next.nonceValue!;
+        final issuedAt = next.issuedAt;
+        final receivedAt = next.receivedAt;
+        final responseSeconds = next.responseSeconds;
+        // Already showing a PhotoScreen for this request — don't stack another
+        // one when the same request is re-delivered by the poll or a push (H1).
+        if (requestId == _handlingPhotoRequestId) return;
+        _handlingPhotoRequestId = requestId;
         ref.read(pendingPhotoProvider.notifier).setPending(false);
         Navigator.push(
           context,
-          MaterialPageRoute(builder: (_) => PhotoScreen(requestId: requestId)),
-        );
+          MaterialPageRoute(
+            builder: (_) => PhotoScreen(
+              requestId: requestId,
+              nonceValue: nonceValue,
+              issuedAt: issuedAt,
+              receivedAt: receivedAt,
+              responseSeconds: responseSeconds,
+            ),
+          ),
+        ).whenComplete(() {
+          // Free the lock once the capture flow closes, so a genuinely new
+          // request for the same id (rare) can re-open later.
+          if (_handlingPhotoRequestId == requestId) {
+            _handlingPhotoRequestId = null;
+          }
+        });
       }
     });
 
@@ -224,6 +434,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: Column(
               children: [
                 if (!online) const _OfflineBanner(),
+                if (shift.active && ref.watch(locationDeniedProvider))
+                  const _LocationOffBanner(),
                 if (shift.active && currentShift != null)
                   _OverdueBanner(scheduledEnd: currentShift.scheduledEnd),
                 Expanded(
@@ -372,13 +584,25 @@ class _StatusIconStrip extends StatelessWidget {
     final b = battery;
     final batteryLow = b != null && b <= 15;
     final batteryWarn = b != null && b <= 30;
+    // The aggregate tile must reflect real subsystem health, not just the
+    // network: it's only "normal" when we're online AND inside the zone (0).
+    final systemsNormal = online && zone == 0 && !batteryLow;
     return Row(
       mainAxisAlignment: MainAxisAlignment.end,
       children: [
         _StatusTile(
           icon: zone == 2 ? Icons.location_off_rounded : Icons.location_on_rounded,
-          color: zone == 2 ? AppColors.danger : AppColors.success,
-          semanticLabel: zone == 2 ? 'GPS signal lost' : 'GPS active',
+          // 0 = inside (ok), 1 = outside the geofence (warn), 2 = no signal (bad).
+          color: zone == 0
+              ? AppColors.success
+              : zone == 1
+                  ? AppColors.warning
+                  : AppColors.danger,
+          semanticLabel: zone == 0
+              ? 'GPS active, in zone'
+              : zone == 1
+                  ? 'Outside patrol zone'
+                  : 'GPS signal lost',
         ),
         SizedBox(width: gap),
         _StatusTile(
@@ -400,9 +624,21 @@ class _StatusIconStrip extends StatelessWidget {
         ),
         SizedBox(width: gap),
         _StatusTile(
-          icon: online ? Icons.check_circle_outline_rounded : Icons.error_outline_rounded,
-          color: online ? AppColors.success : AppColors.danger,
-          semanticLabel: online ? 'All systems normal' : 'Connection issue',
+          icon: systemsNormal
+              ? Icons.check_circle_outline_rounded
+              : online
+                  ? Icons.info_outline_rounded
+                  : Icons.error_outline_rounded,
+          color: systemsNormal
+              ? AppColors.success
+              : online
+                  ? AppColors.warning
+                  : AppColors.danger,
+          semanticLabel: systemsNormal
+              ? 'All systems normal'
+              : online
+                  ? 'Check status — see the cards above'
+                  : 'Connection issue',
         ),
       ],
     );
@@ -897,16 +1133,9 @@ class _ActionButtonsState extends ConsumerState<_ActionButtons> {
     if (_starting) return;
     setState(() => _starting = true);
     try {
-      final status = await Permission.locationWhenInUse.request();
-      if (!mounted) return;
-      if (status.isPermanentlyDenied) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Location permission denied — enable it in Settings for zone tracking'),
-            duration: Duration(seconds: 4),
-          ),
-        );
-      }
+      // Location permissions (When-In-Use + the background "Always" upgrade) and
+      // camera are all requested up front at the permission gate on app launch,
+      // so there is no permission prompt here — the shift starts immediately.
       String? errorMessage;
       try {
         await ref.read(shiftProvider.notifier).start();
@@ -979,25 +1208,47 @@ class _ActionButtonsState extends ConsumerState<_ActionButtons> {
       );
     }
 
-    // Before the scheduled end, ending counts as "early" and the sheet will
-    // require a reason — surface that here so it isn't a surprise, mirroring
-    // the START hint.
+    // Before the scheduled end, ending counts as "early" and now needs
+    // supervisor approval. The hint + button state below mirror where the
+    // request is in that approval cycle (pending / approved / rejected).
     final cs = widget.currentShift;
     final isEarly = cs != null && DateTime.now().isBefore(cs.scheduledEnd);
+    final pending = cs?.earlyEndPending ?? false;
+    final approved = cs?.earlyEndApproved ?? false;
+    final rejected = cs?.earlyEndRejected ?? false;
+
+    // While pending, the END button is locked — the guard must wait for the
+    // supervisor's decision (which arrives on the next 20s poll).
+    String? hint;
+    Color hintColor = AppColors.muted;
+    if (pending) {
+      hint = 'Early-end request sent · waiting for supervisor approval';
+      hintColor = AppColors.warning;
+    } else if (approved) {
+      hint = 'Approved — tap END to finish your shift';
+      hintColor = AppColors.success;
+    } else if (rejected && isEarly) {
+      hint = 'Early-end request declined · you can request again';
+      hintColor = AppColors.warning;
+    } else if (isEarly) {
+      hint = 'Shift ends at ${_fmtHHmm(cs.scheduledEnd)} · ending now needs approval';
+    }
+
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           _CircleEndButton(
-            onTap: () => showEndShiftSheet(context),
+            locked: pending,
+            onTap: pending ? null : () => showEndShiftSheet(context),
           ),
-          if (isEarly) ...[
+          if (hint != null) ...[
             SizedBox(height: context.s(12)),
             Text(
-              'Shift ends at ${_fmtHHmm(cs.scheduledEnd)} · ending now needs a reason',
+              hint,
               style: AppType.caption.copyWith(
                 fontSize: context.sp(12),
-                color: AppColors.muted,
+                color: hintColor,
               ),
               textAlign: TextAlign.center,
             ),
@@ -1089,8 +1340,11 @@ class _CircleStartButtonState extends State<_CircleStartButton> {
 // ── Circular end button ───────────────────────────────────────────────────
 
 class _CircleEndButton extends StatefulWidget {
-  const _CircleEndButton({required this.onTap});
-  final VoidCallback onTap;
+  const _CircleEndButton({required this.onTap, this.locked = false});
+  // null onTap or locked=true renders the button disabled (e.g. while an
+  // early-end request is awaiting supervisor approval).
+  final VoidCallback? onTap;
+  final bool locked;
 
   @override
   State<_CircleEndButton> createState() => _CircleEndButtonState();
@@ -1103,35 +1357,45 @@ class _CircleEndButtonState extends State<_CircleEndButton> {
   Widget build(BuildContext context) {
     final base = context.s(190);
     final size = base.clamp(150.0, context.screenH * 0.26);
+    final disabled = widget.locked || widget.onTap == null;
+    final accent = disabled ? AppColors.muted : AppColors.gold;
 
     return GestureDetector(
-      onTapDown: (_) {
-        HapticFeedback.mediumImpact();
-        setState(() => _pressed = true);
-      },
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      onTap: widget.onTap,
+      onTapDown: disabled
+          ? null
+          : (_) {
+              HapticFeedback.mediumImpact();
+              setState(() => _pressed = true);
+            },
+      onTapUp: disabled ? null : (_) => setState(() => _pressed = false),
+      onTapCancel: disabled ? null : () => setState(() => _pressed = false),
+      onTap: disabled ? null : widget.onTap,
       child: AnimatedScale(
         scale: _pressed ? 0.96 : 1.0,
         duration: const Duration(milliseconds: 100),
-        child: Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0x0DD4AF37),
-            border: Border.all(color: const Color(0x80D4AF37), width: 2),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            'END',
-            style: AppType.bodySemi.copyWith(
-              fontSize: context.sp(26),
-              fontWeight: FontWeight.w800,
-              color: AppColors.gold,
-              letterSpacing: 0.32,
+        child: Opacity(
+          opacity: disabled ? 0.55 : 1.0,
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: disabled ? const Color(0x0AFFFFFF) : const Color(0x0DD4AF37),
+              border: Border.all(color: accent.withValues(alpha: 0.5), width: 2),
             ),
+            alignment: Alignment.center,
+            child: disabled && widget.locked
+                ? Icon(Icons.hourglass_top_rounded,
+                    size: context.sp(34), color: accent)
+                : Text(
+                    'END',
+                    style: AppType.bodySemi.copyWith(
+                      fontSize: context.sp(26),
+                      fontWeight: FontWeight.w800,
+                      color: accent,
+                      letterSpacing: 0.32,
+                    ),
+                  ),
           ),
         ),
       ),
@@ -1243,6 +1507,46 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
+// ── Location-off banner ───────────────────────────────────────────────────
+// Persistent (not a transient snackbar) so a guard working with location denied
+// can't miss that they're untracked. Danger-coloured because, for an on-site
+// verification product, no location is a compliance failure, not a soft warning.
+
+class _LocationOffBanner extends StatelessWidget {
+  const _LocationOffBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        vertical: context.s(6),
+        horizontal: context.s(16),
+      ),
+      color: AppColors.danger.withValues(alpha: 0.14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.location_off_rounded,
+              size: context.s(13), color: AppColors.danger),
+          SizedBox(width: context.s(6)),
+          Flexible(
+            child: Text(
+              'Location tracking OFF — enable it in Settings',
+              textAlign: TextAlign.center,
+              style: AppType.micro.copyWith(
+                fontSize: context.sp(11),
+                color: AppColors.danger,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ── Sign Out button ───────────────────────────────────────────────────────
 
 class _SignOutButton extends ConsumerStatefulWidget {
@@ -1288,7 +1592,10 @@ class _SignOutButtonState extends ConsumerState<_SignOutButton> {
       ),
     );
     if (confirmed != true) return;
-    await ref.read(shiftProvider.notifier).end();
+    // Do NOT call end() here — sign-out must not silently close an active
+    // shift (bypassing early-end approval). signOut() already stops GPS,
+    // cancels the reminder, and clears local state; the backend auto-close
+    // handles any open shift on the server side.
     await ref.read(authProvider.notifier).signOut();
   }
 

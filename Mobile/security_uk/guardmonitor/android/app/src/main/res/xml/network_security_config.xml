@@ -1,11 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Allows cleartext (HTTP) only for the temporary cPanel backend host.
-  The rest of the app stays HTTPS-only (Android's secure default).
-  REMOVE this exception once the backend is served over HTTPS.
+  Production backend is HTTPS (dashboard.ironlock.co.uk), so cleartext is denied
+  everywhere by default. The only cleartext allowance is the local mock backend
+  during development (loopback + the Android-emulator host alias 10.0.2.2). No
+  real/remote host can be reached over HTTP.
 -->
 <network-security-config>
+    <base-config cleartextTrafficPermitted="false"/>
     <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">generous-yellow-jaguar.23-111-165-74.cpanel.site</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
     </domain-config>
 </network-security-config>

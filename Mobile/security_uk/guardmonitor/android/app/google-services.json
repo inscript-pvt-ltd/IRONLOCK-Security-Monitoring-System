@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "193795657352",
+    "project_id": "ironlock-security-monitoring",
+    "storage_bucket": "ironlock-security-monitoring.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:193795657352:android:16378d629c4f780544993d",
+        "android_client_info": {
+          "package_name": "com.ironlock.guardmonitor"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBNqY_EKZXNzRBfbGs2LliGb8jsGQMaFIA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

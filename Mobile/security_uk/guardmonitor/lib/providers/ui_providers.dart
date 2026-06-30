@@ -9,7 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 class ZoneNotifier extends Notifier<int> {
   @override
-  int build() => 0;
+  int build() => 2; // unknown until first real GPS fix (0 = inside, 1 = outside, 2 = no signal)
 
   void set(int state) => this.state = state.clamp(0, 2);
   void cycle() => state = (state + 1) % 3;
@@ -33,6 +33,21 @@ class ZoneUpdatedAtNotifier extends Notifier<DateTime?> {
 
 final zoneUpdatedAtProvider =
     NotifierProvider<ZoneUpdatedAtNotifier, DateTime?>(ZoneUpdatedAtNotifier.new);
+
+// ── Location permission denied ─────────────────────────────────────────────
+// True when GPS capture couldn't start because location permission is denied.
+// Drives a persistent "Location tracking OFF" banner so a guard can't work
+// untracked without knowing it. Set when a shift starts/resumes; cleared on end.
+
+class LocationDeniedNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void set(bool denied) => state = denied;
+}
+
+final locationDeniedProvider =
+    NotifierProvider<LocationDeniedNotifier, bool>(LocationDeniedNotifier.new);
 
 // ── Battery ───────────────────────────────────────────────────────────────
 

@@ -3,13 +3,22 @@
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Background patrol tracking: keep recording location when the screen is
+         locked or the app is backgrounded. ACCESS_BACKGROUND_LOCATION must be
+         granted separately ("Allow all the time") on Android 10+. The geolocator
+         foreground service (declared by the plugin) needs FOREGROUND_SERVICE +
+         FOREGROUND_SERVICE_LOCATION (API 34+) and WAKE_LOCK. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- Local notifications (end-of-shift reminder) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <application
-        android:label="guardmonitor"
+        android:label="Guard Monitor"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config">
@@ -33,6 +42,16 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Shift Access Link (SSO): custom scheme ironlock://shift-access/<token>.
+                 Opens the app from a supervisor-generated one-time link; the https
+                 page redirects to this scheme. Real https App Links (autoVerify)
+                 get added later once the Play assetlinks.json is confirmed. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="ironlock" android:host="shift-access"/>
             </intent-filter>
         </activity>
         <!-- flutter_local_notifications: receivers for scheduled + post-boot reminders -->
