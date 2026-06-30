@@ -569,6 +569,26 @@
                         // Offline events are dated to when they actually happened
                         // (recorded_at), not when the backlog reached the server.
                         $offlineActualAt = $event->recorded_at ?? $event->server_received_at ?? $event->created_at;
+                        // Build the offline-band sentence in PHP (not inline @if in the
+                        // markup): a Blade directive glued to a word/echo — e.g.
+                        // `backfilled@if(...)` or `}}@endif` — only half-compiles and
+                        // breaks the template, so keep all conditionals server-side.
+                        $offlineMsg = null;
+                        if ($isOfflineEvent) {
+                            $gapSec = $payload['gap_seconds'] ?? null;
+                            if ($event->event_type === 'COMMS_GAP_START') {
+                                $offlineMsg = "📡 Guard's device went offline here. Pings were buffered on-device and backfilled on reconnect.";
+                            } elseif ($event->event_type === 'COMMS_GAP_END') {
+                                $offlineMsg = '📡 Device reconnected'
+                                    . ($gapSec !== null ? ' after ' . $gapHuman($gapSec) . ' offline' : '')
+                                    . '. Buffered data has been synced.';
+                            } else {
+                                $pings = (int) ($payload['gps_pings_synced'] ?? 0);
+                                $offlineMsg = '⟲ ' . $pings . ' GPS ' . ($pings === 1 ? 'ping' : 'pings') . ' backfilled'
+                                    . ($gapSec !== null ? ' · offline ~' . $gapHuman($gapSec) : '')
+                                    . '.';
+                            }
+                        }
                     @endphp
                     <div class="tl-row">
                         <div class="tl-node">
@@ -590,13 +610,9 @@
                                     · actual time · synced <time class="tl-ts" data-ts="{{ $iso($event->server_received_at ?? $event->created_at) }}">{{ $time($event->server_received_at ?? $event->created_at) }}</time>
                                 </div>
                                 <div class="tl-offline">
-                                    @if ($event->event_type === 'COMMS_GAP_START')
-                                        📡 Guard's device went offline here. Pings were buffered on-device and backfilled on reconnect.
-                                    @elseif ($event->event_type === 'COMMS_GAP_END')
-                                        📡 Device reconnected@if (isset($payload['gap_seconds'])) after {{ $gapHuman($payload['gap_seconds']) }} offline@endif. Buffered data has been synced.
-                                    @else
-                                        ⟲ {{ $payload['gps_pings_synced'] ?? 0 }} GPS {{ (int) ($payload['gps_pings_synced'] ?? 0) === 1 ? 'ping' : 'pings' }} backfilled@if (isset($payload['gap_seconds'])) · offline ~{{ $gapHuman($payload['gap_seconds']) }}@endif.
-                                        @if (!empty($payload['note']))<div class="tl-offline-note">{{ $payload['note'] }}</div>@endif
+                                    {{ $offlineMsg }}
+                                    @if (!empty($payload['note']))
+                                        <div class="tl-offline-note">{{ $payload['note'] }}</div>
                                     @endif
                                 </div>
                             @else

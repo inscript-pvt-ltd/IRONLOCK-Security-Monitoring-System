@@ -77,6 +77,7 @@ class Shift extends Model
         'resolved_at',
         'totp_seed',
         'wakefulness_schedule',
+        'photo_schedule',
         'status',
         'started_by',
         'ended_by',
@@ -118,6 +119,7 @@ class Shift extends Model
             // DB leak never exposes the offline TOTP seed (spec §9.4).
             'totp_seed' => 'encrypted',
             'wakefulness_schedule' => 'array',
+            'photo_schedule' => 'array',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
@@ -487,6 +489,9 @@ class Shift extends Model
         if (empty($this->wakefulness_schedule)) {
             $attributes['wakefulness_schedule'] = $this->buildWakefulnessSchedule($startAt);
         }
+        if (empty($this->photo_schedule)) {
+            $attributes['photo_schedule'] = $this->buildPhotoSchedule($startAt);
+        }
 
         $this->update($attributes);
 
@@ -504,6 +509,44 @@ class Shift extends Model
     {
         $minGap = (int) config('ironlock.wakefulness_min_gap_minutes', 30);
         $maxGap = (int) config('ironlock.wakefulness_max_gap_minutes', 45);
+        if ($maxGap < $minGap) {
+            $maxGap = $minGap;
+        }
+
+        $end = $this->scheduled_end ? $this->scheduled_end->copy() : $from->copy()->addHours(8);
+
+        $schedule = [];
+        $cursor = $from->copy()->addMinutes(random_int($minGap, $maxGap));
+
+        // Cap the count so a misconfigured (e.g. multi-day) shift can't generate
+        // an unbounded array; a normal shift produces well under this.
+        while ($cursor->lessThan($end) && count($schedule) < 64) {
+            $schedule[] = $cursor->copy()->utc()->format('Y-m-d\TH:i:s\Z');
+            $cursor->addMinutes(random_int($minGap, $maxGap));
+        }
+
+        return $schedule;
+    }
+
+    /**
+     * Build the randomised verification-photo schedule for the live portion of
+     * the shift (Phase 7 Option A): marks spaced a random ~1 hour apart (50–75
+     * min, config-driven), starting one gap after `$from` and stopping at
+     * scheduled_end. Returns an array of ISO-8601 UTC timestamps — the single
+     * source of truth shared by the online dispatcher (photos:dispatch-scheduled)
+     * and the app's OFFLINE camera trigger, so the cadence is identical whether
+     * or not the device is connected.
+     *
+     * Independent of buildWakefulnessSchedule() (a fresh random draw) so photo
+     * and wakefulness checks do not land on the same marks. The default ~1-hour
+     * gap (client requirement) keeps the ±10 min jitter so the marks stay
+     * unpredictable — they are randomised once at provisioning, the guard cannot
+     * anticipate them (anti-gaming, master spec §7.1).
+     */
+    public function buildPhotoSchedule(Carbon $from): array
+    {
+        $minGap = (int) config('ironlock.photo_min_gap_minutes', 50);
+        $maxGap = (int) config('ironlock.photo_max_gap_minutes', 70);
         if ($maxGap < $minGap) {
             $maxGap = $minGap;
         }

@@ -22,10 +22,12 @@ Schedule::command('shifts:auto-close')->everyFiveMinutes()->withoutOverlapping()
 // raise a CRITICAL alert (spec §16.4). Runs every minute. Overlap-protected.
 Schedule::command('photos:timeout-sweep')->everyMinute()->withoutOverlapping();
 
-// Fire randomised verification photo checks on active shifts (spec §8.2). The
-// short cadence + per-run probability is what makes a check unpredictable; the
-// command itself enforces a minimum gap per shift. Overlap-protected.
-Schedule::command('photos:dispatch-scheduled')->everyTenMinutes()->withoutOverlapping();
+// Fire verification photo checks at their provisioned schedule marks (Phase 7
+// Option A; spec §8.2). Runs every minute so a due mark is dispatched promptly;
+// the command skips shifts with an unanswered request and never double-fires a
+// mark. The marks are randomised at shift start, so checks stay unpredictable.
+// Overlap-protected.
+Schedule::command('photos:dispatch-scheduled')->everyMinute()->withoutOverlapping();
 
 // Fire online wakefulness challenges at their provisioned schedule marks
 // (spec §9.4.1). Runs every minute so a due mark is dispatched promptly; the

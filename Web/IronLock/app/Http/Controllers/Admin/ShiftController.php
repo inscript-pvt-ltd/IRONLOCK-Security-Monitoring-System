@@ -260,9 +260,12 @@ class ShiftController extends Controller
             // carry up to 5). The images are served only through an admin-
             // authenticated route (viewPhoto) — the file is never publicly
             // accessible and no raw path leaks into the page.
+            // Oldest request first so the attempt ordinals read chronologically:
+            // the first photo asked of the guard is "1st Attempt", and the list
+            // renders top-to-bottom in the order the checks actually happened.
             $photoRequests = PhotoRequest::with('evidences.review')
                 ->where('shift_id', $shift->id)
-                ->orderByDesc('requested_at')
+                ->orderBy('requested_at')
                 ->get()
                 ->map(function (PhotoRequest $r) {
                     $evidences = $r->evidences

@@ -59,6 +59,7 @@ class WakefulnessService
         $now = Carbon::now();
         $code = str_pad((string) random_int(0, 9999), $this->digits(), '0', STR_PAD_LEFT);
 
+        
         $check = WakefulnessCheck::create([
             'id' => (string) Str::uuid(),
             'shift_id' => $shift->id,
