@@ -14,8 +14,10 @@ import '../../providers/wakefulness_provider.dart';
 import '../../services/api_client.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/gps_service.dart';
+import '../../services/nonce_pool_service.dart';
 import '../../services/push_messaging_service.dart';
 import '../../services/secure_storage_service.dart';
+import '../../services/time_anchor_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_shadows.dart';
@@ -211,6 +213,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
       final shiftId = ref.read(shiftProvider).id;
       if (shiftId != null) {
+        // Phase 7: while online, keep the offline-photo nonce pool topped up and
+        // the NTP anchor fresh so a verification photo can still be captured +
+        // signed if the link drops mid-shift. Best-effort, fire-and-forget.
+        if (online) {
+          unawaited(ref.read(noncePoolServiceProvider).refillIfLow(shiftId));
+          unawaited(ref.read(timeAnchorServiceProvider).ensureFresh());
+        }
+
         final photoRes = await dio.get<Map<String, dynamic>>(
           ApiConfig.shiftPhotosPending(shiftId),
         );

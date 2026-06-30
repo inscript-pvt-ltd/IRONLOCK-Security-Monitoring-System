@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -8,6 +10,7 @@ import '../config/api_config.dart';
 import '../data/offline_queue_db.dart';
 import '../providers/shift_provider.dart';
 import 'api_client.dart';
+import 'photo_service.dart';
 import 'sync_retry.dart';
 import 'wakefulness_service.dart';
 
@@ -35,6 +38,7 @@ class SyncFlushService {
   final String? Function() _currentShiftId;
 
   late final WakefulnessService _wakefulness = WakefulnessService(_dio);
+  late final PhotoService _photo = PhotoService(_dio);
 
   /// Max GPS pings per POST. The server has no hard cap but processes each ping
   /// synchronously (geofence + UPSERT), so a long offline backlog is chunked to
@@ -183,10 +187,57 @@ class SyncFlushService {
     }
   }
 
-  // ---- Photos (Stage 5) ----------------------------------------------------
+  // ---- Photos --------------------------------------------------------------
 
   Future<void> _flushPhotos(String shiftId) async {
-    // Stage 5.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final due = await _db.duePhotos(shiftId, nowMs);
+    for (final row in due) {
+      if (row.attempts >= kMaxFlushAttempts) {
+        await _discardPhoto(row);
+        continue;
+      }
+      final paths = (jsonDecode(row.filePaths) as List).cast<String>();
+      final sigs = (jsonDecode(row.signatures) as List).cast<String>();
+
+      Object? error;
+      try {
+        await _photo.submitOfflinePhotos(
+          shiftId: shiftId,
+          nonceValue: row.nonceValue,
+          filePaths: paths,
+          signatures: sigs,
+          capturedAt: row.capturedAt,
+          ntpReference: row.ntpReference,
+          elapsedSeconds: row.elapsedSeconds,
+          // Re-send the exact lat/lng strings the signature was computed over.
+          latitude: row.latitude?.toString() ?? '',
+          longitude: row.longitude?.toString() ?? '',
+        );
+      } catch (e) {
+        error = e;
+      }
+
+      switch (classifyFlush(error).action) {
+        case FlushAction.success:
+        case FlushAction.drop:
+          await _discardPhoto(row); // also deletes the durable files
+        case FlushAction.retry:
+          final next = nowMs + backoffDelay(row.attempts).inMilliseconds;
+          await _db.bumpPhoto(row.id, next);
+      }
+    }
+  }
+
+  /// Deletes a photo row's durable files, then the row. Best-effort on the files.
+  Future<void> _discardPhoto(PhotoQueueData row) async {
+    try {
+      for (final path in (jsonDecode(row.filePaths) as List).cast<String>()) {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      }
+    } catch (_) {}
+    await _db.deletePhoto(row.id);
   }
 }
 

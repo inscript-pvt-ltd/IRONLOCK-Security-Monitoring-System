@@ -1,4 +1,8 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guardmonitor/data/offline_queue_db.dart';
@@ -7,18 +11,27 @@ import 'package:guardmonitor/services/sync_flush_service.dart';
 /// Builds a Dio whose every request is short-circuited: it records the posted
 /// `pings` (GPS) and request paths, and either resolves 200 or rejects with
 /// [failStatus]/[failCode].
-({Dio dio, List<List<dynamic>> posted, List<String> paths}) _fakeDio({
+({
+  Dio dio,
+  List<List<dynamic>> posted,
+  List<String> paths,
+  List<Map<String, String>> forms,
+}) _fakeDio({
   int? failStatus,
   String? failCode,
 }) {
   final posted = <List<dynamic>>[];
   final paths = <String>[];
+  final forms = <Map<String, String>>[];
   final dio = Dio();
   dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
     paths.add(options.path);
     final data = options.data;
     if (data is Map && data['pings'] is List) {
       posted.add(data['pings'] as List);
+    }
+    if (data is FormData) {
+      forms.add({for (final e in data.fields) e.key: e.value});
     }
     if (failStatus != null) {
       handler.reject(DioException(
@@ -44,7 +57,31 @@ import 'package:guardmonitor/services/sync_flush_service.dart';
       ));
     }
   }));
-  return (dio: dio, posted: posted, paths: paths);
+  return (dio: dio, posted: posted, paths: paths, forms: forms);
+}
+
+/// Writes a real temp JPEG and queues a 1-image offline photo row referencing it.
+Future<({int id, String path})> _seedPhoto(
+  OfflineQueueDb db, {
+  String signature = 'STORED_SIG',
+  String? ntpReference = '2026-06-30T10:00:00.000Z',
+  String capturedAt = '2026-06-30T10:00:00.000Z',
+  int createdAt = 0,
+}) async {
+  final file = File(
+      '${Directory.systemTemp.path}/qphoto_${DateTime.now().microsecondsSinceEpoch}.jpg');
+  await file.writeAsBytes([1, 2, 3, 4]);
+  final id = await db.enqueuePhoto(PhotoQueueCompanion.insert(
+    shiftId: 's1',
+    nonceValue: 'POOL_NONCE',
+    filePaths: jsonEncode([file.path]),
+    signatures: jsonEncode([signature]),
+    ntpReference: Value(ntpReference),
+    elapsedSeconds: 0,
+    capturedAt: capturedAt,
+    createdAt: createdAt,
+  ));
+  return (id: id, path: file.path);
 }
 
 Future<void> _seedGps(OfflineQueueDb db, int n) async {
@@ -176,6 +213,60 @@ void main() {
       final svc = SyncFlushService(db, f.dio, () => null);
       await svc.flush();
       expect(await db.dueWakefulness(_farFuture), isEmpty);
+    });
+  });
+
+  group('photo flush', () {
+    test('re-sends the STORED signature + nonce + ntp_reference verbatim',
+        () async {
+      final seeded = await _seedPhoto(db, signature: 'SIG_ABC');
+      final f = _fakeDio();
+      final svc = SyncFlushService(db, f.dio, () => 's1');
+      await svc.flush();
+
+      expect(f.paths.any((p) => p.contains('/shifts/s1/photos')), isTrue);
+      final form = f.forms.single;
+      expect(form['signature'], 'SIG_ABC',
+          reason: 'signature must NOT be recomputed');
+      expect(form['nonce_value'], 'POOL_NONCE');
+      expect(form['ntp_reference'], '2026-06-30T10:00:00.000Z');
+      expect(form['captured_at'], '2026-06-30T10:00:00.000Z');
+      expect(form.containsKey('request_id'), isFalse,
+          reason: 'offline photos omit request_id');
+      // Dequeued + durable file cleaned up.
+      expect(await db.duePhotos('s1', _farFuture), isEmpty);
+      expect(await File(seeded.path).exists(), isFalse);
+    });
+
+    test('NONCE_ALREADY_USED (422 PHOTO_REJECTED) → success, dequeued',
+        () async {
+      await _seedPhoto(db);
+      final dio = Dio();
+      dio.interceptors.add(InterceptorsWrapper(onRequest: (o, h) {
+        h.reject(DioException(
+          requestOptions: o,
+          response: Response(requestOptions: o, statusCode: 422, data: {
+            'error': {
+              'code': 'PHOTO_REJECTED',
+              'details': {'reason': 'NONCE_ALREADY_USED'}
+            }
+          }),
+          type: DioExceptionType.badResponse,
+        ));
+      }));
+      final svc = SyncFlushService(db, dio, () => 's1');
+      await svc.flush();
+      expect(await db.duePhotos('s1', _farFuture), isEmpty);
+    });
+
+    test('transient 5xx keeps the row and bumps attempts', () async {
+      await _seedPhoto(db);
+      final svc = SyncFlushService(db, _fakeDio(failStatus: 503).dio, () => 's1');
+      await svc.flush();
+      expect(await db.duePhotos('s1', DateTime.now().millisecondsSinceEpoch),
+          isEmpty);
+      final all = await db.duePhotos('s1', _farFuture);
+      expect(all.single.attempts, 1);
     });
   });
 
