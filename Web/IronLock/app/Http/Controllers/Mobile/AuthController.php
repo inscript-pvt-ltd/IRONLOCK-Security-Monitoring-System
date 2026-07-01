@@ -42,9 +42,8 @@ class AuthController extends Controller
     public function login(Request $request): JsonResponse
     {
         \Log::info('Mobile Login Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->except('password'),
-            'ip'      => $request->ip(),
+            'body' => $request->except('password'),
+            'ip'   => $request->ip(),
         ]);
 
         $validator = Validator::make($request->all(), [
@@ -112,9 +111,8 @@ class AuthController extends Controller
     public function refresh(Request $request): JsonResponse
     {
         \Log::info('Mobile Refresh Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         $validator = Validator::make($request->all(), [
@@ -183,9 +181,8 @@ class AuthController extends Controller
     public function logout(Request $request): JsonResponse
     {
         \Log::info('Mobile Logout Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         $guard = $this->currentGuard($request);
@@ -203,9 +200,8 @@ class AuthController extends Controller
     public function me(Request $request): JsonResponse
     {
         \Log::info('Mobile Me Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         return $this->apiSuccess(['guard' => $this->guardPayload($this->currentGuard($request))]);
@@ -224,9 +220,8 @@ class AuthController extends Controller
     public function shiftAccess(Request $request): JsonResponse
     {
         \Log::info('Mobile Shift Access Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->except('token'),
-            'ip'      => $request->ip(),
+            'body' => $request->except('token'),
+            'ip'   => $request->ip(),
         ]);
 
         $validator = Validator::make($request->all(), [

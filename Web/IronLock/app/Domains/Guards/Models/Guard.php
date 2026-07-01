@@ -52,6 +52,7 @@ class Guard extends Authenticatable
         'push_token_platform',
         'hire_date',
         'employment_status',
+        'erased_at',
         'status',
         'created_by',
     ];
@@ -80,6 +81,7 @@ class Guard extends Authenticatable
             'hire_date' => 'date',
             'account_locked_at' => 'datetime',
             'last_login_at' => 'datetime',
+            'erased_at' => 'datetime',
             'password' => 'hashed',
             'failed_login_count' => 'integer',
         ];
@@ -91,6 +93,25 @@ class Guard extends Authenticatable
     public function isLocked(): bool
     {
         return !is_null($this->account_locked_at);
+    }
+
+    /**
+     * Whether this guard's PII has been erased under GDPR right-to-erasure
+     * (identity redacted; audit trail preserved). @see GuardErasureService.
+     */
+    public function isErased(): bool
+    {
+        return $this->erased_at !== null;
+    }
+
+    /**
+     * Exclude GDPR-erased guards. Erased records are anonymised tombstones kept
+     * only to keep historical audit rows FK-valid — they must never appear in
+     * scheduling, rosters or SIA/expiry checks.
+     */
+    public function scopeNotErased($query)
+    {
+        return $query->whereNull('erased_at');
     }
 
     /**

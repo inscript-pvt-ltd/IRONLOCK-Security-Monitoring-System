@@ -409,6 +409,40 @@ class GuardController extends Controller
     }
 
     /**
+     * GDPR right-to-erasure (Phase 8 · SEC-004) — anonymise a guard's PII while
+     * preserving the append-only audit trail.
+     *
+     * Unlike destroy() (a hard delete), erase() redacts identity in place so the
+     * historical shift_events / alerts / evidence / reports that reference this
+     * guard stay intact and FK-valid. The heavy lifting is in
+     * GuardErasureService; this only authorises, delegates and audits.
+     */
+    public function erase(Request $request, Guard $guard, \App\Domains\Guards\Services\GuardErasureService $erasure)
+    {
+        // Capture the (pre-redaction) name for the audit log + response message.
+        $guardName = trim("{$guard->first_name} {$guard->last_name}");
+
+        $result = $erasure->erase($guard);
+
+        if (!$result['success']) {
+            return response()->json(['success' => false, 'error' => $result['error']], 422);
+        }
+
+        $this->logGuardAction('erased', $guard, [
+            'erasure_reason' => 'GDPR right-to-erasure request',
+            'erased_by' => session('admin_id'),
+            'personal_data_redacted' => true,
+            'audit_trails_preserved' => true,
+            'erasure_timestamp' => now()->toISOString(),
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => "{$guardName}'s personal data has been erased. The audit trail is preserved.",
+        ]);
+    }
+
+    /**
      * Validate guard input.
      */
     private function validateGuard(Request $request, ?string $guardId = null): \Illuminate\Validation\Validator

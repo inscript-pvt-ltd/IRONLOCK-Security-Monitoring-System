@@ -603,7 +603,7 @@
                                         @else
                                             <button class="btn-sm btn-secondary-sm" onclick="toggleGuardStatus('{{ $guard->id }}', 'activate')">Activate</button>
                                         @endif
-                                        <button class="btn-sm btn-danger-sm" onclick="deleteGuard('{{ $guard->id }}', '{{ $guard->first_name }} {{ $guard->last_name }}')">Delete</button>
+                                        <button class="btn-sm btn-danger-sm" onclick="deleteGuard('{{ $guard->id }}', '{{ $guard->first_name }} {{ $guard->last_name }}')">Erase</button>
                                     </div>
                                 </td>
                                 <td>
@@ -829,21 +829,21 @@
 <!-- Delete Confirmation Modal -->
 <div class="delete-confirmation" id="deleteConfirmation">
     <div class="delete-modal">
-        <h3>⚠️ Delete Guard Account</h3>
-        <p>You are about to <strong>permanently delete</strong> the guard account for:</p>
+        <h3>⚠️ Erase Guard Personal Data</h3>
+        <p>You are about to <strong>erase the personal data</strong> (GDPR right to erasure) for:</p>
         <p style="text-align: center; font-weight: bold; color: var(--premium-gold);" id="deleteGuardName">-</p>
 
         <div class="warning">
             <strong>GDPR Compliance Notice:</strong><br>
-            • Personal data will be permanently removed<br>
-            • Audit trails (shifts, alerts, compliance records) will be preserved<br>
-            • This action cannot be undone<br>
-            • Use "Deactivate" if you want to retain the account
+            • Personal data (name, email, phone, SIA number) will be redacted<br>
+            • Audit trails (shifts, alerts, evidence, reports) are preserved<br>
+            • The account is deactivated and can no longer sign in<br>
+            • This action cannot be undone — use "Deactivate" to retain the account
         </div>
 
         <div class="delete-actions">
             <button type="button" class="delete-btn cancel" onclick="cancelDelete()">Cancel</button>
-            <button type="button" class="delete-btn confirm" onclick="confirmDelete()">DELETE PERMANENTLY</button>
+            <button type="button" class="delete-btn confirm" onclick="confirmDelete()">ERASE PERSONAL DATA</button>
         </div>
     </div>
 </div>
@@ -1404,13 +1404,17 @@
 
         const confirmBtn = document.querySelector('.delete-btn.confirm');
         const originalText = confirmBtn.textContent;
-        confirmBtn.textContent = 'DELETING...';
+        confirmBtn.textContent = 'ERASING...';
         confirmBtn.disabled = true;
 
-        fetch(`/admin/guards/${guardToDelete}`, {
-            method: 'DELETE',
+        // GDPR right-to-erasure: anonymise PII in place, preserve the audit trail
+        // (Phase 8). Distinct from a hard delete — the row is kept as a redacted
+        // tombstone so historical shift/alert/evidence records stay FK-valid.
+        fetch(`/admin/guards/${guardToDelete}/erase`, {
+            method: 'POST',
             headers: {
                 'Accept': 'application/json',
+                'Content-Type': 'application/json',
                 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
             }
         })

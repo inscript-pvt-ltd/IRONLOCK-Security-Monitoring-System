@@ -36,7 +36,6 @@ class PhotoController extends Controller
     {
         \Log::info('Mobile Photo Pending Request', [
             'shift_id' => $id,
-            'headers'  => $request->headers->all(),
             'body'     => $request->all(),
             'ip'       => $request->ip(),
         ]);
@@ -78,7 +77,6 @@ class PhotoController extends Controller
     {
         \Log::info('Mobile Photo Upload Request', [
             'shift_id' => $id,
-            'headers'  => $request->headers->all(),
             'body'     => $request->except('photo'),
             'ip'       => $request->ip(),
         ]);

@@ -65,6 +65,9 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'show'])->name('guards.show'); // AJAX endpoint
         Route::put('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'update'])->name('guards.update');
         Route::patch('guards/{guard}/toggle-status', [App\Http\Controllers\Admin\GuardController::class, 'toggleStatus'])->name('guards.toggle-status');
+        // GDPR right-to-erasure (Phase 8): anonymise PII, preserve the audit
+        // trail (distinct from destroy(), which hard-deletes the row).
+        Route::post('guards/{guard}/erase', [App\Http\Controllers\Admin\GuardController::class, 'erase'])->name('guards.erase');
         Route::delete('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'destroy'])->name('guards.destroy');
 
         // Site Management routes - Phase 3: Core Location System
@@ -118,6 +121,25 @@ Route::prefix('admin')->name('admin.')->group(function () {
         // Record an admin's manual review (approve/reject) of a stored photo. The
         // decision feeds the compliance summary and is pushed/polled to the guard.
         Route::post('photos/{evidence}/review', [App\Http\Controllers\Admin\ShiftController::class, 'reviewPhoto'])->name('photos.review');
+
+        // Reports & Exports (Phase 8 · D-09). Static/action routes before the
+        // {report} parameter so `generate` isn't captured as a report id. Files
+        // live on the private `reports` disk and are streamed only through the
+        // admin-gated download route — no path is ever exposed to a view.
+        Route::get('reports', [App\Http\Controllers\Admin\ReportController::class, 'index'])->name('reports.index');
+        Route::post('reports/generate', [App\Http\Controllers\Admin\ReportController::class, 'generate'])->name('reports.generate');
+        // Bulk delete (POST, static) before the {report} wildcard so it is not
+        // read as a report id.
+        Route::post('reports/bulk-delete', [App\Http\Controllers\Admin\ReportController::class, 'bulkDestroy'])->name('reports.bulk-delete');
+        // Specific action routes before the bare {report} page route so the id
+        // wildcard cannot swallow them.
+        Route::get('reports/{report}/download', [App\Http\Controllers\Admin\ReportController::class, 'download'])->name('reports.download');
+        // The on-screen report page (the "slug" page) generation redirects to.
+        Route::get('reports/{report}', [App\Http\Controllers\Admin\ReportController::class, 'show'])->name('reports.show');
+        // Delete a single persisted report (row + private file).
+        Route::delete('reports/{report}', [App\Http\Controllers\Admin\ReportController::class, 'destroy'])->name('reports.destroy');
+        // One-click Shift Welfare Report from the Shift Detail page (Component D).
+        Route::post('shifts/{shift}/report', [App\Http\Controllers\Admin\ReportController::class, 'shiftReport'])->name('shifts.report');
 
         // Backup management (admin-only): list monthly evidence archives for the
         // sidebar Backup modal and download a month's ZIP. Generation is dynamic

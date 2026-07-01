@@ -79,7 +79,6 @@ class WakefulnessController extends Controller
     {
         \Log::info('Mobile Wakefulness Received Request', [
             'check_id' => $checkId,
-            'headers'  => $request->headers->all(),
             'body'     => $request->all(),
             'ip'       => $request->ip(),
         ]);
