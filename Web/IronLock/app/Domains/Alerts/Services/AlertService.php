@@ -22,8 +22,10 @@ class AlertService
     /**
      * Create an alert. Callers pass the type-specific fields (type, severity,
      * title, description); guard/shift/status/raised_at are defaulted here.
+     * $shiftId is nullable for guard-level alerts with no shift context (e.g.
+     * SIA licence expiry).
      */
-    public function createAlert(string $guardId, string $shiftId, array $data): Alert
+    public function createAlert(string $guardId, ?string $shiftId, array $data): Alert
     {
         return Alert::create(array_merge([
             'guard_id' => $guardId,
@@ -31,6 +33,53 @@ class AlertService
             'status' => 'OPEN',
             'raised_at' => now(),
         ], $data));
+    }
+
+    /**
+     * Raise an SIA licence-expiry alert for a guard (REP-004 · Phase 8). A
+     * guard-level alert (no shift): WARNING while the licence is within the
+     * warning window, CRITICAL once it has expired (the guard cannot legally
+     * work). Idempotent per guard per day — if an SIA alert was already raised
+     * for this guard today, returns null rather than re-raising, so a daily
+     * schedule cannot spam the feed.
+     */
+    public function createSiaExpiryAlert(Guard $guard): ?Alert
+    {
+        $expiry = $guard->sia_licence_expiry;
+        if ($expiry === null) {
+            return null;
+        }
+
+        // Per-day idempotency.
+        $alreadyToday = Alert::where('guard_id', $guard->id)
+            ->where('type', 'SIA_EXPIRY_WARNING')
+            ->where('raised_at', '>=', Carbon::now()->startOfDay())
+            ->exists();
+        if ($alreadyToday) {
+            return null;
+        }
+
+        $name = trim($guard->first_name . ' ' . $guard->last_name) ?: 'Guard';
+        $expiryFmt = $expiry->format('d M Y');
+        $expired = $expiry->lessThan(Carbon::now());
+
+        if ($expired) {
+            $severity = 'CRITICAL';
+            $title = "SIA Licence Expired — {$name}";
+            $description = "{$name}'s SIA licence expired on {$expiryFmt}. The guard cannot legally work until it is renewed — remove from scheduling and arrange renewal.";
+        } else {
+            $days = (int) ceil(Carbon::now()->floatDiffInDays($expiry));
+            $severity = 'WARNING';
+            $title = "SIA Licence Expiring — {$name}";
+            $description = "{$name}'s SIA licence expires on {$expiryFmt} ({$days} day" . ($days === 1 ? '' : 's') . " remaining). Arrange renewal before it lapses.";
+        }
+
+        return $this->createAlert($guard->id, null, [
+            'type' => 'SIA_EXPIRY_WARNING',
+            'severity' => $severity,
+            'title' => $title,
+            'description' => $description,
+        ]);
     }
 
     /**

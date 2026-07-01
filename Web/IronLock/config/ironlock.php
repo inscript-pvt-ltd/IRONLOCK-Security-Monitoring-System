@@ -208,4 +208,35 @@ return [
 
     'gps_backfill_threshold_seconds' => (int) env('IRONLOCK_GPS_BACKFILL_THRESHOLD', 60),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Data retention (Phase 8 · SEC-004)
+    |--------------------------------------------------------------------------
+    |
+    | Horizons, in days, after which retention:sweep prunes regenerable /
+    | past-policy data. Each value is a policy hook: 0 means "keep indefinitely"
+    | (the sweep skips that category), so nothing is ever purged unless a horizon
+    | is explicitly configured. The sweep NEVER touches the append-only audit
+    | trail (shift_events) — that history is legally required and immutable.
+    |
+    | - report_days: generated PDF/CSV reports (Reports → Previous Exports).
+    |   Safe to prune because any report can be regenerated from source data.
+    |   Default 365.
+    |
+    | - alert_days: acknowledged (closed) alerts older than the horizon. OPEN
+    |   alerts are never pruned. Default 0 (disabled).
+    |
+    | - evidence_days: raw photo evidence. Default 0 (disabled) — evidence is
+    |   BS 8484 material and its archival is already governed by the monthly
+    |   backup lifecycle (backup_retention_days); only set this if a hard
+    |   evidence-deletion policy is required.
+    |
+    */
+
+    'retention' => [
+        'report_days' => (int) env('IRONLOCK_RETENTION_REPORT_DAYS', 365),
+        'alert_days' => (int) env('IRONLOCK_RETENTION_ALERT_DAYS', 0),
+        'evidence_days' => (int) env('IRONLOCK_RETENTION_EVIDENCE_DAYS', 0),
+    ],
+
 ];

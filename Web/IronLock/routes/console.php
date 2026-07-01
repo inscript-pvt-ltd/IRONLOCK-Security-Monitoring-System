@@ -43,3 +43,13 @@ Schedule::command('wakefulness:timeout-sweep')->everyMinute()->withoutOverlappin
 // Remove monthly evidence backups whose 30-day retention has elapsed (deletes
 // the backup record + cached ZIP only — never the original evidence). Daily.
 Schedule::command('ironlock:backups-cleanup')->dailyAt('03:30')->withoutOverlapping();
+
+// Raise SIA licence-expiry alerts (Phase 8 · REP-004) for active guards whose
+// licence is expired or expiring within the warning window. Idempotent per
+// guard per day, so a daily run never spams the Alert Feed.
+Schedule::command('sia:check-expiry')->dailyAt('06:00')->withoutOverlapping();
+
+// Prune regenerable/past-policy data (generated reports, closed alerts, and —
+// only if explicitly configured — raw evidence) past the retention horizons in
+// config('ironlock.retention'). NEVER touches the append-only shift_events.
+Schedule::command('retention:sweep')->dailyAt('04:00')->withoutOverlapping();

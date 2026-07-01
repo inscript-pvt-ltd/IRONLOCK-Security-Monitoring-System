@@ -18,6 +18,7 @@ use App\Domains\Notifications\Services\PhotoPushNotifier;
 use App\Domains\Wakefulness\Models\WakefulnessCheck;
 use App\Domains\Wakefulness\Services\WakefulnessService;
 use App\Domains\Authentication\Services\ShiftAccessLinkService;
+use App\Domains\Compliance\Services\ComplianceCalculator;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -241,7 +242,7 @@ class ShiftController extends Controller
      * wakefulness, photo and alert events arrive in later roadmap phases, so the
      * view shows placeholders for those sections.
      */
-    public function timeline(string $id)
+    public function timeline(string $id, ComplianceCalculator $compliance)
     {
         try {
             $shift = Shift::with(['assignedGuard', 'site', 'geofence', 'creator', 'lateAuthorizer'])
@@ -304,16 +305,9 @@ class ShiftController extends Controller
             // (reviews can be recorded after the shift ends, so the stored
             // compliance snapshot may lag; the panel always shows current state).
             // Counts are image-level now that a request can hold multiple photos.
-            $allEvidences = $photoRequests->flatMap(fn ($r) => $r['evidences']);
-            $photoSummary = [
-                'total' => $photoRequests->count(),                                  // requests
-                'fulfilled' => $photoRequests->where('status', PhotoRequest::STATUS_FULFILLED)->count(),
-                'images' => $allEvidences->count(),                                  // photos uploaded
-                'reviewed' => $allEvidences->whereNotNull('review_decision')->count(),
-                'approved' => $allEvidences->where('review_decision', PhotoReview::DECISION_APPROVED)->count(),
-                'rejected' => $allEvidences->where('review_decision', PhotoReview::DECISION_REJECTED)->count(),
-            ];
-            $photoSummary['unreviewed'] = max(0, $photoSummary['images'] - $photoSummary['reviewed']);
+            // Shared with the generated reports via ComplianceCalculator so the
+            // panel and REP-001/REP-002 can never diverge (Phase 8).
+            $photoSummary = $compliance->photoSummary($shift);
 
             // Wakefulness verification (Phase 5): every code-challenge for this
             // shift, newest first. A null result is the still-pending state; the
@@ -333,12 +327,8 @@ class ShiftController extends Controller
             // Wakefulness tally for the Compliance Summary panel — computed live
             // (a pending check can resolve via the timeout sweep after this load).
             // No review step here: the result is the server's own CONFIRMED/FAILED.
-            $wakefulnessSummary = [
-                'total' => $wakefulnessChecks->count(),
-                'confirmed' => $wakefulnessChecks->where('result', WakefulnessCheck::RESULT_CONFIRMED)->count(),
-                'failed' => $wakefulnessChecks->where('result', WakefulnessCheck::RESULT_FAILED)->count(),
-                'pending' => $wakefulnessChecks->whereNull('result')->count(),
-            ];
+            // Shared with the generated reports via ComplianceCalculator (Phase 8).
+            $wakefulnessSummary = $compliance->wakefulnessSummary($shift);
 
             return view('admin.shifts.timeline', compact('shift', 'events', 'photoRequests', 'photoSummary', 'wakefulnessChecks', 'wakefulnessSummary'));
         } catch (ModelNotFoundException $e) {

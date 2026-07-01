@@ -35,9 +35,8 @@ class ShiftController extends Controller
     public function current(Request $request): JsonResponse
     {
         \Log::info('Mobile Shifts Current Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         $guard = $this->currentGuard($request);
@@ -71,9 +70,8 @@ class ShiftController extends Controller
     public function start(Request $request, string $id): JsonResponse
     {
         \Log::info('Mobile Shift Start Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         $guard = $this->currentGuard($request);
@@ -170,9 +168,8 @@ class ShiftController extends Controller
     public function end(Request $request, string $id): JsonResponse
     {
         \Log::info('Mobile Shift End Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         $guard = $this->currentGuard($request);
@@ -260,9 +257,8 @@ class ShiftController extends Controller
     public function earlyEndRequest(Request $request, string $id): JsonResponse
     {
         \Log::info('Mobile Early End Request', [
-            'headers' => $request->headers->all(),
-            'body'    => $request->all(),
-            'ip'      => $request->ip(),
+            'body' => $request->all(),
+            'ip'   => $request->ip(),
         ]);
 
         $guard = $this->currentGuard($request);

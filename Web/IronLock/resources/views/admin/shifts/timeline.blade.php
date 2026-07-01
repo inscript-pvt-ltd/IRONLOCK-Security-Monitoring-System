@@ -231,6 +231,18 @@
     .btn-request-photo:hover:not(:disabled) { background: var(--premium-gold); color: #1a1407; }
     .btn-request-photo:disabled { opacity: 0.5; cursor: default; }
 
+    /* Generate Report (Phase 8 · Component D) — full-width action under the
+       Wakefulness Verification tally in the Compliance Summary side panel. */
+    .btn-generate-report {
+        width: 100%; margin-top: 16px; padding: 9px 14px; border-radius: 5px;
+        font-size: 12px; font-weight: bold; cursor: pointer;
+        background: var(--premium-gold); color: #1a1407; border: 1px solid var(--premium-gold);
+        transition: all 0.2s ease;
+    }
+    .btn-generate-report:hover:not(:disabled) { filter: brightness(1.08); }
+    .btn-generate-report:disabled { opacity: 0.55; cursor: default; }
+    .generate-report-hint { margin-top: 5px; font-size: 10px; color: var(--text-muted, #7A828E); text-align: center; }
+
     .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
     .photo-card {
         position: relative;
@@ -876,6 +888,15 @@
             @else
                 <div class="placeholder-note">No wakefulness checks have been issued for this shift.</div>
             @endif
+
+            {{-- Generate Report (Phase 8 · Component D) — one-click Shift Welfare
+                 Report (REP-002) for this shift. Builds + persists a PDF and
+                 downloads it; also lands in Reports → Previous Exports. --}}
+            <button type="button" id="btn-generate-report" class="btn-generate-report"
+                    data-shift-id="{{ $shift->id }}">
+                ⤓ Generate Report
+            </button>
+            <div class="generate-report-hint">Shift Welfare Report (PDF)</div>
         </div>
     </div>
 </div>
@@ -1078,6 +1099,64 @@
             setTimeout(function () { window.location.reload(); }, 1200);
         } catch (e) {
             console.error('Wakefulness request error:', e);
+            alert('Something went wrong. Please try again.');
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    });
+})();
+
+// ── Generate Shift Welfare Report (Phase 8 · Component D) ─────────────
+// POSTs to build + persist the shift's Welfare Report, shows a 0→100% progress
+// count, then opens its on-screen report page (download PDF/CSV/evidence there).
+// The report also appears in Reports → Previous Exports.
+(function () {
+    var btn = document.getElementById('btn-generate-report');
+    if (!btn) return;
+
+    var token = document.querySelector('meta[name="csrf-token"]');
+    token = token ? token.content : '';
+
+    btn.addEventListener('click', async function () {
+        var shiftId = btn.dataset.shiftId;
+        var original = btn.textContent;
+        btn.disabled = true;
+
+        // Count a progress percentage up toward 90% while the report builds.
+        var pct = 0;
+        btn.textContent = 'Generating… 0%';
+        var timer = setInterval(function () {
+            pct += Math.max(1, (88 - pct) * 0.12);
+            if (pct >= 90) pct = 90;
+            btn.textContent = 'Generating… ' + Math.round(pct) + '%';
+        }, 120);
+
+        try {
+            var res = await fetch('/admin/shifts/' + shiftId + '/report', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': token
+                }
+            });
+            var data = await res.json();
+
+            if (!data.success || !data.report) {
+                clearInterval(timer);
+                alert(data.error || 'Unable to generate the report.');
+                btn.disabled = false;
+                btn.textContent = original;
+                return;
+            }
+
+            // Complete the bar, then open the on-screen report page.
+            clearInterval(timer);
+            btn.textContent = 'Generated ✓ 100%';
+            setTimeout(function () { window.location = data.report.view_url; }, 350);
+        } catch (e) {
+            clearInterval(timer);
+            console.error('Report generation error:', e);
             alert('Something went wrong. Please try again.');
             btn.disabled = false;
             btn.textContent = original;

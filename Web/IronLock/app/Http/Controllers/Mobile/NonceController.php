@@ -29,7 +29,6 @@ class NonceController extends Controller
     {
         \Log::info('Mobile Nonce Prefetch Request', [
             'shift_id' => $id,
-            'headers'  => $request->headers->all(),
             'body'     => $request->all(),
             'ip'       => $request->ip(),
         ]);
