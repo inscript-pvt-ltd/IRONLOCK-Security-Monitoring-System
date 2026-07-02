@@ -39,7 +39,7 @@
                                 $md = is_array($e['metadata']) ? $e['metadata'] : [];
                                 if (!$includes['hashes']) { unset($md['file_hash'], $md['sha256'], $md['sha256_hash']); }
                             @endphp
-                            {{ empty($md) ? '—' : json_encode($md, JSON_UNESCAPED_SLASHES) }}
+                            {{ \App\Domains\Reports\Support\MetadataFormatter::humanize($md) }}
                         </td>
                     </tr>
                 @endforeach

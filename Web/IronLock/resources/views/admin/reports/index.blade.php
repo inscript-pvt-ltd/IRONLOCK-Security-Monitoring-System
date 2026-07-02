@@ -12,7 +12,7 @@
         'compliance_summary' => ['fields' => ['date_range', 'guard', 'site'],      'includes' => []],
         'alert_history'      => ['fields' => ['date_range', 'guard', 'site'],      'includes' => []],
         'sia_licence_status' => ['fields' => [],                                   'includes' => []],
-        'shift_audit'        => ['fields' => ['shift'],                            'includes' => ['hashes']],
+        'shift_audit'        => ['fields' => ['shift'],                            'includes' => []],
         'wtr_compliance'     => ['fields' => ['guard_required', 'reference_date'], 'includes' => []],
     ];
 @endphp
@@ -188,11 +188,11 @@
                 <div class="includes-row">
                     <label class="include-toggle" data-include="nonce">
                         <span class="include-head"><input type="checkbox" id="inc_nonce"> Photo liveness proof</span>
-                        <span class="include-desc">The one-time code each photo answered — proof it was taken live, not a reused image.</span>
+                        <span class="include-desc">Adds a <strong>Liveness Proof</strong> result to each photo in the Photo Verification section — proof it was taken live on request, not a reused image.</span>
                     </label>
                     <label class="include-toggle" data-include="hashes">
-                        <span class="include-head"><input type="checkbox" id="inc_hashes"> Photo tamper-check</span>
-                        <span class="include-desc">A unique fingerprint for each photo, so you can prove it hasn't been edited.</span>
+                        <span class="include-head"><input type="checkbox" id="inc_hashes"> Image integrity check</span>
+                        <span class="include-desc">Adds an <strong>Image Integrity</strong> result under each photo in the Photo Verification section — a unique fingerprint proving the file hasn't been edited.</span>
                     </label>
                 </div>
             </div>

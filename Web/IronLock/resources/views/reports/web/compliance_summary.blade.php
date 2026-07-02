@@ -4,6 +4,14 @@
     $totals = $data['totals'];
     $pct = fn ($v) => $v === null ? '—' : number_format((float) $v, 1) . '%';
     $yn = fn ($v) => $v === null ? '—' : ($v ? 'Y' : 'N');
+    // Decimal hours → readable "Xh Ym" (the CSV keeps the numeric value).
+    $hm = function ($h) {
+        if ($h === null || $h === '') {
+            return '—';
+        }
+        $m = (int) round((float) $h * 60);
+        return intdiv($m, 60) . 'h ' . ($m % 60) . 'm';
+    };
 @endphp
 
 @section('report-body')
@@ -32,7 +40,7 @@
                                 <td>{{ $r['date'] ?? '—' }}</td>
                                 <td>{{ $r['guard'] }}</td>
                                 <td>{{ $r['site'] }}</td>
-                                <td>{{ $r['actual_hours'] !== null ? number_format((float) $r['actual_hours'], 2) : '—' }}</td>
+                                <td>{{ $hm($r['actual_hours']) }}</td>
                                 <td>
                                     @if ($r['wtr_violations'] > 0)<span class="wf-badge warn">{{ $r['wtr_violations'] }}</span>
                                     @else<span class="wf-badge ok">OK</span>@endif
