@@ -5,6 +5,30 @@ Each entry: what changed, current state, what's verified, and what's still open.
 
 ---
 
+## 2026-06-30 (cont. 2) — Phase 7 offline sync: CODE-COMPLETE + docs consolidated
+
+Phase 7 (offline capture → flush-on-reconnect) is now **feature-complete in code and unit-tested**
+across all three capabilities. Verified against **all three backend contracts** (the Flutter
+responsibilities doc, `PHASE_7_SYNC_INTEGRITY.md`, and the API guide) — every §5 Definition-of-Done
+item that's implementable in code is done; the retry table matches `classifyFlush` row-for-row.
+**143 tests pass · `flutter analyze` clean.** 8 commits on `saduka` (`110f64e`…`e18a8dd`).
+
+**The single source of truth for what's left is now `guardmonitor/docs/PHASE_7_REMAINING_WORK.md`.**
+Short version — everything remaining is **on-device / dashboard verification** (not new code):
+- 🔴 On-device: SQLCipher opens on Android+iOS (native-assets build); force a shift offline >60 s →
+  reconnect → confirm GPS batch flush + the dashboard "offline band" (with Jerry); offline
+  wakefulness replay + offline scheduled photo land.
+- 🔴 EXIF↔NTP ≤30 s on a real camera capture (stamp EXIF ourselves if the plugin doesn't).
+- 🟡 Confirm `elapsed_seconds:0` projection with Jerry; honor `max_photos_per_capture`; (pre-existing)
+  iOS APNs, Universal Links, cert pinning, obfuscation, prod-host confirm.
+
+**Docs touched this session:** `PHASE_7_IMPLEMENTATION_PLAN.md` (status/DoD),
+`PHASE_7_OFFLINE_PHOTO_TRIGGER_QUESTION.md` (RESOLVED → Option A),
+`PHASE_7_REMAINING_WORK.md` (new), this HANDOFF, and `CLAUDE.md` (architecture map + test count +
+an Offline Sync subsection). Full per-stage detail in the two entries below.
+
+---
+
 ## 2026-06-30 (cont.) — Phase 7 Stage 7: offline-photo trigger (schedule) wired
 
 Backend answered the one open Phase 7 question (`PHASE_7_OFFLINE_PHOTO_TRIGGER_QUESTION.md`):

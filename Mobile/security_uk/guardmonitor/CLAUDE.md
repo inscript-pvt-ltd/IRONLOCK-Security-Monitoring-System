@@ -31,7 +31,9 @@ curl -X POST http://127.0.0.1:8000/admin/trigger-welfare
 curl -X POST http://127.0.0.1:8000/admin/trigger-photo
 ```
 
-Quality gates before any change is "done": `flutter analyze` (zero issues) **and** `flutter test` (currently 12 passing — models, providers, login widget). Run both.
+Quality gates before any change is "done": `flutter analyze` (zero issues) **and** `flutter test` (currently **143 passing**). Run both.
+
+> **Phase 7 build note:** the offline queue is **Drift + SQLCipher**, and sqlite3 3.x selects the cipher engine via a build hook (`hooks.user_defines.sqlite3.source: sqlcipher` in `pubspec.yaml`). That needs native assets: run `flutter config --enable-native-assets` once, and build/test with it enabled. `test/data/cipher_probe_test.dart` fails loudly if the engine isn't SQLCipher.
 
 ## Architecture
 
@@ -42,6 +44,8 @@ lib/
   main.dart                    # ProviderScope root; auth-gated AnimatedSwitcher
   config/
     api_config.dart            # All endpoint paths (no secrets — the photo HMAC key is the per-login hmac_secret)
+  data/
+    offline_queue_db.dart      # Phase 7: Drift + SQLCipher encrypted queue (GPS/wakefulness/photo/nonce-pool) + .g.dart
   models/                      # Pure data classes with fromJson — no business logic
     current_shift_model.dart   # CurrentShiftModel + ShiftSiteModel/ShiftGeofenceModel
     api_response.dart          # ApiResponse<T> (success envelope) + ApiError
@@ -49,10 +53,11 @@ lib/
     app_providers.dart         # Barrel — re-exports the four files below (import this)
     auth_provider.dart         # AuthNotifier/authProvider + GuardProfile/guardProfileProvider
     shift_provider.dart        # CurrentShift*, Shift*
-    photo_provider.dart        # Photo*, PendingPhoto*
+    photo_provider.dart        # Photo*, PendingPhoto* (PendingPhotoState has a `scheduled` flag for offline)
+    photo_schedule_provider.dart # Phase 7: PhotoProvisioning + PhotoScheduleNotifier (offline-photo schedule)
     ui_providers.dart          # zone, zoneUpdatedAt, battery (real), privacy, activeTab
     alerts_provider.dart       # AlertsNotifier + AppAlert model
-    wakefulness_provider.dart  # WakefulnessNotifier — welfare check challenge FSM
+    wakefulness_provider.dart  # WakefulnessNotifier — welfare check challenge FSM (+ offline answer queueing)
   screens/
     login/login_screen.dart
     home/home_screen.dart      # Shift lifecycle UI; GPS zone stream listener
@@ -70,8 +75,14 @@ lib/
     gps_service.dart           # Background position stream (foreground service / iOS bg location); streams zone state; real battery in pings
     notification_service.dart  # Local scheduled "shift ended" reminder (flutter_local_notifications)
     device_info_service.dart   # Persisted device_id + device_name/platform/app_version
-    connectivity_service.dart  # connectivity_plus stream → isOnlineProvider
-    secure_storage_service.dart # Tokens, expires_at, email, device_id in Keychain/EncryptedPrefs
+    connectivity_service.dart  # connectivity_plus stream → isOnlineProvider + connectivityBoolStream()
+    secure_storage_service.dart # Tokens, expires_at, email, device_id, hmac_secret, wakefulness, photo schedule, db_cipher_key
+    # ── Phase 7 offline sync ──
+    sync_retry.dart            # classifyFlush() retry table (success/retry/drop) + backoffDelay()
+    sync_flush_service.dart    # SyncFlushService — single-flight flush on reconnect, order wakefulness→GPS→photos
+    nonce_pool_service.dart    # prefetch/draw OFFLINE_POOL nonces (POST /shifts/{id}/nonces/prefetch)
+    time_anchor_service.dart   # NTP anchor + monotonic clock → tamper-proof capture time + trustedNow()
+    offline_photo_service.dart # enqueueCapture: draw nonce → HMAC-sign → persist files → queue
   theme/
     responsive.dart            # ← MOST IMPORTANT — context.s() / context.sp()
 ```
@@ -164,6 +175,32 @@ Key behaviours:
 - Admin triggers: `POST /admin/trigger-welfare` and `POST /admin/trigger-photo` (root-level, no `/api/mobile/v1` prefix, no auth required)
 
 **After restarting the backend**, the app's cached token becomes invalid. The guard must sign out and back in.
+
+## Offline Sync (Phase 7)
+
+Offline captures are buffered in the encrypted `OfflineQueueDb` and drained to the **existing**
+idempotent endpoints on reconnect — there is **no** new "sync" endpoint and no client de-dup
+(re-send freely; the server returns `ALREADY_RESOLVED`/`NONCE_ALREADY_USED` on a dup). Contracts:
+`docs/PHASE_7_FLUTTER_OFFLINE_SYNC.md` + `docs/PHASE_7_SYNC_INTEGRITY.md`; plan +
+status: `docs/PHASE_7_IMPLEMENTATION_PLAN.md`; **what's left: `docs/PHASE_7_REMAINING_WORK.md`.**
+
+- **Queue** — `OfflineQueueDb` (Drift over SQLCipher). Cipher key in secure storage
+  (`db_cipher_key`), wiped on sign-out; a stale/undecryptable file is dropped on open.
+- **Flush** — `SyncFlushService` (`syncFlushServiceProvider`), started/stopped by the auth listener
+  in `main.dart`; single-flight, flushes on the offline→online edge + app-resume + backlog on start.
+  Order **wakefulness → GPS → photos**, oldest first. Per-item outcome runs through
+  `classifyFlush` (`sync_retry.dart`); retryable → backoff-bump, terminal 4xx → drop, capped at 12.
+- **GPS** — a ping the live POST can't deliver is enqueued (see `gps_service.dart`), flushed as one
+  `pings[]` batch (chunked ≤200).
+- **Wakefulness** — an offline TOTP answer that can't reach the server is enqueued
+  (`window_reference` preserved) and replayed via `WakefulnessService.submitOffline`.
+- **Photos (offline)** — driven by the **photo schedule** (`photos` block from `POST /start`, parsed
+  by `PhotoScheduleNotifier`). Fires **only when offline** (online → the server sends a
+  `PHOTO_REQUEST`); the home poll calls `checkSchedule(offline:)`. A due mark opens
+  `PhotoScreen.scheduled()` → `OfflinePhotoService.enqueueCapture` (pool nonce, no `request_id`).
+- **Time integrity** — never `DateTime.now()` as proof. `TimeAnchorService` projects an NTP anchor
+  by a monotonic `Stopwatch`; `trustedNow()` gates the schedule and `capture()` builds
+  `ntp_reference` — a changed device clock can't move either.
 
 ## Responsive System
 
