@@ -77,13 +77,16 @@
                         <td>{{ ucfirst($p['status']) }}</td>
                         <td>{{ count($p['images']) }}</td>
                     </tr>
-                    @if (!empty($includes['hashes']))
-                        @foreach ($p['images'] as $img)
-                            @if (!empty($img['sha256']))
-                                <tr><td colspan="6" class="muted" style="font-size:8px;">SHA-256: {{ $img['sha256'] }}</td></tr>
-                            @endif
-                        @endforeach
+                    @if (!empty($p['liveness']))
+                        <tr><td colspan="6" class="muted" style="font-size:8px;">Liveness proof: {{ $p['liveness'] }}</td></tr>
                     @endif
+                    @foreach ($p['images'] as $img)
+                        @if (!empty($img['integrity']))
+                            <tr><td colspan="6" class="muted" style="font-size:8px;">{{ $img['name'] }} — Image Integrity: {{ $img['integrity'] }}</td></tr>
+                        @elseif (!empty($img['sha256']))
+                            <tr><td colspan="6" class="muted" style="font-size:8px;">SHA-256: {{ $img['sha256'] }}</td></tr>
+                        @endif
+                    @endforeach
                 @endforeach
             </tbody>
         </table>

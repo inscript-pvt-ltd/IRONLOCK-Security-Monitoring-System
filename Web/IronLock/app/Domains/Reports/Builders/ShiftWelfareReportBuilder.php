@@ -117,6 +117,18 @@ class ShiftWelfareReportBuilder extends ReportBuilder
             if (!empty($p['submitted_at'])) {
                 $add('Photo', 'Request ' . $no . ' submitted', '', $p['submitted_at']);
             }
+            // Liveness proof + the raw SHA-256 fingerprints stay in the CSV (the
+            // machine-readable/forensic copy) even though the report page shows
+            // only the plain-language result. Both are toggle-gated by the composer.
+            if (!empty($p['liveness'])) {
+                $add('Photo', 'Request ' . $no . ' liveness proof', $p['liveness']);
+            }
+            foreach ($p['images'] ?? [] as $img) {
+                if (!empty($img['sha256'])) {
+                    $label = 'Request ' . $no . ' image hash' . (!empty($img['name']) ? ' (' . $img['name'] . ')' : '');
+                    $add('Photo', $label, $img['sha256']);
+                }
+            }
         }
 
         foreach ($s['alerts'] ?? [] as $a) {

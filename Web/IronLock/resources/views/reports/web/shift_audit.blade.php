@@ -41,7 +41,7 @@
                                 <td class="wf-mono">{!! $t($e['server_received_at']) !!}</td>
                                 <td>{{ $e['event_type'] }}</td>
                                 <td class="wf-mono">{!! $t($e['recorded_at']) !!}</td>
-                                <td style="font-size:11px;color:#888">{{ empty($md) ? '—' : json_encode($md, JSON_UNESCAPED_SLASHES) }}</td>
+                                <td style="font-size:11px;color:#888;word-break:break-word">{{ \App\Domains\Reports\Support\MetadataFormatter::humanize($md) }}</td>
                             </tr>
                         @endforeach
                     </tbody>

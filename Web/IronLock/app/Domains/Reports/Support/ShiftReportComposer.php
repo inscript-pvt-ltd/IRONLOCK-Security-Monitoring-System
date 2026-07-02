@@ -290,11 +290,26 @@ class ShiftReportComposer
                     'hmac' => 'Valid',
                     'exif' => in_array(\App\Domains\Photos\Models\PhotoEvidence::FLAG_TIMELINE_ANOMALY, $flags, true) ? 'Review' : 'Valid',
                     'nonce_value' => $includeNonce ? optional($r->nonce)->nonce_value : null,
+                    // Plain-language liveness result (only when the toggle is on): a
+                    // server-issued nonce bound to an actually-submitted photo proves
+                    // the capture was taken live on demand, not replayed.
+                    'liveness' => $includeNonce
+                        ? (optional($r->nonce)->nonce_value && $first ? 'Verified' : 'Not proven')
+                        : null,
                     'images' => $r->evidences->map(fn ($e) => [
                         'name' => 'evidence_' . substr($e->id, 0, 8) . '.jpg',
                         'captured_at' => $this->iso($e->captured_at),
                         'decision' => $e->review?->decision,
                         'sha256' => $includeHashes ? ($e->sha256_hash ?? null) : null,
+                        // Plain-language file-integrity result (only when the toggle
+                        // is on): a recorded SHA-256 on an append-only evidence row is
+                        // an intact fingerprint of this exact image (spec §7.5). This
+                        // reflects ONLY the hash — capture-context anomalies (NTP,
+                        // clock, upload timing) are NOT integrity signals and are
+                        // reported in their own fields (NTP Status, EXIF, Section 7).
+                        'integrity' => $includeHashes
+                            ? (($e->sha256_hash ?? null) ? 'Verified' : 'Not recorded')
+                            : null,
                     ])->all(),
                 ];
             })->all();

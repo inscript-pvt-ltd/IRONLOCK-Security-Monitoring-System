@@ -1,5 +1,17 @@
 @extends('reports.web.layout')
 
+@php
+    // Decimal hours → readable "Xh Ym" (matches the shift-duration format used
+    // across the reports); the underlying figures stay numeric in the CSV.
+    $hm = function ($h) {
+        if ($h === null || $h === '') {
+            return '—';
+        }
+        $m = (int) round((float) $h * 60);
+        return intdiv($m, 60) . 'h ' . ($m % 60) . 'm';
+    };
+@endphp
+
 @section('report-body')
     <details class="wf-sec" open>
         <summary class="wf-sechead"><span class="wf-secnum">1</span><span class="wf-sectitle">Assessment</span><span class="wf-secdesc">{{ $data['reference_weeks'] }}-week reference period</span><span class="wf-chev"></span></summary>
@@ -9,9 +21,9 @@
                 <div class="wf-row"><span class="k">Employee Code</span><span class="v wf-mono">{{ $data['employee_code'] ?? '—' }}</span></div>
                 <div class="wf-row"><span class="k">Reference Period</span><span class="v">{{ $data['period_start'] }} → {{ $data['period_end'] }}</span></div>
                 <div class="wf-row"><span class="k">Weekly Limit</span><span class="v">{{ number_format($data['weekly_limit'], 0) }} h avg</span></div>
-                <div class="wf-row"><span class="k">Total Hours Worked</span><span class="v">{{ number_format($data['total_hours'], 2) }} h</span></div>
+                <div class="wf-row"><span class="k">Total Hours Worked</span><span class="v">{{ $hm($data['total_hours']) }}</span></div>
                 <div class="wf-row"><span class="k">Average Weekly</span>
-                    <span class="v">{{ number_format($data['average_weekly'], 2) }} h
+                    <span class="v">{{ $hm($data['average_weekly']) }}
                         <span class="wf-badge {{ $data['compliant'] ? 'ok' : 'bad' }}">{{ $data['compliant'] ? 'COMPLIANT' : 'BREACH' }}</span>
                     </span>
                 </div>
@@ -32,7 +44,7 @@
                                 <td class="wf-mono">{{ $r['reference'] }}</td>
                                 <td>{{ $r['date'] ?? '—' }}</td>
                                 <td>{{ ucfirst($r['status']) }}</td>
-                                <td>{{ number_format((float) $r['hours'], 2) }}</td>
+                                <td>{{ $hm($r['hours']) }}</td>
                             </tr>
                         @endforeach
                     </tbody>

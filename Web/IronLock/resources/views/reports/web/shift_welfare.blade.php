@@ -135,15 +135,26 @@
                         <div><div class="wf-mini-k">NTP Status</div><div class="wf-mini-v">{{ $p['ntp_status'] }}</div></div>
                         <div><div class="wf-mini-k">HMAC Validation</div><div class="wf-mini-v">{{ $p['hmac'] }} ✓</div></div>
                         <div><div class="wf-mini-k">EXIF Validation</div><div class="wf-mini-v">{{ $p['exif'] }}</div></div>
+                        @if (!empty($p['liveness']))
+                            <div><div class="wf-mini-k">Liveness Proof</div><div class="wf-mini-v" style="color:{{ $p['liveness'] === 'Verified' ? '#2e7d32' : '#8a2a2a' }}">{{ $p['liveness'] }}{{ $p['liveness'] === 'Verified' ? ' ✓' : '' }}</div></div>
+                        @endif
                         <div><div class="wf-mini-k">Images</div><div class="wf-mini-v">{{ count($p['images']) }}</div></div>
                     </div>
                     @if (count($p['images']))
                         <div class="wf-gallery">
                             @foreach ($p['images'] as $img)
+                                @php
+                                    $integrity = $img['integrity'] ?? null;
+                                    $integrityColor = $integrity === 'Verified' ? '#2e7d32' : '#999';
+                                @endphp
                                 <div class="wf-shot">
                                     <div class="wf-ph" style="height:104px">IMG</div>
                                     <div class="wf-shot-cap wf-mono">{{ $img['name'] }}<br>{!! $t($img['captured_at'], 'rpt-ts-time') !!}
-                                        @if (!empty($img['sha256']))<br><span style="color:#bbb">{{ substr($img['sha256'], 0, 16) }}…</span>@endif
+                                        @if ($integrity)
+                                            <br><span style="color:{{ $integrityColor }}">Image Integrity: <span style="white-space:nowrap">{{ $integrity }}{{ $integrity === 'Verified' ? ' ✓' : '' }}</span></span>
+                                        @elseif (!empty($img['sha256']))
+                                            <br><span style="color:#bbb">{{ substr($img['sha256'], 0, 16) }}…</span>
+                                        @endif
                                     </div>
                                 </div>
                             @endforeach

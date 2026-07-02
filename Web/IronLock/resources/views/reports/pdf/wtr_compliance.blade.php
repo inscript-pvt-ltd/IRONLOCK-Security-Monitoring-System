@@ -1,5 +1,17 @@
 @extends('reports.pdf.layout')
 
+@php
+    // Decimal hours → readable "Xh Ym" (matches the shift-duration format used
+    // across the reports); the underlying figures stay numeric in the CSV.
+    $hm = function ($h) {
+        if ($h === null || $h === '') {
+            return '—';
+        }
+        $m = (int) round((float) $h * 60);
+        return intdiv($m, 60) . 'h ' . ($m % 60) . 'm';
+    };
+@endphp
+
 @section('report-body')
     <table class="kv">
         <tr><td class="k">Guard</td><td class="v">{{ $guard_name }}</td>
@@ -11,10 +23,10 @@
     <h2 class="section">Assessment</h2>
     <table class="kv">
         <tr>
-            <td class="k">Total hours worked</td><td class="v">{{ number_format($total_hours, 2) }} h</td>
+            <td class="k">Total hours worked</td><td class="v">{{ $hm($total_hours) }}</td>
             <td class="k">Average weekly</td>
             <td class="v">
-                {{ number_format($average_weekly, 2) }} h
+                {{ $hm($average_weekly) }}
                 @if ($compliant)<span class="pill pill-ok">COMPLIANT</span>
                 @else<span class="pill pill-bad">BREACH</span>@endif
             </td>
@@ -35,7 +47,7 @@
                         <td>{{ $r['reference'] }}</td>
                         <td>{{ $r['date'] ?? '—' }}</td>
                         <td>{{ ucfirst($r['status']) }}</td>
-                        <td>{{ number_format((float) $r['hours'], 2) }}</td>
+                        <td>{{ $hm($r['hours']) }}</td>
                     </tr>
                 @endforeach
             </tbody>
