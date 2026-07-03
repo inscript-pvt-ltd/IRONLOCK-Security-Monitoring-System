@@ -17,7 +17,7 @@ Route::get('/user', function (Request $request) {
 | Public routes: status, auth/login, auth/refresh.
 | Everything else sits behind the `guard.auth` JWT middleware.
 */
-Route::prefix('mobile/v1')->middleware(\App\Http\Middleware\LogMobileApiActivity::class)->group(function () { //middleware is temp log.
+Route::prefix('mobile/v1')->group(function () {
     // Health check — no token required (contract §2). Bare object, not the
     // success envelope, so the app can ping it before auth is wired.
     Route::get('status', function () {

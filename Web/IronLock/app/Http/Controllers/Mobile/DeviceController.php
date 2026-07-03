@@ -23,11 +23,6 @@ class DeviceController extends Controller
 
     public function registerPushToken(Request $request): JsonResponse
     {
-        \Log::info('Mobile Device Register Push Token Request', [
-            'body' => $request->all(),
-            'ip'   => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         $validator = Validator::make($request->all(), [

@@ -43,13 +43,19 @@ class GPSTrackingService
      * finalizeFlush() to judge the net zone transition and the comms-gap window
      * from server-side facts (never the client clock).
      *
-     * @return array{zone_status: ?string, last_seen_at: ?Carbon}
+     * `shift_id` is returned so finalizeFlush() can tell whether this snapshot
+     * belongs to the shift being flushed. guard_locations keeps one mutable row
+     * per guard with no history, so a leftover row from a PRIOR shift would
+     * otherwise be mistaken for this shift's prior state.
+     *
+     * @return array{shift_id: ?string, zone_status: ?string, last_seen_at: ?Carbon}
      */
     public function flushPreState(string $guardId): array
     {
         $row = GuardLocation::where('guard_id', $guardId)->first();
 
         return [
+            'shift_id' => $row?->shift_id,
             'zone_status' => $row?->zone_status,
             'last_seen_at' => $row?->updated_at,
         ];
@@ -75,9 +81,18 @@ class GPSTrackingService
         $now = Carbon::now();
 
         // Read the prior zone status before the UPSERT overwrites the row, so
-        // we can detect a transition.
+        // we can detect a transition. guard_locations is a single mutable row
+        // per guard (no history), so a row left over from a PREVIOUS shift must
+        // never be read as this shift's prior state — that would log a phantom
+        // cross-shift ZONE_TRANSITION on the first ping. Scope by shift_id, and
+        // when there is no same-shift prior fall back to the shift-start
+        // baseline of INSIDE_ZONE (the guard is expected at their post), so a
+        // guard who is already OUTSIDE on their first ping registers a real
+        // INSIDE→OUTSIDE transition instead of being silently missed.
         $previous = GuardLocation::where('guard_id', $guardId)->first();
-        $previousZoneStatus = $previous?->zone_status;
+        $previousZoneStatus = ($previous && $previous->shift_id === $shiftId)
+            ? $previous->zone_status
+            : GeofenceService::STATUS_INSIDE_ZONE;
 
         // Resolve zone status via the shift's geofence (server-side spatial check).
         $shift = Shift::with('site')->find($shiftId);
@@ -171,19 +186,35 @@ class GPSTrackingService
      *     than the backfill threshold, this flush is a RECONNECT: record an
      *     explicit COMMS_GAP_START / COMMS_GAP_END pair and a SYNC_FLUSH summary
      *     so the offline window is legible on the timeline. Boundaries are
-     *     server-determined (START = last receipt, END = now).
+     *     server-determined (START = last receipt, END = now). SCOPED to the
+     *     current shift: a pre-snapshot left over from a prior shift is ignored,
+     *     so the downtime *between* two shifts is never bridged into one bogus
+     *     offline window (that stale row is not a comms interruption).
      *
-     * @param  array{zone_status: ?string, last_seen_at: ?Carbon}  $pre
+     * @param  array{shift_id: ?string, zone_status: ?string, last_seen_at: ?Carbon}  $pre
      */
     public function finalizeFlush(string $guardId, string $shiftId, array $pre, int $pingsApplied): void
     {
         $now = Carbon::now();
         $current = GuardLocation::where('guard_id', $guardId)->first();
 
-        // (1) Present-state zone-exit — net INSIDE→OUTSIDE only.
+        // guard_locations holds ONE row per guard with no history, so the
+        // pre-flush snapshot may belong to a PREVIOUS shift. Only trust it as
+        // this shift's prior state when the shift_id matches.
+        $preIsSameShift = ($pre['shift_id'] ?? null) === $shiftId;
+
+        // (1) Present-state zone-exit — net INSIDE→OUTSIDE only. For a fresh
+        // shift (no same-shift snapshot) the baseline is INSIDE — the guard is
+        // expected at their post — so a first flush that leaves them OUTSIDE
+        // still schedules the grace-period check (which re-confirms before
+        // alerting), mirroring the standalone first-ping edge.
+        $preZoneStatus = $preIsSameShift
+            ? ($pre['zone_status'] ?? null)
+            : GeofenceService::STATUS_INSIDE_ZONE;
+
         if ($current
             && $current->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE
-            && ($pre['zone_status'] ?? null) === GeofenceService::STATUS_INSIDE_ZONE) {
+            && $preZoneStatus === GeofenceService::STATUS_INSIDE_ZONE) {
             $shift = Shift::with('site')->find($shiftId);
             $gracePeriodMinutes = $shift?->site?->grace_period_minutes ?? 5;
 
@@ -191,9 +222,11 @@ class GPSTrackingService
                 ->delay(now()->addMinutes($gracePeriodMinutes));
         }
 
-        // (2) Comms-gap / reconnect audit.
+        // (2) Comms-gap / reconnect audit — ONLY within a single shift. A stale
+        // last-seen from a prior shift must not be reported as an offline gap
+        // (this is the cross-shift "46h offline" phantom fix).
         $lastSeen = $pre['last_seen_at'] ?? null;
-        if ($lastSeen instanceof Carbon) {
+        if ($preIsSameShift && $lastSeen instanceof Carbon) {
             $gapSeconds = $lastSeen->diffInSeconds($now);
             $threshold = (int) config('ironlock.gps_backfill_threshold_seconds', 60);
 

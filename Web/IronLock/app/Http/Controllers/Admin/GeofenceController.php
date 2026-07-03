@@ -64,13 +64,6 @@ class GeofenceController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
-        // Debug incoming request
-        Log::info('Geofence creation request', [
-            'all' => $request->all(),
-            'raw_input' => $request->getContent(),
-            'content_type' => $request->header('Content-Type')
-        ]);
-
         // Handle coordinates that come as JSON string
         $coordinates = $request->get('coordinates');
         if (is_string($coordinates)) {
@@ -92,8 +85,17 @@ class GeofenceController extends Controller
             $validator->sometimes('coordinates.*', 'array|size:2', function($input) {
                 return $input->type === 'polygon';
             });
+            // Each polygon vertex element must be a real number — without this a
+            // non-numeric value slips through to the WKT string and produces a
+            // raw MySQL parse error (500) instead of a clean 422.
+            $validator->sometimes('coordinates.*.*', 'numeric', function($input) {
+                return $input->type === 'polygon';
+            });
         } else if ($request->get('type') === 'circle') {
             $validator->sometimes('coordinates.center', 'required|array|size:2', function($input) {
+                return $input->type === 'circle';
+            });
+            $validator->sometimes('coordinates.center.*', 'numeric', function($input) {
                 return $input->type === 'circle';
             });
             $validator->sometimes('coordinates.radius', 'required|numeric|min:1', function($input) {

@@ -1,6 +1,5 @@
 <?php
 
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 // Redirect root to admin login
@@ -157,30 +156,6 @@ Route::prefix('admin')->name('admin.')->group(function () {
                 'timestamp' => now()->toISOString(),
                 'authenticated_admin' => session('admin_id'),
             ]);
-        });
-
-        // Debug endpoint for testing encoding
-        Route::post('debug/geofence', function (Request $request) {
-            try {
-                \Log::info('Debug geofence request', [
-                    'all' => $request->all(),
-                    'raw' => $request->getContent(),
-                    'headers' => $request->headers->all()
-                ]);
-
-                return response()->json([
-                    'success' => true,
-                    'received' => $request->all(),
-                    'coordinates_count' => count($request->coordinates ?? []),
-                    'encoding' => mb_detect_encoding($request->getContent())
-                ]);
-            } catch (\Exception $e) {
-                return response()->json([
-                    'success' => false,
-                    'error' => $e->getMessage(),
-                    'type' => get_class($e)
-                ]);
-            }
         });
     });
 });

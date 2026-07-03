@@ -27,12 +27,6 @@ class NonceController extends Controller
 
     public function prefetch(Request $request, string $id): JsonResponse
     {
-        \Log::info('Mobile Nonce Prefetch Request', [
-            'shift_id' => $id,
-            'body'     => $request->all(),
-            'ip'       => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         $shift = Shift::where('id', $id)

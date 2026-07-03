@@ -41,11 +41,6 @@ class AuthController extends Controller
      */
     public function login(Request $request): JsonResponse
     {
-        \Log::info('Mobile Login Request', [
-            'body' => $request->except('password'),
-            'ip'   => $request->ip(),
-        ]);
-
         $validator = Validator::make($request->all(), [
             'identifier' => ['required', 'string'],
             'password' => ['required', 'string'],
@@ -110,11 +105,6 @@ class AuthController extends Controller
      */
     public function refresh(Request $request): JsonResponse
     {
-        \Log::info('Mobile Refresh Request', [
-            'body' => $request->all(),
-            'ip'   => $request->ip(),
-        ]);
-
         $validator = Validator::make($request->all(), [
             'refresh_token' => ['required', 'string'],
         ]);
@@ -180,11 +170,6 @@ class AuthController extends Controller
      */
     public function logout(Request $request): JsonResponse
     {
-        \Log::info('Mobile Logout Request', [
-            'body' => $request->all(),
-            'ip'   => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         if ($guard) {
@@ -199,11 +184,6 @@ class AuthController extends Controller
      */
     public function me(Request $request): JsonResponse
     {
-        \Log::info('Mobile Me Request', [
-            'body' => $request->all(),
-            'ip'   => $request->ip(),
-        ]);
-
         return $this->apiSuccess(['guard' => $this->guardPayload($this->currentGuard($request))]);
     }
 
@@ -219,11 +199,6 @@ class AuthController extends Controller
      */
     public function shiftAccess(Request $request): JsonResponse
     {
-        \Log::info('Mobile Shift Access Request', [
-            'body' => $request->except('token'),
-            'ip'   => $request->ip(),
-        ]);
-
         $validator = Validator::make($request->all(), [
             'token' => ['required', 'string'],
             'device' => ['sometimes', 'array'],

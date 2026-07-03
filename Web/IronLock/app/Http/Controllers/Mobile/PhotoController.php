@@ -34,12 +34,6 @@ class PhotoController extends Controller
      */
     public function pending(Request $request, string $id): JsonResponse
     {
-        \Log::info('Mobile Photo Pending Request', [
-            'shift_id' => $id,
-            'body'     => $request->all(),
-            'ip'       => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         $shift = $this->activeShift($id, $guard->id);
@@ -75,12 +69,6 @@ class PhotoController extends Controller
      */
     public function upload(Request $request, string $id): JsonResponse
     {
-        \Log::info('Mobile Photo Upload Request', [
-            'shift_id' => $id,
-            'body'     => $request->except('photo'),
-            'ip'       => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         $shift = $this->activeShift($id, $guard->id);
