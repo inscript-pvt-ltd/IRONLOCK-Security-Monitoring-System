@@ -347,33 +347,4 @@ class AuthService
 
         return true;
     }
-
-    /**
-     * Legacy method - kept for backward compatibility
-     */
-    public function verifyAdmin(string $email, string $password): ?Admin
-    {
-        $admin = Admin::where('email', $email)->where('status', 'active')->first();
-
-        if ($admin && Hash::check($password, $admin->password)) {
-            return $admin;
-        }
-        return null;
-    }
-
-    /**
-     * Legacy method - kept for backward compatibility
-     */
-    public function verifyGuard(string $username, string $password): ?Guard
-    {
-        $guard = Guard::where('username', $username)
-            ->where('employment_status', 'active')
-            ->whereNull('account_locked_at')
-            ->first();
-
-        if ($guard && Hash::check($password, $guard->password)) {
-            return $guard;
-        }
-        return null;
-    }
 }

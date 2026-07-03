@@ -55,8 +55,6 @@ class Alert extends Model
         'acknowledged_by',
         'acknowledged_at',
         'acknowledgment_note',
-        'resolved_by',
-        'resolved_at',
     ];
 
     /**
@@ -67,7 +65,6 @@ class Alert extends Model
         return [
             'raised_at' => 'datetime',
             'acknowledged_at' => 'datetime',
-            'resolved_at' => 'datetime',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];

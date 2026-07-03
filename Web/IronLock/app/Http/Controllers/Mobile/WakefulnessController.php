@@ -35,12 +35,6 @@ class WakefulnessController extends Controller
 
     public function respond(Request $request, string $checkId): JsonResponse
     {
-        \Log::info('Mobile Wakefulness Respond Request', [
-            'check_id' => $checkId,
-            'body' => $request->all(),
-            'ip' => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         $validator = Validator::make($request->all(), [
@@ -77,12 +71,6 @@ class WakefulnessController extends Controller
      */
     public function received(Request $request, string $checkId): JsonResponse
     {
-        \Log::info('Mobile Wakefulness Received Request', [
-            'check_id' => $checkId,
-            'body'     => $request->all(),
-            'ip'       => $request->ip(),
-        ]);
-
         $guard = $this->currentGuard($request);
 
         $result = $this->wakefulness->acknowledgeDelivery($guard, $checkId);

@@ -154,6 +154,16 @@ class PhotoVerificationService
         /** @var Nonce $nonce */
         $nonce = $check['nonce'];
 
+        // 1b. A nonce is minted for ONE specific shift; a photo may only be
+        //     submitted under that same shift. The nonce's own shift is
+        //     authoritative — the URL shift is not trusted. Without this, an
+        //     offline photo flushed to a *different* shift's endpoint (e.g. a
+        //     pool nonce from a shift that just ended, uploaded after the next
+        //     shift starts) would be filed against the wrong shift's timeline.
+        if ($nonce->shift_id !== $shift->id) {
+            return $this->reject('NONCE_WRONG_SHIFT');
+        }
+
         // 2. Resolve or create the photo request this upload fulfils.
         $request = $this->resolveRequest($guard, $shift, $nonce, $payload, $serverReceivedAt);
         if ($request === null) {
