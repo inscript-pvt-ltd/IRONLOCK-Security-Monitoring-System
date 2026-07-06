@@ -1221,6 +1221,10 @@
     // ── Site selection ────────────────────────────────────────────────────────
 
     function selectSite(siteId) {
+        // Switching sites cancels any armed/half-finished draw on the previous
+        // site — otherwise the tool stays green and its map handlers keep firing.
+        cancelActiveDrawing();
+
         document.querySelectorAll('.site-list-item').forEach(el => el.classList.remove('selected'));
         const listEl = document.querySelector(`[data-site-id="${siteId}"]`);
         if (listEl) listEl.classList.add('selected');
@@ -1337,6 +1341,16 @@
     function resetToolButtons() {
         document.getElementById('polygonTool').classList.remove('drawing');
         document.getElementById('circleTool').classList.remove('drawing');
+    }
+
+    // Tear down any in-progress (unsaved) polygon/circle draw: detaches the map
+    // click/dblclick handlers, discards the in-progress points + dot markers,
+    // re-enables double-click zoom, and clears the green "drawing" tool state.
+    // Safe to call when nothing is being drawn (no-op). Used when the selected
+    // site changes so an armed tool never carries over to the next site.
+    function cancelActiveDrawing() {
+        if (cancelActiveDraw) cancelActiveDraw();
+        resetToolButtons();
     }
 
     function requireSelectedSite() {
@@ -1525,8 +1539,7 @@
         // does NOT delete any geofence already stored on the server.
         if (isDrawingMode && cancelActiveDraw) {
             const tool = drawingTool;
-            cancelActiveDraw();
-            resetToolButtons();
+            cancelActiveDrawing();
             if (tool === 'polygon') activatePolygonTool(); else activateCircleTool();
             updateGeofenceStatus(null, 'Points cleared — draw again.');
             return;

@@ -205,9 +205,14 @@ class DashboardController extends Controller
             ->get()
             ->keyBy('shift_id');
 
-        // Guards currently carrying an open alert → rendered with a bold pin and
-        // offered an "Open Alert" deep link on the Live Map side panel.
-        $openAlertGuardIds = Alert::whereIn('guard_id', $shifts->pluck('guard_id'))
+        // Guards whose CURRENT shift carries an open alert → rendered with a bold
+        // pin and offered an "Open Alert" deep link on the Live Map side panel.
+        // Scoped by the active shift_id, NOT guard_id: an OPEN alert left
+        // unacknowledged on a *previous* shift (alerts only go OPEN→ACKNOWLEDGED,
+        // never auto-resolve) must not bleed a red ring onto this shift's pin, and
+        // a guard-level alert with no shift context (e.g. SIA-expiry, shift_id null)
+        // isn't a live field emergency. The alert itself stays OPEN on the feed.
+        $openAlertGuardIds = Alert::whereIn('shift_id', $shifts->pluck('id'))
             ->where('status', 'OPEN')
             ->pluck('guard_id')
             ->flip();
