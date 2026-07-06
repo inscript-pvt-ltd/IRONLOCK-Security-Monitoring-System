@@ -24,6 +24,14 @@ class Site extends Model
     use HasUuids;
 
     /**
+     * Fallback zone-exit grace period (minutes) when a site has none set. Single
+     * source of truth for the `?? 5` fallbacks scattered across the zone-exit
+     * path (GPSTrackingService, CheckZoneExitJob, AlertService) and the create/
+     * update defaults — matches the `grace_period_minutes` DB column default.
+     */
+    const DEFAULT_GRACE_PERIOD_MINUTES = 5;
+
+    /**
      * The table associated with the model.
      */
     protected $table = 'sites';

@@ -111,6 +111,28 @@ class WakefulnessCheck extends Model
     }
 
     /**
+     * Plain-language description of a FAILED check's reason code. The raw code
+     * lives in the WAKEFULNESS_FAILED audit event's metadata (`reason`); this
+     * turns it into the sentence shown on the shift timeline and in the welfare
+     * report so a supervisor sees *why* it failed — and, critically, whether the
+     * miss was a genuine unresponsive guard (paged) or a suppressed connectivity
+     * / delivery gap (not paged). Shared by the report composer and the admin
+     * timeline so the two can never word the same reason differently.
+     */
+    public static function describeFailure(?string $reason): string
+    {
+        return match ($reason) {
+            'NO_RESPONSE' => 'No response before the window closed',
+            'OFFLINE_CODE_MISMATCH' => 'Wrong code — offline TOTP mismatch',
+            'WRONG_CODE' => 'Incorrect code submitted',
+            'RESPONSE_LATE' => 'Answered after the window closed',
+            'COMMS_INTERRUPTED' => 'Missed while offline — connectivity gap (not paged)',
+            'PUSH_UNDELIVERED' => 'Challenge push never delivered (not paged)',
+            default => 'Failed',
+        };
+    }
+
+    /**
      * The shift this check belongs to.
      */
     public function shift(): BelongsTo

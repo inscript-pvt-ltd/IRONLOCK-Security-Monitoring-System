@@ -92,7 +92,7 @@ class SiteController extends Controller
                 'address' => $request->address,
                 'latitude' => $request->latitude,
                 'longitude' => $request->longitude,
-                'grace_period_minutes' => $request->input('grace_period_minutes', 5),
+                'grace_period_minutes' => $request->input('grace_period_minutes', Site::DEFAULT_GRACE_PERIOD_MINUTES),
                 'contact_person' => $request->contact_person,
                 'contact_phone' => $request->contact_phone,
                 'instructions' => $request->instructions,

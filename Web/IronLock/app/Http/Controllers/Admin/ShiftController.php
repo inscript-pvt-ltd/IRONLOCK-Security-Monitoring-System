@@ -312,17 +312,41 @@ class ShiftController extends Controller
             // Wakefulness verification (Phase 5): every code-challenge for this
             // shift, newest first. A null result is the still-pending state; the
             // view shows CONFIRMED / FAILED / PENDING with the response time.
+            // Why each FAILED check failed lives in the WAKEFULNESS_FAILED audit
+            // event's metadata (reason + alerted), not on the check row. Index it
+            // by check_id so the table can show the real cause — offline TOTP
+            // mismatch, no-response, or a suppressed comms/delivery gap (not paged).
+            $wakeFailMeta = $events->where('event_type', 'WAKEFULNESS_FAILED')
+                ->mapWithKeys(fn (ShiftEvent $e) => [
+                    (string) (is_array($e->metadata) ? ($e->metadata['check_id'] ?? '') : '') => (is_array($e->metadata) ? $e->metadata : []),
+                ])->all();
+
             $wakefulnessChecks = WakefulnessCheck::where('shift_id', $shift->id)
                 ->orderByDesc('scheduled_at')
                 ->get()
-                ->map(fn (WakefulnessCheck $c) => [
-                    'mode' => $c->online_or_offline,
-                    'request_type' => $c->request_type, // manual | scheduled
-                    'result' => $c->result,            // CONFIRMED | FAILED | null
-                    'scheduled_at' => $c->scheduled_at,
-                    'responded_at' => $c->responded_at,
-                    'response_time_seconds' => $c->response_time_seconds,
-                ]);
+                ->map(function (WakefulnessCheck $c) use ($wakeFailMeta) {
+                    $reason = null;
+                    $alerted = null;
+                    if ($c->result === WakefulnessCheck::RESULT_FAILED) {
+                        $meta = $wakeFailMeta[$c->id] ?? [];
+                        $reason = WakefulnessCheck::describeFailure($meta['reason'] ?? null);
+                        $alerted = array_key_exists('alerted', $meta) ? (bool) $meta['alerted'] : null;
+                    }
+
+                    return [
+                        'mode' => $c->online_or_offline,
+                        'is_offline' => $c->online_or_offline === WakefulnessCheck::MODE_OFFLINE,
+                        'request_type' => $c->request_type, // manual | scheduled
+                        'result' => $c->result,            // CONFIRMED | FAILED | null
+                        'scheduled_at' => $c->scheduled_at,
+                        'responded_at' => $c->responded_at,
+                        'response_time_seconds' => $c->response_time_seconds,
+                        // Plain-language cause for a FAILED check + whether it paged
+                        // a supervisor (false = suppressed offline/undelivered miss).
+                        'failure_reason' => $reason,
+                        'failure_alerted' => $alerted,
+                    ];
+                });
 
             // Wakefulness tally for the Compliance Summary panel — computed live
             // (a pending check can resolve via the timeout sweep after this load).

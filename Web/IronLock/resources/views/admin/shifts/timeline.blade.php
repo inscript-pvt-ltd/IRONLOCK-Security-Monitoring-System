@@ -37,6 +37,8 @@
         'WAKEFULNESS_CHALLENGE'         => ['label' => 'Wakefulness Challenge',        'tone' => 'ok'],
         'WAKEFULNESS_CONFIRMED'         => ['label' => 'Wakefulness Confirmed',        'tone' => 'ok'],
         'WAKEFULNESS_FAILED'            => ['label' => 'Wakefulness Failed',           'tone' => 'alert'],
+        // Geofence (Phase 3.3)
+        'ZONE_EXIT'                     => ['label' => 'Zone Exit Alert',             'tone' => 'alert'],
         // Offline / backfill (Phase 7). Informational, never alert-red — a closed,
         // backfilled comms gap is not a live incident (roadmap §7.3, "no
         // retroactive alerts"). Rendered as an "offline / backfilled" band below,
@@ -776,7 +778,12 @@
                     @if ($shift->status === 'active')Use "Request Wakefulness Check" above to challenge the guard now.@endif
                 </div>
             @else
-                @if ($wakefulnessChecks->contains(fn ($c) => $c['result'] === 'FAILED'))
+                {{-- The CRITICAL welfare banner fires only for a genuine
+                     unresponsive-guard failure (one that actually paged a
+                     supervisor). A miss suppressed as a connectivity/delivery gap
+                     (failure_alerted === false) is recorded in the table with its
+                     reason but is NOT a welfare incident, so it doesn't raise this. --}}
+                @if ($wakefulnessChecks->contains(fn ($c) => $c['result'] === 'FAILED' && ($c['failure_alerted'] ?? true) !== false))
                     <div class="wake-warning">
                         <span>⚠ Unresponsive — Welfare Check Required (a wakefulness check failed)</span>
                         <button type="button" class="wake-warning-close" aria-label="Dismiss" title="Dismiss" onclick="this.closest('.wake-warning').remove()">&times;</button>
@@ -784,7 +791,7 @@
                 @endif
                 <table class="wake-table">
                     <thead>
-                        <tr><th>Result</th><th>Source</th><th>Mode</th><th>Challenged</th><th>Responded</th><th>Time</th></tr>
+                        <tr><th>Result</th><th>Source</th><th>Mode</th><th>Challenged</th><th>Responded</th><th>Time</th><th>Detail</th></tr>
                     </thead>
                     <tbody>
                         @foreach ($wakefulnessChecks as $wc)
@@ -792,10 +799,18 @@
                             <tr>
                                 <td><span class="wake-badge {{ $badge }}">{{ $wc['result'] ?? 'PENDING' }}</span></td>
                                 <td>{{ ucfirst($wc['request_type'] ?? 'scheduled') }}</td>
-                                <td>{{ $wc['mode'] }}</td>
+                                <td>
+                                    {{ ucfirst(strtolower($wc['mode'] ?? '—')) }}
+                                    @if (!empty($wc['is_offline']))<span class="wake-badge pending" style="margin-left:4px;">Offline</span>@endif
+                                </td>
                                 <td><time class="tl-ts-full" data-ts="{{ $iso($wc['scheduled_at']) }}">{{ $fmt($wc['scheduled_at']) }}</time></td>
                                 <td><time class="tl-ts-full" data-ts="{{ $iso($wc['responded_at']) }}">{{ $fmt($wc['responded_at']) }}</time></td>
                                 <td>{{ $wc['response_time_seconds'] !== null ? $wc['response_time_seconds'] . 's' : '—' }}</td>
+                                {{-- Failure cause. A suppressed (not-paged) miss is amber
+                                     "info"; a paged failure is red — never a raw code. --}}
+                                <td style="color: {{ empty($wc['failure_reason']) ? 'var(--text-muted)' : (($wc['failure_alerted'] ?? true) === false ? 'var(--warning-amber)' : 'var(--error-red)') }};">
+                                    {{ $wc['failure_reason'] ?? '—' }}
+                                </td>
                             </tr>
                         @endforeach
                     </tbody>

@@ -69,6 +69,7 @@ class GuardLocation extends Model
         'accuracy',
         'battery_level',
         'zone_status',
+        'zone_left_at',
         'recorded_at',
         'updated_at',
     ];
@@ -83,6 +84,7 @@ class GuardLocation extends Model
             'longitude' => 'decimal:8',
             'accuracy' => 'decimal:2',
             'battery_level' => 'integer',
+            'zone_left_at' => 'datetime',
             'recorded_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
