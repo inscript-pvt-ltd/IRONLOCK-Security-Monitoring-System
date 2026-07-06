@@ -6,6 +6,7 @@ use App\Domains\Alerts\Models\Alert;
 use App\Domains\Guards\Models\Guard;
 use App\Domains\GPS\Models\GuardLocation;
 use App\Domains\Sites\Models\Site;
+use App\Jobs\CheckZoneExitJob;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -83,9 +84,13 @@ class AlertService
     }
 
     /**
-     * Raise a CRITICAL ZONE_EXIT alert: the guard stayed outside the geofence
-     * past the site grace period. The last-known coordinates and exit time are
-     * baked into the description (there are no lat/lng columns on alerts).
+     * Raise a CRITICAL ZONE_EXIT alert. Two flavours, per $reason:
+     *  - SHIFT_START: the guard was still outside the geofence at their scheduled
+     *    shift start time (they had the whole check-in window to reach their post).
+     *  - MID_SHIFT: the guard stepped out during the shift and stayed out past the
+     *    site grace period.
+     * The last-known coordinates and the exit time are baked into the description
+     * (there are no lat/lng columns on alerts).
      */
     public function createZoneExitAlert(
         string $guardId,
@@ -93,20 +98,31 @@ class AlertService
         GuardLocation $location,
         ?Guard $guard,
         ?Site $site,
-        string $exitedAt
+        string $exitedAt,
+        string $reason = CheckZoneExitJob::REASON_MID_SHIFT
     ): Alert {
         $guardName = $guard ? trim($guard->first_name . ' ' . $guard->last_name) : 'Unknown Guard';
         $siteName = $site?->name ?? 'Unknown Site';
-        $graceMins = $site?->grace_period_minutes ?? 5;
-        $exitedFmt = Carbon::parse($exitedAt)->format('H:i:s');
+        $lastKnown = "Last known location: {$location->latitude}, {$location->longitude}.";
+
+        if ($reason === CheckZoneExitJob::REASON_SHIFT_START) {
+            $title = "Not At Post — {$guardName}";
+            $description = "{$guardName} was still outside {$siteName} at their scheduled shift start time. "
+                . $lastKnown;
+        } else {
+            $graceMins = $site?->grace_period_minutes ?? Site::DEFAULT_GRACE_PERIOD_MINUTES;
+            $exitedFmt = Carbon::parse($exitedAt)->format('H:i:s');
+            $title = "Zone Exit — {$guardName}";
+            $description = "{$guardName} has been outside {$siteName} for more than {$graceMins} minutes. "
+                . "Exited at {$exitedFmt}. "
+                . $lastKnown;
+        }
 
         return $this->createAlert($guardId, $shiftId, [
             'type' => 'ZONE_EXIT',
             'severity' => 'CRITICAL',
-            'title' => "Zone Exit — {$guardName}",
-            'description' => "{$guardName} has been outside {$siteName} for more than {$graceMins} minutes. "
-                . "First exited at {$exitedFmt}. "
-                . "Last known location: {$location->latitude}, {$location->longitude}.",
+            'title' => $title,
+            'description' => $description,
         ]);
     }
 

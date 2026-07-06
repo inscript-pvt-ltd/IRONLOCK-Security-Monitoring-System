@@ -228,12 +228,18 @@ class PhotoVerificationService
             return $this->reject('NONCE_ALREADY_USED');
         }
 
+        // An OFFLINE_POOL nonce means the guard captured this while disconnected
+        // and it flushed on reconnect — recorded so the timeline and the welfare
+        // report can label the attempt "Offline" (the report reads this flag off
+        // the first evidence's metadata; without it every photo read as Online).
+        $capturedOffline = $nonce->type !== Nonce::TYPE_ONLINE;
+
         $evidences = [];
         $total = count($items);
         foreach ($items as $i => $item) {
             $evidences[] = $this->store(
                 $guard, $shift, $item['file'], $request, $payload,
-                $captureTime, $ntpAtCapture, $exifTimestamp, $flags, $serverReceivedAt, $i, $total
+                $captureTime, $ntpAtCapture, $exifTimestamp, $flags, $serverReceivedAt, $i, $total, $capturedOffline
             );
         }
 
@@ -433,6 +439,7 @@ class PhotoVerificationService
         Carbon $serverReceivedAt,
         int $index = 0,
         int $total = 1,
+        bool $capturedOffline = false,
     ): PhotoEvidence {
         $path = $this->buildStoragePath($guard, $shift, $file, $serverReceivedAt, $index, $total);
         Storage::disk('photos')->put($path, file_get_contents($file->getRealPath()));
@@ -452,6 +459,9 @@ class PhotoVerificationService
                 'mime_type' => $file->getClientMimeType(),
                 'file_size' => $file->getSize(),
                 'server_received_at' => $serverReceivedAt->toISOString(),
+                // Drawn from an OFFLINE_POOL nonce → captured offline, flushed on
+                // reconnect (read by ShiftReportComposer::photos() for the mode).
+                'captured_offline' => $capturedOffline,
             ],
             'flags' => empty($flags) ? null : array_values($flags),
         ]);

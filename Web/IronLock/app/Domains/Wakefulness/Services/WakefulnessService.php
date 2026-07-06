@@ -198,6 +198,116 @@ class WakefulnessService
     }
 
     /**
+     * Record an OFFLINE wakefulness result flushed on reconnect (spec §9.4).
+     *
+     * Unlike respond(), no server check row exists yet: while the guard was
+     * offline the dispatcher skipped them (an online push can't reach an offline
+     * device), so the challenge lived only on the device — a local notification
+     * fired at the schedule mark and the app computed the TOTP locally. This
+     * MATERIALISES the check from the flushed result, mirroring the offline-photo
+     * path (PhotoVerificationService::resolveRequest), so an offline wakefulness
+     * verification — pass OR fail — always lands in the audit trail, the timeline
+     * and the reports. Without this the result had nowhere to go (respond() would
+     * 404 CHECK_NOT_FOUND) and was silently dropped.
+     *
+     * Judged cryptographically: the server re-derives the TOTP for the claimed
+     * window from the shift seed. A wrong code is recorded FAILED but raises NO
+     * live alert — the window is long closed and the guard is back online by the
+     * time we see this (Phase 7 §7.3, "no retroactive alerts"). Idempotent: a
+     * re-flushed window echoes the first recorded outcome (replay-safe).
+     *
+     * @return array{result:'PASSED'|'FAILED', reason:?string, check:?WakefulnessCheck}
+     */
+    public function recordOfflineResult(
+        Guard $guard,
+        Shift $shift,
+        int $windowReference,
+        string $code,
+        ?string $scheduledAt = null,
+        ?string $respondedAt = null
+    ): array {
+        $seed = $shift->totp_seed;
+        if (empty($seed)) {
+            // The shift was never provisioned with a wakefulness seed — there is
+            // nothing to validate against. Not a guard failure; a 409 for the app.
+            return ['result' => 'FAILED', 'reason' => 'SEED_UNAVAILABLE', 'check' => null];
+        }
+
+        // Idempotent: the same offline window flushed twice echoes the first
+        // recorded outcome — replay-safe and order-insensitive (Phase 7 §7.3).
+        $existing = WakefulnessCheck::where('shift_id', $shift->id)
+            ->where('guard_id', $guard->id)
+            ->where('totp_window_reference', $windowReference)
+            ->where('online_or_offline', WakefulnessCheck::MODE_OFFLINE)
+            ->first();
+        if ($existing) {
+            return [
+                'result' => $existing->result === WakefulnessCheck::RESULT_CONFIRMED ? 'PASSED' : 'FAILED',
+                'reason' => 'ALREADY_RESOLVED',
+                'check' => $existing,
+            ];
+        }
+
+        $serverReceivedAt = Carbon::now();
+        $expected = $this->recomputeTotp($seed, $windowReference);
+        $correct = hash_equals($expected, str_pad($code, $this->digits(), '0', STR_PAD_LEFT));
+
+        // Anchor the challenge to when it actually fired on-device: the app's
+        // reported mark, else the window's own start instant (window * period).
+        $scheduled = $this->parse($scheduledAt)
+            ?? Carbon::createFromTimestamp($windowReference * $this->totpPeriod());
+        $responded = $this->parse($respondedAt) ?? $serverReceivedAt;
+
+        // Audit-only elapsed time (NOT the pass/fail authority); column is
+        // decimal(4,2) so cap at 99.99 exactly as respond() does.
+        $responseTime = min(99.99, round($scheduled->diffInSeconds($responded), 2));
+
+        $check = WakefulnessCheck::create([
+            'id' => (string) Str::uuid(),
+            'shift_id' => $shift->id,
+            'guard_id' => $guard->id,
+            'challenge_code' => $expected,
+            'submitted_code' => $code,
+            'totp_window_reference' => $windowReference,
+            'scheduled_at' => $scheduled,
+            'responded_at' => $responded,
+            'server_received_at' => $serverReceivedAt,
+            'response_time_seconds' => $responseTime,
+            'result' => $correct ? WakefulnessCheck::RESULT_CONFIRMED : WakefulnessCheck::RESULT_FAILED,
+            'is_offline' => true,
+            'online_or_offline' => WakefulnessCheck::MODE_OFFLINE,
+            'request_type' => WakefulnessCheck::TYPE_SCHEDULED,
+        ]);
+
+        // Backfill the challenge into the timeline too — the online path logs
+        // WAKEFULNESS_CHALLENGE at dispatch; offline it fired on-device, so we
+        // record it here at its actual mark so the trail isn't missing the ask.
+        $this->logEvent($shift, 'WAKEFULNESS_CHALLENGE', [
+            'check_id' => $check->id,
+            'mode' => WakefulnessCheck::MODE_OFFLINE,
+            'request_type' => WakefulnessCheck::TYPE_SCHEDULED,
+            'backfilled' => true,
+        ]);
+
+        if ($correct) {
+            $this->logEvent($shift, 'WAKEFULNESS_CONFIRMED', [
+                'check_id' => $check->id,
+                'mode' => WakefulnessCheck::MODE_OFFLINE,
+                'response_time_seconds' => $responseTime,
+                'backfilled' => true,
+            ]);
+
+            return ['result' => 'PASSED', 'reason' => null, 'check' => $check];
+        }
+
+        // Failed offline replay — WAKEFULNESS_FAILED audit event only, never a
+        // retroactive live CRITICAL alert (raiseAlert:false).
+        $this->escalateUnresponsive($check, 'OFFLINE_CODE_MISMATCH', raiseAlert: false);
+
+        return ['result' => 'FAILED', 'reason' => 'OFFLINE_CODE_MISMATCH', 'check' => $check];
+    }
+
+    /**
      * Record that the guard's app received an ONLINE challenge push (Phase 6
      * push reliability). Stamps `delivered_at` once, so the timeout sweep can
      * tell "delivered but ignored" (→ CRITICAL) from "never delivered" (→
@@ -372,5 +482,11 @@ class WakefulnessService
     private function digits(): int
     {
         return (int) config('ironlock.totp_digits', 4);
+    }
+
+    /** TOTP time-step in seconds (RFC-6238 default 30s), shared with the app. */
+    private function totpPeriod(): int
+    {
+        return (int) config('ironlock.totp_period_seconds', 30);
     }
 }

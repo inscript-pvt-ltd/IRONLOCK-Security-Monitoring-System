@@ -64,8 +64,20 @@ Route::prefix('mobile/v1')->group(function () {
         // code-challenge; the server is the sole authority on pass/fail.
         Route::post('wakefulness/{checkId}/respond', [\App\Http\Controllers\Mobile\WakefulnessController::class, 'respond']);
 
+        // Outstanding online challenges (push-fallback discovery, mirrors the
+        // photo pending poll). Lets a foregrounded app find a challenge it didn't
+        // catch via push and raise the code-entry sheet in-app.
+        Route::get('shifts/{shiftId}/wakefulness/pending', [\App\Http\Controllers\Mobile\WakefulnessController::class, 'pending']);
+
         // Push-delivery receipt (Phase 6). The app confirms an online challenge
         // push arrived so the sweep won't false-alarm a dropped push.
         Route::post('wakefulness/{checkId}/received', [\App\Http\Controllers\Mobile\WakefulnessController::class, 'received']);
+
+        // Offline wakefulness flush (Phase 7, contract §6.2). No server check
+        // exists yet — the challenge fired on-device while offline — so the app
+        // flushes {window_reference, code, ...} and the server materialises the
+        // check from it. Shift-scoped (no checkId), mirroring the offline-photo
+        // upload. Idempotent per (shift, window); failures never re-alert.
+        Route::post('shifts/{shiftId}/wakefulness/offline', [\App\Http\Controllers\Mobile\WakefulnessController::class, 'offline']);
     });
 });

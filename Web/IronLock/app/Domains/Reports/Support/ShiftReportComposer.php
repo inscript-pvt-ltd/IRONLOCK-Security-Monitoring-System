@@ -46,7 +46,7 @@ class ShiftReportComposer
             'attendance' => $this->attendance($shift, $compliance),
             'timeline' => $this->timeline($events),
             'gps' => $this->gps($shift, $compliance),
-            'wakefulness' => $this->wakefulness($shift),
+            'wakefulness' => $this->wakefulness($shift, $events),
             'photos' => $this->photos($shift, $includeNonce, $includeHashes),
             'security_validation' => $this->securityValidation($shift, $compliance),
             'wtr' => $this->wtr($shift, $compliance),
@@ -241,27 +241,44 @@ class ShiftReportComposer
         ];
     }
 
-    private function wakefulness(Shift $shift): array
+    /**
+     * @param  \Illuminate\Support\Collection<int,ShiftEvent>  $events
+     */
+    private function wakefulness(Shift $shift, $events): array
     {
+        // The authoritative failure reason lives in the WAKEFULNESS_FAILED audit
+        // event's metadata (`reason` + `alerted`), not on the check row — index it
+        // by check_id so each FAILED check reports the real cause (offline TOTP
+        // mismatch, no-response, comms-gap-suppressed, …) instead of a guess.
+        $failMeta = $events->where('event_type', 'WAKEFULNESS_FAILED')
+            ->mapWithKeys(fn (ShiftEvent $e) => [
+                (string) ($e->metadata['check_id'] ?? '') => (is_array($e->metadata) ? $e->metadata : []),
+            ])->all();
+
         return WakefulnessCheck::where('shift_id', $shift->id)
             ->orderBy('scheduled_at')
             ->get()
-            ->map(function (WakefulnessCheck $c) {
+            ->map(function (WakefulnessCheck $c) use ($failMeta) {
                 $result = $c->result ?? 'PENDING';
                 $reason = null;
+                $alerted = null;
                 if ($result === WakefulnessCheck::RESULT_FAILED) {
-                    $reason = $c->responded_at === null
-                        ? 'No response before window close'
-                        : 'Incorrect code submitted';
+                    $meta = $failMeta[$c->id] ?? [];
+                    $reason = WakefulnessCheck::describeFailure($meta['reason'] ?? null);
+                    $alerted = array_key_exists('alerted', $meta) ? (bool) $meta['alerted'] : null;
                 }
 
                 return [
                     'time' => $this->iso($c->scheduled_at),
-                    'mode' => $c->online_or_offline,
-                    'window' => (int) config('ironlock.wakefulness_response_window_seconds', 60) . 's',
+                    'mode' => $c->online_or_offline === WakefulnessCheck::MODE_OFFLINE ? 'Offline' : 'Online',
+                    'window' => (int) config('ironlock.wakefulness_response_seconds', 60) . 's',
                     'response_time' => $c->response_time_seconds !== null ? $c->response_time_seconds . 's' : '—',
                     'result' => $result,
                     'failure_reason' => $reason,
+                    // false = the failure was suppressed (offline/undelivered): no
+                    // supervisor was paged. Lets the report distinguish a genuine
+                    // sleeping-guard miss from a connectivity gap.
+                    'alerted' => $alerted,
                 ];
             })->all();
     }

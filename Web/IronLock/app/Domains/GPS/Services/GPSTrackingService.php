@@ -6,6 +6,7 @@ use App\Domains\Alerts\Services\AlertService;
 use App\Domains\Geofences\Services\GeofenceService;
 use App\Domains\GPS\Models\GuardLocation;
 use App\Domains\Shifts\Models\Shift;
+use App\Domains\Sites\Models\Site;
 use App\Events\GuardLocationUpdated;
 use App\Jobs\CheckZoneExitJob;
 use Carbon\Carbon;
@@ -90,7 +91,8 @@ class GPSTrackingService
         // guard who is already OUTSIDE on their first ping registers a real
         // INSIDE→OUTSIDE transition instead of being silently missed.
         $previous = GuardLocation::where('guard_id', $guardId)->first();
-        $previousZoneStatus = ($previous && $previous->shift_id === $shiftId)
+        $prevSameShift = $previous && $previous->shift_id === $shiftId;
+        $previousZoneStatus = $prevSameShift
             ? $previous->zone_status
             : GeofenceService::STATUS_INSIDE_ZONE;
 
@@ -111,6 +113,22 @@ class GPSTrackingService
                 : GeofenceService::STATUS_OUTSIDE_ZONE;
         }
 
+        // Maintain the current-excursion anchor. Set on a fresh exit, preserved
+        // across consecutive OUTSIDE pings (same shift), cleared on the return.
+        // A stale cross-shift row is never carried forward — its anchor would
+        // belong to a different excursion — so a new shift's first OUTSIDE ping
+        // starts a fresh anchor. This anchor is the token CheckZoneExitJob checks
+        // to know it is still policing the live excursion (fixes re-exit reset).
+        if ($zoneStatus === GeofenceService::STATUS_OUTSIDE_ZONE) {
+            $zoneLeftAt = ($prevSameShift
+                && $previous->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE
+                && $previous->zone_left_at)
+                ? $previous->zone_left_at
+                : $now;
+        } else {
+            $zoneLeftAt = null;
+        }
+
         // UPSERT: replace the single live-location row for this guard.
         // `updated_at` is the authoritative "last seen" time that drives
         // GuardLocation::isCommsInterrupted(). It is set explicitly in PHP (UTC)
@@ -126,6 +144,7 @@ class GPSTrackingService
                 'accuracy' => $locationData['accuracy'] ?? null,
                 'battery_level' => $locationData['battery_level'] ?? null,
                 'zone_status' => $zoneStatus,
+                'zone_left_at' => $zoneLeftAt,
                 'recorded_at' => isset($locationData['recorded_at'])
                     ? Carbon::parse($locationData['recorded_at'])
                     : null,
@@ -149,14 +168,20 @@ class GPSTrackingService
                 $now
             );
 
-            // On leaving the zone, schedule a grace-period check. The job
-            // re-confirms the guard is still outside before raising an alert.
-            // Suppressed during a flush replay — finalizeFlush() decides once.
+            // On leaving the zone, schedule the zone-exit check. The job
+            // re-confirms the guard is still outside (and still this excursion)
+            // before raising an alert. Suppressed during a flush replay —
+            // finalizeFlush() makes the single present-state decision instead.
+            // A first-position exit (no same-shift prior) is shift-start
+            // positioning: the deadline is scheduled_start, not the grace period.
             if ($dispatchZoneCheck && $zoneStatus === GeofenceService::STATUS_OUTSIDE_ZONE) {
-                $gracePeriodMinutes = $shift?->site?->grace_period_minutes ?? 5;
-
-                CheckZoneExitJob::dispatch($guardId, $shiftId, $now->toISOString())
-                    ->delay(now()->addMinutes($gracePeriodMinutes));
+                $this->dispatchZoneExitCheck(
+                    $shift,
+                    $guardId,
+                    $shiftId,
+                    $zoneLeftAt,
+                    isShiftStartPositioning: !$prevSameShift
+                );
             }
         }
 
@@ -216,10 +241,19 @@ class GPSTrackingService
             && $current->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE
             && $preZoneStatus === GeofenceService::STATUS_INSIDE_ZONE) {
             $shift = Shift::with('site')->find($shiftId);
-            $gracePeriodMinutes = $shift?->site?->grace_period_minutes ?? 5;
 
-            CheckZoneExitJob::dispatch($guardId, $shiftId, $now->toISOString())
-                ->delay(now()->addMinutes($gracePeriodMinutes));
+            // No same-shift prior state => this flush is the guard's first
+            // established position for the shift: shift-start positioning, judged
+            // against scheduled_start. Otherwise it's a mid-shift excursion, judged
+            // against the site grace period. The excursion anchor maintained by
+            // recordLocation is the job's token (fall back to now if absent).
+            $this->dispatchZoneExitCheck(
+                $shift,
+                $guardId,
+                $shiftId,
+                $current->zone_left_at ?? $now,
+                isShiftStartPositioning: !$preIsSameShift
+            );
         }
 
         // (2) Comms-gap / reconnect audit — ONLY within a single shift. A stale
@@ -234,6 +268,48 @@ class GPSTrackingService
                 $this->logCommsGap($guardId, $shiftId, $lastSeen, $now, $gapSeconds, $pingsApplied);
             }
         }
+    }
+
+    /**
+     * Schedule the delayed CheckZoneExitJob for an INSIDE->OUTSIDE edge.
+     *
+     * Two deadlines, one mechanism:
+     *  - Shift-start positioning (the guard's FIRST established position of the
+     *    shift is outside): the guard is expected inside by scheduled_start, so
+     *    the check fires AT scheduled_start — immediately when it has already
+     *    passed (a late start is alerted at once) and delayed until then for an
+     *    early start (the guard may be en route until their scheduled time). The
+     *    site grace period does NOT apply here — the check-in window already is
+     *    the tolerance.
+     *  - Mid-shift excursion (the guard was at post, then stepped out): the
+     *    per-site grace_period_minutes to return before paging.
+     *
+     * $zoneLeftAt is the excursion anchor the job re-checks against the live row
+     * so a superseded (returned-then-re-exited) excursion never fires.
+     */
+    private function dispatchZoneExitCheck(
+        ?Shift $shift,
+        string $guardId,
+        string $shiftId,
+        Carbon $zoneLeftAt,
+        bool $isShiftStartPositioning
+    ): void {
+        $now = Carbon::now();
+
+        if ($isShiftStartPositioning) {
+            $scheduledStart = $shift?->scheduled_start;
+            $fireAt = ($scheduledStart && $scheduledStart->isFuture())
+                ? $scheduledStart->copy()
+                : $now->copy();
+            $reason = CheckZoneExitJob::REASON_SHIFT_START;
+        } else {
+            $gracePeriodMinutes = (int) ($shift?->site?->grace_period_minutes ?? Site::DEFAULT_GRACE_PERIOD_MINUTES);
+            $fireAt = $now->copy()->addMinutes($gracePeriodMinutes);
+            $reason = CheckZoneExitJob::REASON_MID_SHIFT;
+        }
+
+        CheckZoneExitJob::dispatch($guardId, $shiftId, $zoneLeftAt->toISOString(), $reason)
+            ->delay($fireAt);
     }
 
     /**
