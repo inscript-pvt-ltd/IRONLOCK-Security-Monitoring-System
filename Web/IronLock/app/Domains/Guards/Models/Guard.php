@@ -139,6 +139,21 @@ class Guard extends Authenticatable
     }
 
     /**
+     * The guard's currently-active shift, if any (status = active). A guard can
+     * only be on one active shift at a time (one active session per guard), so
+     * this is a hasOne; `latest('actual_start')` just makes the pick
+     * deterministic if two ever overlap. Read-only convenience for the roster —
+     * used to surface the guard's live site on the Guards list; no bearing on
+     * shift lifecycle logic.
+     */
+    public function activeShift()
+    {
+        return $this->hasOne(\App\Domains\Shifts\Models\Shift::class, 'guard_id', 'id')
+            ->where('status', \App\Domains\Shifts\Models\Shift::STATUS_ACTIVE)
+            ->latest('actual_start');
+    }
+
+    /**
      * Get the admin who created this guard.
      */
     public function creator(): BelongsTo

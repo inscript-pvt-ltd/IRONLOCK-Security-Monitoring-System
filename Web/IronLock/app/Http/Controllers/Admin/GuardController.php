@@ -52,7 +52,9 @@ class GuardController extends Controller
             }
         }
 
-        $guards = $query->orderBy('first_name')->paginate(15);
+        // Eager-load each guard's current active shift + its site so the roster
+        // can show where the guard is right now without an N+1 per row.
+        $guards = $query->with('activeShift.site')->orderBy('first_name')->paginate(15);
 
         return view('admin.guards.index', compact('guards'));
     }
@@ -479,7 +481,9 @@ class GuardController extends Controller
 
         // Password rules — numeric-only (digits) so guards can enter it on a
         // mobile numeric keypad. Required for new guards, optional for updates.
-        $passwordRule = ['string', 'min:8', 'confirmed', 'regex:/^[0-9]+$/'];
+        // The admin form generates the password (single field, no re-type), so
+        // there is no `confirmed` rule / password_confirmation field any more.
+        $passwordRule = ['string', 'min:8', 'regex:/^[0-9]+$/'];
         $rules['password'] = array_merge([$guardId ? 'nullable' : 'required'], $passwordRule);
 
         return Validator::make($request->all(), $rules, [

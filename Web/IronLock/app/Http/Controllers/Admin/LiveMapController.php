@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Domains\Sites\Models\Site;
+use App\Domains\Shifts\Models\Shift;
 
 /**
  * Live Map (D-08 · ADM-008 / GPS-006 / GPS-009).
@@ -24,8 +25,14 @@ class LiveMapController extends Controller
      */
     public function index()
     {
+        // The map only ever plots guards on an ACTIVE shift, so the filter should
+        // only offer sites that actually have a guard on duty right now — listing
+        // every site just gives dead options that filter the map down to nothing.
+        // This is a page-load snapshot (the markers themselves refresh every 15s).
         return view('admin.live-map.index', [
-            'sites' => Site::orderBy('name')->get(['id', 'name']),
+            'sites' => Site::whereHas('shifts', function ($q) {
+                $q->where('status', Shift::STATUS_ACTIVE);
+            })->orderBy('name')->get(['id', 'name']),
         ]);
     }
 }

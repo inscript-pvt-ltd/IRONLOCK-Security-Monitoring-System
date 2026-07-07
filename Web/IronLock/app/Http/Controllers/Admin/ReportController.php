@@ -28,6 +28,13 @@ use Illuminate\Support\Facades\Validator;
  */
 class ReportController extends Controller
 {
+    /**
+     * Previous Exports page size. The list is paginated server-side so it stays
+     * fast and compact no matter how many reports have accumulated over time
+     * (older exports used to fall off a hard 50-row cap and become unreachable).
+     */
+    private const EXPORTS_PER_PAGE = 15;
+
     public function __construct(private readonly ReportService $reports) {}
 
     /**
@@ -50,12 +57,51 @@ class ReportController extends Controller
             ->limit(150)
             ->get(['id', 'reference', 'guard_id', 'status', 'scheduled_start']);
 
-        $previous = Report::with(['shift:id,reference', 'generatedBy:id,name'])
-            ->orderByDesc('generated_at')
-            ->limit(50)
-            ->get();
+        // First page of the Previous Exports list; subsequent pages are fetched
+        // as JSON by the pager (@see list()). Both render the same _rows partial.
+        $previous = $this->previousExportsQuery()->paginate(self::EXPORTS_PER_PAGE);
 
         return view('admin.reports.index', compact('types', 'guards', 'sites', 'shifts', 'previous'));
+    }
+
+    /**
+     * GET /admin/reports/list — one page of the Previous Exports list as JSON
+     * (rendered rows HTML + pagination meta). Powers the Prev/Next pager and the
+     * post-delete refresh without a full page reload.
+     */
+    public function list(Request $request): JsonResponse
+    {
+        $page = max(1, (int) $request->query('page', 1));
+
+        $previous = $this->previousExportsQuery()->paginate(self::EXPORTS_PER_PAGE, ['*'], 'page', $page);
+
+        // If a delete emptied the requested page (the page now sits past the end),
+        // fall back to the real last page so the pager never lands on a blank list.
+        if ($previous->currentPage() > $previous->lastPage()) {
+            $previous = $this->previousExportsQuery()
+                ->paginate(self::EXPORTS_PER_PAGE, ['*'], 'page', $previous->lastPage());
+        }
+
+        return response()->json([
+            'success' => true,
+            'html' => view('admin.reports._rows', compact('previous'))->render(),
+            'pagination' => [
+                'current_page' => $previous->currentPage(),
+                'last_page' => $previous->lastPage(),
+                'total' => $previous->total(),
+            ],
+        ]);
+    }
+
+    /**
+     * The Previous Exports base query (newest first, with the relations the row
+     * partial renders). Shared by the initial page and the paged JSON endpoint so
+     * ordering and eager-loads can never drift between them.
+     */
+    private function previousExportsQuery()
+    {
+        return Report::with(['shift:id,reference', 'generatedBy:id,name'])
+            ->orderByDesc('generated_at');
     }
 
     /**

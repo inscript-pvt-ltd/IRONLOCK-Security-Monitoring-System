@@ -911,7 +911,7 @@
                     data-shift-id="{{ $shift->id }}">
                 ⤓ Generate Report
             </button>
-            <div class="generate-report-hint">Shift Welfare Report (PDF)</div>
+            <div class="generate-report-hint">Shift Welfare Report <br> (download PDF or CSV there)</div>
         </div>
     </div>
 </div>
