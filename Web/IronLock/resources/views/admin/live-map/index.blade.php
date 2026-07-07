@@ -109,8 +109,11 @@
 @section('content')
 
 <div class="map-toolbar">
+    {{-- Only sites with a guard on an active shift appear here — those are the
+         only sites the map can actually plot. A page-load snapshot; markers
+         refresh every 15s. When nobody is on duty the list is just "All". --}}
     <select class="filter-select" id="site-filter" onchange="applySiteFilter()">
-        <option value="">Site: All</option>
+        <option value="">Active Sites: All</option>
         @foreach($sites as $site)
             <option value="{{ $site->id }}">{{ $site->name }}</option>
         @endforeach
@@ -147,7 +150,9 @@
     const shiftTimelineBase = '{{ url('admin/shifts') }}';
     const alertsFeedUrl = '{{ route('admin.alerts.index') }}';
 
-    let siteFilter = '';
+    // Honour a ?site=<id> deep-link (e.g. from the Guards roster "Active Site"
+    // link) so the map opens pre-filtered to that site and fits to its guards.
+    let siteFilter = new URLSearchParams(window.location.search).get('site') || '';
     let selectedGuardId = null;
     const guardData = {};   // guard_id → latest payload (for the side panel)
 
@@ -362,6 +367,13 @@
     }
 
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeGuardPanel(); });
+
+    // Reflect a ?site= deep-link in the dropdown so the visible filter matches
+    // the active one. A stale/removed id simply leaves the select on "All".
+    if (siteFilter) {
+        const sel = document.getElementById('site-filter');
+        if (sel) sel.value = siteFilter;
+    }
 
     refresh();
     setInterval(refresh, 15000);

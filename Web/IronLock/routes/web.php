@@ -126,6 +126,9 @@ Route::prefix('admin')->name('admin.')->group(function () {
         // live on the private `reports` disk and are streamed only through the
         // admin-gated download route — no path is ever exposed to a view.
         Route::get('reports', [App\Http\Controllers\Admin\ReportController::class, 'index'])->name('reports.index');
+        // Paged Previous Exports list (JSON: rendered rows + pagination meta).
+        // Static path before the {report} wildcard so it isn't read as a report id.
+        Route::get('reports/list', [App\Http\Controllers\Admin\ReportController::class, 'list'])->name('reports.list');
         Route::post('reports/generate', [App\Http\Controllers\Admin\ReportController::class, 'generate'])->name('reports.generate');
         // Bulk delete (POST, static) before the {report} wildcard so it is not
         // read as a report id.

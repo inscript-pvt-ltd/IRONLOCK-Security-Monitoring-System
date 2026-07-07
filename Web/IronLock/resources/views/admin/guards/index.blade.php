@@ -189,7 +189,7 @@
     .drawer-input[type="datetime-local"] { color-scheme: dark; }
     .drawer-input::-webkit-calendar-picker-indicator { cursor: pointer; opacity: 0.9; }
 
-    /* Password field with a show/hide eye toggle. */
+    /* Password field with an inline copy button. */
     .pw-wrap { position: relative; }
     .pw-wrap .drawer-input { padding-right: 36px; }
     .pw-toggle {
@@ -199,9 +199,13 @@
     }
     .pw-toggle:hover { color: var(--text-primary); }
     .pw-toggle svg { width: 16px; height: 16px; }
-    .pw-toggle .pw-eye-off { display: none; }
-    .pw-toggle.pw-shown .pw-eye { display: none; }
-    .pw-toggle.pw-shown .pw-eye-off { display: block; }
+    /* Copy button: check-mark swaps in briefly after a successful copy. */
+    .pw-toggle .pw-copied-ico { display: none; }
+    .pw-toggle.copied .pw-copy-ico { display: none; }
+    .pw-toggle.copied .pw-copied-ico { display: block; color: var(--success-green); }
+
+    /* Generate-password button — full width under the field. */
+    .pw-generate-btn { width: 100%; margin-top: 8px; }
 
     .drawer-actions {
         display: flex;
@@ -560,7 +564,7 @@
                             <th>Name</th>
                             <th>SIA License No</th>
                             <th>SIA Expiry</th>
-                            <th>Site(s)</th>
+                            <th>Active Site</th>
                             <th>Status</th>
                             <th>Actions</th>
                             <th>Recent Shifts</th>
@@ -586,8 +590,18 @@
                                     @endif
                                 </td>
                                 <td>
-                                    <!-- TODO: Add actual site relationships -->
-                                    <span style="color: var(--text-muted);">No Site</span>
+                                    {{-- The site of the guard's active shift (if any). Links to the
+                                         Live Map pre-filtered to that site so the admin can jump
+                                         straight to where the guard is right now. A guard with no
+                                         active shift is simply off duty. --}}
+                                    @php $activeSite = $guard->activeShift?->site; @endphp
+                                    @if ($activeSite)
+                                        <a href="{{ route('admin.live-map.index', ['site' => $activeSite->id]) }}"
+                                           style="color: var(--premium-gold); text-decoration: none; font-weight: bold;"
+                                           title="View on Live Map">{{ $activeSite->name }} →</a>
+                                    @else
+                                        <span style="color: var(--text-muted);">Off duty</span>
+                                    @endif
                                 </td>
                                 <td>
                                     <div class="status-chip {{ $guard->employment_status === 'active' ? '' : 'unresponsive' }}">
@@ -610,7 +624,7 @@
                                     <button class="btn-sm btn-secondary-sm" onclick="showGuardShifts('{{ $guard->id }}')">View</button>
                                 </td>
                                 <td>
-                                    <button class="btn-sm btn-copy-sm" onclick="copyCredentials('{{ $guard->username }}', '{{ $guard->first_name }}', '{{ $guard->last_name }}')">
+                                    <button class="btn-sm btn-copy-sm" onclick="copyCredentials('{{ $guard->employee_code }}', '{{ $guard->email }}', '{{ $guard->first_name }}', '{{ $guard->last_name }}')">
                                         <span class="copy-text">Copy</span>
                                         <span class="copied-text" style="display: none;">Copied!</span>
                                     </button>
@@ -679,23 +693,20 @@
 
         <div class="drawer-field" id="passwordField">
             <label class="drawer-label">Password</label>
+            {{-- Single, always-visible password field. The admin generates an
+                 8-digit numeric password (no re-type / confirm field — the
+                 backend `confirmed` rule was removed to match) and can copy it
+                 with the inline button. Kept as type="text" so it's readable. --}}
             <div class="pw-wrap">
-                <input type="password" class="drawer-input" id="password" name="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password">
-                <button type="button" class="pw-toggle" data-target="password" aria-label="Show password" title="Show password">
-                    <svg class="pw-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                    <svg class="pw-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                <input type="text" class="drawer-input" id="password" name="password" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Generate a password">
+                <button type="button" class="pw-toggle" id="passwordCopyBtn" onclick="copyGuardPassword()" aria-label="Copy password" title="Copy password">
+                    <svg class="pw-copy-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    <svg class="pw-copied-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                 </button>
             </div>
             <span class="field-error" id="error_password"></span>
-            <div class="pw-wrap" style="margin-top: 6px;">
-                <input type="password" class="drawer-input" id="password_confirmation" name="password_confirmation" placeholder="Confirm Password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password">
-                <button type="button" class="pw-toggle" data-target="password_confirmation" aria-label="Show password" title="Show password">
-                    <svg class="pw-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                    <svg class="pw-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
-                </button>
-            </div>
-            <span class="field-error" id="error_password_confirmation"></span>
-            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">Numbers only, min 8 digits. Leave blank to keep current password.</div>
+            <button type="button" class="drawer-btn outline pw-generate-btn" onclick="generateGuardPassword()">Generate password</button>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">Numbers only, 8 digits. Leave blank to keep current password.</div>
         </div>
 
         <div class="drawer-field">
@@ -936,39 +947,68 @@
         document.getElementById('guardDrawer').scrollTop = 0;
     }
 
-    // Show/hide password toggle (eye icon). Wired once on load.
-    function bindPasswordToggles() {
-        document.querySelectorAll('.pw-toggle').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const input = document.getElementById(btn.dataset.target);
-                if (!input) return;
-                const reveal = input.type === 'password';
-                input.type = reveal ? 'text' : 'password';
-                btn.classList.toggle('pw-shown', reveal);
-                const label = reveal ? 'Hide password' : 'Show password';
-                btn.setAttribute('aria-label', label);
-                btn.setAttribute('title', label);
-            });
-        });
+    // Generate an 8-digit numeric password into the (always-visible) field.
+    // Leading zeros are allowed — it is stored/validated as a digit string.
+    function generateGuardPassword() {
+        const field = document.getElementById('password');
+        if (!field) return;
+        let pw = '';
+        if (window.crypto && window.crypto.getRandomValues) {
+            const buf = new Uint32Array(8);
+            window.crypto.getRandomValues(buf);
+            for (let i = 0; i < 8; i++) pw += (buf[i] % 10).toString();
+        } else {
+            for (let i = 0; i < 8; i++) pw += Math.floor(Math.random() * 10).toString();
+        }
+        field.value = pw;
+        clearFieldError('password');
+        field.focus();
+        field.select();
     }
 
-    // Re-mask both password fields (called whenever the drawer opens).
+    // Copy the current password to the clipboard and flash the check-mark.
+    function copyGuardPassword() {
+        const field = document.getElementById('password');
+        const btn = document.getElementById('passwordCopyBtn');
+        if (!field || !field.value) {
+            showSuccessToast('Nothing to copy — generate a password first.');
+            return;
+        }
+        const flash = () => {
+            if (btn) {
+                btn.classList.add('copied');
+                setTimeout(() => btn.classList.remove('copied'), 1500);
+            }
+            showSuccessToast('Password copied to clipboard');
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(field.value)
+                .then(flash)
+                .catch(() => { legacyCopyText(field.value); flash(); });
+        } else {
+            legacyCopyText(field.value);
+            flash();
+        }
+    }
+
+    // Minimal execCommand fallback for non-secure contexts / older browsers.
+    function legacyCopyText(text) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+        document.body.removeChild(ta);
+    }
+
+    // Reset the copy button's flashed state whenever the drawer (re)opens.
     function resetPasswordToggles() {
-        ['password', 'password_confirmation'].forEach(id => {
-            const input = document.getElementById(id);
-            if (input) input.type = 'password';
-        });
-        document.querySelectorAll('.pw-toggle').forEach(btn => {
-            btn.classList.remove('pw-shown');
-            btn.setAttribute('aria-label', 'Show password');
-            btn.setAttribute('title', 'Show password');
-        });
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', bindPasswordToggles);
-    } else {
-        bindPasswordToggles();
+        const btn = document.getElementById('passwordCopyBtn');
+        if (btn) btn.classList.remove('copied');
     }
 
     function openGuardDrawer(mode, guardId = null) {
@@ -1003,7 +1043,6 @@
             document.getElementById('employment_status').value = 'active';
             // Make password required for new guards
             document.getElementById('password').required = true;
-            document.getElementById('password_confirmation').required = true;
             document.getElementById('passwordField').style.display = 'block';
             form.style.display = 'block';
         } else if (mode === 'edit') {
@@ -1012,7 +1051,6 @@
             document.getElementById('guardId').value = guardId;
             // Make password optional for edits
             document.getElementById('password').required = false;
-            document.getElementById('password_confirmation').required = false;
             document.getElementById('passwordField').style.display = 'block';
             form.style.display = 'block';
         } else if (mode === 'info') {
@@ -1184,7 +1222,6 @@
             // Set up for editing
             document.getElementById('guardId').value = currentGuardId;
             document.getElementById('password').required = false;
-            document.getElementById('password_confirmation').required = false;
 
             // Clear any errors
             clearAllErrors();
@@ -1373,7 +1410,7 @@
 
         // Password is numeric-only — strip any non-digit as the admin types so
         // the field can never hold a value the server will reject.
-        ['password', 'password_confirmation'].forEach(id => {
+        ['password'].forEach(id => {
             const field = document.getElementById(id);
             if (!field) return;
             field.addEventListener('input', function() {
@@ -1445,40 +1482,29 @@
         });
     }
 
-    // Copy credentials functionality with fallback methods
-    function copyCredentials(username, firstName, lastName) {
+    // Copy credentials functionality with fallback methods.
+    // The guard app logs in with EMPLOYEE ID or EMAIL + password (the internal
+    // `username` is NOT a login credential — see AuthService::authenticateGuard /
+    // MOBILE_API_INTEGRATION.md §9). So the copied slip lists both identifiers.
+    function copyCredentials(employeeCode, email, firstName, lastName) {
         const guardFullName = `${firstName} ${lastName}`;
+        const idLine = employeeCode ? employeeCode : '(not set)';
+        const emailLine = email ? email : '(not set)';
 
-        // Professional security credentials message based on PROJECT_MASTER_SPEC requirements
-        const credentialsMessage = `IronLock Security Guard System - Shift Access Credentials
+        const credentialsMessage = `IronLock — Guard App Access
 
 Guard: ${guardFullName}
-Username: ${username}
-Password: [ADMIN: REPLACE WITH ASSIGNED PASSWORD]
+Log in with your Employee ID or Email, plus your password:
+• Employee ID: ${idLine}
+• Email: ${emailLine}
+• Password: [ADMIN: SET ASSIGNED PASSWORD]
 
-IMPORTANT SECURITY PROTOCOLS:
-• Login access is ONLY available during your assigned shift window
-• Authentication attempts outside shift times will be rejected and logged
-• One active session per guard - new login will invalidate previous session
-• Failed login attempts (5+) will temporarily lock your account
+Notes:
+• Login only works during your assigned shift window.
+• One active session per guard.
+• 5 failed attempts temporarily locks the account.
 
-SHIFT ACCESS PROCEDURE:
-1. Download IronLock Guard app from your assigned app store
-2. Login using the username and password provided above
-3. Begin shift only when you arrive at your assigned site
-4. Maintain continuous GPS tracking throughout shift
-5. Respond to all wakefulness checks within 10 seconds
-6. Complete photo verification requests within 90 seconds
-
-PASSWORD SECURITY:
-• Change your password immediately after first login if instructed
-• Never share your credentials with other personnel
-• Report lost or compromised credentials to your supervisor immediately
-
-SUPPORT:
-For technical assistance or password reset, contact your shift supervisor.
-
-This message contains sensitive security information. Do not share with unauthorized personnel.
+Need help or a password reset? Contact your supervisor.
 
 Generated: ${new Date().toLocaleDateString('en-GB')} ${new Date().toLocaleTimeString('en-GB')}`;
 

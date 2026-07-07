@@ -142,13 +142,6 @@
 </style>
 @endsection
 
-@section('topbar-actions')
-<form method="POST" action="{{ route('admin.logout') }}" style="display: inline;">
-    @csrf
-    <button type="submit" class="btn-sm btn-secondary-sm">Logout</button>
-</form>
-@endsection
-
 @section('content')
 
 
@@ -204,7 +197,8 @@
     </div>
 @else
     <div style="text-align: center; padding: 24px; color: var(--text-muted); font-size: 12px;">
-        🎉 No active alerts — All systems normal
+        <img src="{{ asset('Images/icons/alert.png') }}" alt="" style="height: 16px; width: auto; vertical-align: middle; margin-right: 6px;">
+        No active alerts — All systems normal
     </div>
 @endif
 

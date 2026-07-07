@@ -22,6 +22,14 @@
     .reports-grid { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
     .reports-col { flex: 1; min-width: 320px; }
 
+    /* Keep the generator in view while scrolling a long exports list. Only when
+       the two columns sit side by side — once they wrap (narrow screens) the
+       generator scrolls normally so it doesn't pin over the list. `.content` is
+       the scroll container, so top:0 pins it to the top of the content area. */
+    @media (min-width: 720px) {
+        .gen-col { position: sticky; top: 0; align-self: flex-start; }
+    }
+
     .panel {
         background: var(--surface-dark); border: 1px solid var(--border-dark);
         border-radius: 8px; padding: 18px 18px 20px; margin-bottom: 16px;
@@ -106,13 +114,28 @@
         background: transparent; border: 1px solid var(--error-red); color: var(--error-red);
     }
     .bulk-del:hover { background: var(--error-red); color: #fff; }
+
+    /* Previous Exports pager */
+    .exports-pager {
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-dark);
+    }
+    .exports-pager.hidden { display: none; }
+    .pager-info { font-size: 11px; color: var(--text-muted); }
+    .pager-btn {
+        font-size: 11px; font-weight: bold; padding: 6px 12px; border-radius: 5px; cursor: pointer;
+        background: var(--bg-dark); border: 1px solid var(--border-dark); color: var(--text-secondary);
+        transition: color .15s ease, border-color .15s ease;
+    }
+    .pager-btn:hover:not(:disabled) { color: var(--premium-gold); border-color: var(--premium-gold); }
+    .pager-btn:disabled { opacity: 0.4; cursor: default; }
 </style>
 @endsection
 
 @section('content')
 <div class="reports-grid">
     {{-- Generator (D-09 left) --}}
-    <div class="reports-col">
+    <div class="reports-col gen-col">
         <div class="panel">
             <div class="panel-title">Generate a Report</div>
 
@@ -228,39 +251,24 @@
                     </tr>
                 </thead>
                 <tbody id="exports-body">
-                    @forelse ($previous as $r)
-                        @php $fmts = $r->downloadFormats(); @endphp
-                        <tr data-report-row="{{ $r->id }}">
-                            <td class="exp-check-cell"><input type="checkbox" class="exp-check" data-id="{{ $r->id }}"></td>
-                            <td>{{ $r->typeLabel() }}</td>
-                            <td>{{ $r->shift->reference ?? '—' }}</td>
-                            <td><time class="rpt-local" data-ts="{{ optional($r->generated_at)->utc()->format('Y-m-d\TH:i:s\Z') }}">{{ optional($r->generated_at)->format('d M Y H:i') }} UTC</time></td>
-                            <td>
-                                <div class="exp-actions">
-                                    <a class="ico-btn" href="{{ route('admin.reports.show', $r->id) }}" title="Open report">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
-                                    </a>
-                                    <div class="dl-wrap">
-                                        <button type="button" class="ico-btn dl-toggle" title="Download">
-                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                                        </button>
-                                        <div class="dl-menu hidden">
-                                            @foreach ($fmts as $fmt)
-                                                <a href="{{ route('admin.reports.download', ['report' => $r->id, 'format' => $fmt]) }}">↓ {{ strtoupper($fmt) }}</a>
-                                            @endforeach
-                                        </div>
-                                    </div>
-                                    <button type="button" class="ico-btn danger del-btn" data-id="{{ $r->id }}" title="Delete report">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                                    </button>
-                                </div>
-                            </td>
-                        </tr>
-                    @empty
-                        <tr id="exports-empty-row"><td colspan="5"><div class="exports-empty">No reports have been generated yet.</div></td></tr>
-                    @endforelse
+                    @include('admin.reports._rows')
                 </tbody>
             </table>
+
+            {{-- Pager for the Previous Exports list. Rendered from the paginator's
+                 first-page state; the buttons swap the tbody via the JSON list
+                 endpoint. Hidden while there is only a single page. --}}
+            @php
+                $expPage = $previous->currentPage();
+                $expLast = $previous->lastPage();
+                $expTotal = $previous->total();
+            @endphp
+            <div class="exports-pager @if ($expLast <= 1) hidden @endif" id="exports-pager"
+                 data-page="{{ $expPage }}" data-last="{{ $expLast }}" data-total="{{ $expTotal }}">
+                <button type="button" class="pager-btn" id="pg-prev" @if ($expPage <= 1) disabled @endif>‹ Prev</button>
+                <span class="pager-info" id="pg-info">Page {{ $expPage }} of {{ $expLast }} · {{ $expTotal }} total</span>
+                <button type="button" class="pager-btn" id="pg-next" @if ($expPage >= $expLast) disabled @endif>Next ›</button>
+            </div>
         </div>
     </div>
 </div>
@@ -280,6 +288,7 @@
     var progress  = document.getElementById('gen-progress');
     var progFill  = document.getElementById('gen-progress-fill');
     var progPct   = document.getElementById('gen-progress-pct');
+    var GEN_LABEL = btn.textContent; // "Generate Report" — for restoring after a run
 
     function showFields(type) {
         var spec = SPEC[type] || { fields: [], includes: [] };
@@ -306,23 +315,6 @@
 
     typeSel.addEventListener('change', function () { errBox.textContent = ''; showFields(this.value); });
     showFields(typeSel.value);
-
-    // Localise the server-rendered "Generated" times to the viewer's timezone.
-    document.querySelectorAll('.rpt-local').forEach(function (el) {
-        var d = new Date(el.dataset.ts);
-        if (el.dataset.ts && !isNaN(d)) { el.textContent = d.toLocaleString(); el.title = 'UTC: ' + el.dataset.ts; }
-    });
-
-    // Tag each row's download links with the viewer's timezone so the PDF/CSV
-    // print times in the same local zone (stored data stays UTC).
-    try {
-        var viewerTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (viewerTz) {
-            document.querySelectorAll('.dl-menu a').forEach(function (a) {
-                a.href += (a.href.indexOf('?') > -1 ? '&' : '?') + 'tz=' + encodeURIComponent(viewerTz);
-            });
-        }
-    } catch (e) { /* no Intl → server falls back to UTC */ }
 
     // Animate the progress bar toward 90% while the request is in flight; the
     // response snaps it to 100% before redirecting to the report page.
@@ -397,13 +389,95 @@
         }
     });
 
-    // ── Previous Exports: select, per-row download menu, delete, bulk delete ──
+    // On Generate we disable the button + show progress, then redirect to the
+    // report page. Pressing the browser Back button restores THIS page from the
+    // back-forward cache (bfcache) frozen in that mid-generation state — scripts
+    // don't re-run on a bfcache restore, so the button would stay disabled.
+    // Reset it whenever the page is shown from cache.
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return; // fresh load already renders an enabled button
+        stopProgress();
+        progress.hidden = true;
+        setProgress(0);
+        btn.disabled = false;
+        btn.textContent = GEN_LABEL;
+    });
+
+    // ── Previous Exports: paged list, select, download menu, delete ──────────
     var REPORTS_BASE = '{{ url('admin/reports') }}';
+    var LIST_URL     = '{{ route('admin.reports.list') }}';
     var body      = document.getElementById('exports-body');
     var checkAll  = document.getElementById('exp-check-all');
     var bulkBar   = document.getElementById('bulk-bar');
     var bulkCount = document.getElementById('bulk-count');
     var bulkDel   = document.getElementById('bulk-del');
+
+    // Pager state — seeded from the server-rendered first page.
+    var pager   = document.getElementById('exports-pager');
+    var pgPrev  = document.getElementById('pg-prev');
+    var pgNext  = document.getElementById('pg-next');
+    var pgInfo  = document.getElementById('pg-info');
+    var curPage   = parseInt(pager.getAttribute('data-page'), 10) || 1;
+    var lastPage  = parseInt(pager.getAttribute('data-last'), 10) || 1;
+    var totalRows = parseInt(pager.getAttribute('data-total'), 10) || 0;
+    var loading   = false;
+
+    // Localise row times + tz-tag download links for the currently-rendered rows.
+    // Re-run after every page swap so freshly-injected rows get the same treatment
+    // (stored data stays UTC; the ?tz= just makes the PDF/CSV print in local time).
+    var viewerTz = '';
+    try { viewerTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { /* no Intl → server falls back to UTC */ }
+    function decorateRows() {
+        body.querySelectorAll('.rpt-local').forEach(function (el) {
+            var d = new Date(el.dataset.ts);
+            if (el.dataset.ts && !isNaN(d)) { el.textContent = d.toLocaleString(); el.title = 'UTC: ' + el.dataset.ts; }
+        });
+        if (!viewerTz) return;
+        body.querySelectorAll('.dl-menu a').forEach(function (a) {
+            if (a.dataset.tzTagged) return;
+            a.href += (a.href.indexOf('?') > -1 ? '&' : '?') + 'tz=' + encodeURIComponent(viewerTz);
+            a.dataset.tzTagged = '1';
+        });
+    }
+    decorateRows(); // first (server-rendered) page
+
+    function updatePager() {
+        pager.classList.toggle('hidden', lastPage <= 1);
+        pgInfo.textContent = 'Page ' + curPage + ' of ' + lastPage + ' · ' + totalRows + ' total';
+        pgPrev.disabled = loading || curPage <= 1;
+        pgNext.disabled = loading || curPage >= lastPage;
+    }
+
+    // Fetch one page of the list and swap the tbody. Event handlers are delegated
+    // on `body`, so replacing its contents keeps them wired. Clears any selection.
+    async function loadPage(page) {
+        if (loading) return;
+        loading = true;
+        updatePager();
+        try {
+            var res = await fetch(LIST_URL + '?page=' + encodeURIComponent(page), {
+                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+            });
+            var data = await res.json();
+            if (!data.success) throw new Error('list failed');
+            body.innerHTML = data.html;
+            curPage   = data.pagination.current_page;
+            lastPage  = data.pagination.last_page;
+            totalRows = data.pagination.total;
+            closeMenus();
+            if (checkAll) checkAll.checked = false;
+            decorateRows();
+            refreshBulk();
+        } catch (err) {
+            console.error('Exports list error:', err);
+        } finally {
+            loading = false;
+            updatePager();
+        }
+    }
+
+    pgPrev.addEventListener('click', function () { if (curPage > 1) loadPage(curPage - 1); });
+    pgNext.addEventListener('click', function () { if (curPage < lastPage) loadPage(curPage + 1); });
 
     function selectedIds() {
         return Array.from(document.querySelectorAll('.exp-check:checked')).map(function (c) { return c.dataset.id; });
@@ -415,14 +489,10 @@
         bulkCount.textContent = ids.length + ' selected';
         if (checkAll) checkAll.checked = all.length > 0 && ids.length === all.length;
     }
-    function removeRow(id) {
-        var row = document.querySelector('[data-report-row="' + id + '"]');
-        if (row) row.remove();
-        if (!document.querySelector('[data-report-row]')) {
-            body.innerHTML = '<tr id="exports-empty-row"><td colspan="5"><div class="exports-empty">No reports have been generated yet.</div></td></tr>';
-        }
-        refreshBulk();
-    }
+    // After a delete, reload the current page so it backfills from the next page
+    // and the counts stay correct (the server clamps a now-past-the-end page back
+    // to the real last page, so we never land on a blank list).
+    function afterDelete() { loadPage(curPage); }
     function closeMenus(except) {
         document.querySelectorAll('.dl-menu').forEach(function (m) { if (m !== except) m.classList.add('hidden'); });
     }
@@ -461,7 +531,7 @@
                     headers: { 'Accept': 'application/json', 'X-CSRF-TOKEN': token }
                 });
                 var data = await res.json();
-                if (data.success) { removeRow(id); }
+                if (data.success) { afterDelete(); }
                 else { alert(data.error || 'Unable to delete the report.'); }
             } catch (err) { console.error(err); alert('Something went wrong. Please try again.'); }
         }
@@ -481,7 +551,7 @@
                 body: JSON.stringify({ ids: ids })
             });
             var data = await res.json();
-            if (data.success) { ids.forEach(removeRow); }
+            if (data.success) { afterDelete(); }
             else { alert(data.error || 'Unable to delete the selected reports.'); }
         } catch (err) { console.error(err); alert('Something went wrong. Please try again.'); }
     });

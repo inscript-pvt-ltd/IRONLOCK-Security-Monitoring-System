@@ -184,21 +184,6 @@
             cursor: pointer;
         }
 
-        .user-menu {
-            width: 32px;
-            height: 32px;
-            background: var(--deep-security-blue);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 12px;
-            font-weight: bold;
-            color: white;
-            cursor: pointer;
-            position: relative;
-        }
-
         /* Notification bell (topbar, left of the profile avatar) */
         .notif-wrap { position: relative; display: flex; align-items: center; }
 
@@ -717,8 +702,6 @@
         <header class="topbar">
             <div class="topbar-title">@yield('page-title', 'Dashboard')</div>
             @yield('topbar-actions')
-            <div class="topbar-filter">Site: All ▼</div>
-            <div class="topbar-filter">Date: Today ▼</div>
 
             <!-- Critical-alert sound toggle -->
             <button type="button" class="notif-bell" id="alert-mute-btn" onclick="toggleAlertMute()" title="Critical alert sound" aria-label="Toggle critical alert sound" style="margin-right:4px;">
@@ -737,7 +720,7 @@
             <!-- Notifications -->
             <div class="notif-wrap">
                 <button type="button" class="notif-bell" id="notif-bell" onclick="toggleNotifPanel(event)" aria-label="Notifications" title="Notifications">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
                         <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
                     </svg>
@@ -751,10 +734,15 @@
                 </div>
             </div>
 
-            <!-- User Menu -->
-            <div class="user-menu" onclick="showUserMenu()">
-                {{ substr(session('admin_name', 'Admin'), 0, 1) }}
-            </div>
+            <!-- Log out (topbar icon). Tooltip carries the signed-in admin's name. -->
+            <button type="button" class="notif-bell" onclick="confirmLogout()"
+                    title="Log out ({{ session('admin_name', 'Admin') }})" aria-label="Log out">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                    <polyline points="16 17 21 12 16 7"></polyline>
+                    <line x1="21" y1="12" x2="9" y2="12"></line>
+                </svg>
+            </button>
         </header>
 
         <!-- Content Area -->
@@ -858,8 +846,8 @@
             });
         });
 
-        // User menu functionality
-        function showUserMenu() {
+        // Log out (topbar icon). Confirms, then submits the hidden POST form.
+        function confirmLogout() {
             if (confirm('Do you want to logout?')) {
                 document.getElementById('logout-form').submit();
             }
