@@ -30,8 +30,12 @@ class ShiftService {
   /// null value (the caller falls back to device time). Only DioException (real
   /// HTTP errors like 409 SHIFT_NOT_STARTABLE) propagates.
   /// Handles both {data:{shift:{...}}} and {data:{...}} response shapes.
-  Future<({DateTime? actualStart, Map<String, dynamic>? wakefulness})> startShift(
-      String shiftId) async {
+  Future<
+      ({
+        DateTime? actualStart,
+        Map<String, dynamic>? wakefulness,
+        Map<String, dynamic>? photos,
+      })> startShift(String shiftId) async {
     final response = await _dio.post<Map<String, dynamic>>(
       ApiConfig.shiftStart(shiftId),
     );
@@ -40,13 +44,17 @@ class ShiftService {
           '→ ${response.statusCode} ${response.data}');
     }
     final shift = _extractShift(response.data);
-    // The wakefulness block may sit on the shift object or alongside it in data.
+    // The wakefulness / photos blocks may sit on the shift object or alongside
+    // it in data.
     final data = response.data?['data'];
-    final wakefulness = (shift?['wakefulness'] ??
-        (data is Map<String, dynamic> ? data['wakefulness'] : null));
+    final dataMap = data is Map<String, dynamic> ? data : null;
+    final wakefulness = (shift?['wakefulness'] ?? dataMap?['wakefulness']);
+    // Phase 7: the offline-photo schedule (backend Option A).
+    final photos = (shift?['photos'] ?? dataMap?['photos']);
     return (
       actualStart: _parseTime(shift?['actual_start']),
       wakefulness: wakefulness is Map<String, dynamic> ? wakefulness : null,
+      photos: photos is Map<String, dynamic> ? photos : null,
     );
   }
 

@@ -21,6 +21,16 @@ version: 1.0.0+1
 environment:
   sdk: ^3.12.0
 
+# Phase 7: build the SQLCipher (encrypted) flavour of sqlite3 instead of plain
+# SQLite, so the offline-sync queue (lib/data/offline_queue_db.dart) is encrypted
+# at rest. sqlite3 3.x selects the engine through this build-hook user-define
+# (requires `flutter config --enable-native-assets`). A prebuilt SQLCipher
+# community binary is fetched by the hook — nothing is compiled from source here.
+hooks:
+  user_defines:
+    sqlite3:
+      source: sqlcipher
+
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
 # consider running `flutter pub upgrade --major-versions`. Alternatively,
@@ -55,6 +65,19 @@ dependencies:
 
   # Cryptography (HMAC-SHA256 photo signing)
   crypto: ^3.0.3
+
+  # Phase 7 offline sync — encrypted on-device queue (Drift over SQLCipher) +
+  # SNTP anchor for photo capture-time proof.
+  drift: ^2.34.0
+  # The SQLCipher engine is selected via the build-hook `user_defines` below
+  # (sqlite3 3.x dropped the old `sqlcipher_flutter_libs` / `open.overrideFor`
+  # mechanism in favour of build hooks). `sqlite3` is a direct dep so we can call
+  # `PRAGMA key` / `PRAGMA cipher_version` on the raw handle.
+  sqlite3: ^3.1.5
+  path_provider: ^2.1.0
+  path: ^1.9.0
+  ntp: ^2.0.0
+
   flutter_local_notifications: ^22.0.1
   timezone: ^0.11.0
   firebase_core: ^4.11.0
@@ -72,6 +95,10 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
+
+  # Drift codegen (offline queue tables). Kept in lockstep with the drift runtime.
+  drift_dev: ^2.34.0
+  build_runner: ^2.4.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

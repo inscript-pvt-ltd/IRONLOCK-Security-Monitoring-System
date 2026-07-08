@@ -58,6 +58,29 @@ class WakefulnessService {
     throw lastError!;
   }
 
+  /// Single-attempt offline replay used by the Phase 7 flush engine for a queued
+  /// answer. Posts the stored answer verbatim (the trusted [windowReference] and
+  /// the original [respondedAt]) and returns normally on success. Unlike
+  /// [respond] it does **not** swallow 4xx or retry internally — it rethrows the
+  /// `DioException` so the queue's own retry table ([classifyFlush]) can tell
+  /// `ALREADY_RESOLVED` (success) from a terminal rejection, and owns backoff.
+  Future<void> submitOffline({
+    required String checkId,
+    required String code,
+    required int windowReference,
+    required String respondedAt,
+  }) async {
+    await _dio.post<Map<String, dynamic>>(
+      ApiConfig.wakefulnessRespond(checkId),
+      data: {
+        'code': code,
+        'is_offline': true,
+        'window_reference': windowReference,
+        'responded_at': respondedAt,
+      },
+    );
+  }
+
   /// Fire-and-forget confirmation that an online wakefulness push arrived
   /// (Phase 6). Lets the server tell "guard ignored it" from "push never
   /// landed". Online/push-only — never call it for an offline TOTP challenge.

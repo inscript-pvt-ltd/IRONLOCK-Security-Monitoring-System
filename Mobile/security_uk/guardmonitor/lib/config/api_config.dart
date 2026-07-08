@@ -52,6 +52,9 @@ abstract class ApiConfig {
   // Supervisor review outcomes (APPROVED/REJECTED + note) for submitted photos.
   // Polled as the reliable fallback to the PHOTO_REVIEWED push.
   static String shiftPhotosReviews(String id) => '/shifts/$id/photos/reviews';
+  // Phase 7 offline pool: pre-fetch a batch of single-use OFFLINE_POOL nonces
+  // (15-min TTL) while online, so photos can still be captured + signed offline.
+  static String shiftNoncesPrefetch(String id) => '/shifts/$id/nonces/prefetch';
 
   // Wakefulness
   static String wakefulnessRespond(String checkId) => '/wakefulness/$checkId/respond';

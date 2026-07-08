@@ -1,6 +1,12 @@
 # Phase 7 — Offline Sync: Flutter Implementation Plan
 
-**Status:** PLAN — awaiting build. Approved decisions: storage = **Drift + SQLCipher**;
+**Status:** BUILT (Stages 1–6) — 2026-06-30. 131 tests pass, analyze clean. One open item:
+the offline-photo **capture trigger** (§8 note) needs a product/backend decision; all machinery
+is complete and tested. Storage landed as **Drift + SQLCipher via sqlite3 3.x build hooks**
+(`hooks.user_defines.sqlite3.source: sqlcipher`) — the `sqlcipher_flutter_libs`/`open.overrideFor`
+recipe in the plan was removed in sqlite3 3.0; needs `flutter config --enable-native-assets`.
+Verified on host: `cipher_version` 4.16.0.
+Approved decisions: storage = **Drift + SQLCipher**;
 scope = **all three capabilities (GPS, wakefulness, photos) in one pass**.
 **Date:** 2026-06-30.
 **Contracts:** `PHASE_7_FLUTTER_OFFLINE_SYNC.md` (what to build),
@@ -136,20 +142,44 @@ Why columns instead of a generic `queue` blob: typed retry/backoff per row, triv
 - `clearAll()` called from `clearSession`.
 
 ### 4.2 `NoncePoolService` — `lib/services/nonce_pool_service.dart`
-- `Future<void> refillIfLow(shiftId)` — when online and pool `available < threshold`
-  (e.g. <5), `POST /shifts/{id}/nonces/prefetch`, store the 20 returned nonces with
-  their `expires_at`. Call opportunistically: on shift start, and after each online
-  photo capture.
+- `Future<void> refillIfLow(shiftId)` — when online and pool `remaining < 5`,
+  `POST /shifts/{id}/nonces/prefetch` with body `{ "count": 20 }` (server clamps 1–50).
+  Call opportunistically: on shift start, and after each online photo capture.
+  **Confirmed response shape** (`NonceController.php:50-61`):
+
+  ```jsonc
+  { "success": true, "data": {
+      "nonces": [ { "nonce_value": "<64-hex>", "issued_at": "…Z",
+                    "expires_at": "…Z", "type": "OFFLINE_POOL" } /* …count */ ],
+      "expiry_minutes": 15, "remaining": 20 } }
+  ```
+
+  Store each `nonce_value` + `expires_at` (15-min TTL). `remaining` = currently usable
+  pool nonces; refill threshold = `< 5`. A `409 SHIFT_NOT_ACTIVE` → stop, don't retry.
 - `Future<String?> draw(shiftId)` — atomically pick an unexpired, undrawn nonce, mark
   `drawn=1`, return it (null if the pool is dry → offline capture not possible, surface
   to UI: "reconnect to take a verification photo offline" — rare, pool is 20 deep).
 - `purgeExpired()`.
+- **Type discipline (confirmed):** pool nonces are `TYPE_OFFLINE_POOL` — judged against
+  the *reconstructed capture time*, 15-min window. An *online* request nonce on a delayed
+  upload would `NONCE_EXPIRED` (90s, judged at receipt). So offline capture **must** draw
+  a pool nonce and **omit `request_id`**; never reuse an online request nonce offline.
 
 ### 4.3 `TimeAnchorService` — `lib/services/time_anchor_service.dart`
 - `Future<TimeAnchor?> capture()` → `{ ntpIso, stopwatch }`: one SNTP query (cached for
   the shift, re-synced periodically) + a `Stopwatch` started at sync. At photo time:
   `elapsed = stopwatch.elapsed`. Returns null when NTP is unreachable (offline) — caller
-  queues anyway with `ntp_reference=null`.
+  queues anyway with `ntp_reference=null` (server flags `NTP_UNAVAILABLE`/`DELAYED_UPLOAD`).
+- **NTP host (confirmed): client's choice** — server doesn't prescribe one. Use
+  `time.google.com` (leap-smeared, stable) as primary, platform default as fallback.
+- ⚠️ **NTP-vs-EXIF cross-check (new, important):** the server compares our `ntp_reference`
+  against the photo's **EXIF timestamp**; a delta **> 30s** raises
+  `CLOCK_MANIPULATION_SUSPECTED` (`PhotoVerificationService.php:196-203`). Therefore the
+  captured JPEG **must carry an EXIF `DateTimeOriginal`** that matches the NTP anchor
+  within 30s. Action items: (a) confirm the `camera` plugin writes EXIF on each platform;
+  (b) if it doesn't, stamp EXIF ourselves at capture (e.g. `native_exif`) from the same
+  anchored time — **never** from a wall-clock that could be skewed. This is a queue-photo
+  acceptance risk, not just cosmetic (see §8 risk).
 
 ### 4.4 `SyncFlushService` — `lib/services/sync_flush_service.dart`
 The orchestrator. Public API: `Future<void> flush()` and `void start()/stop()`.
@@ -250,28 +280,51 @@ Target: keep the suite green (currently 91 tests) and add ~15–20.
 
 ---
 
-## 8. Risks / open questions for backend (Jerry)
+## 8. Backend questions — ALL RESOLVED (2026-06-30, from backend code)
 
-- **Offline photo = pool nonce, not request nonce?** Confirm a server-initiated
-  `PHOTO_REQUEST` that goes unanswered offline is simply a miss, and only *self-initiated*
-  offline captures use the prefetched pool. (Plan assumes yes per §2c of the contract.)
-- **`/nonces/prefetch` response shape** — confirm it returns `{nonces:[{nonce_value,
-  expires_at}], …}` (or similar) so `NoncePoolService` parses correctly.
-- **`pings[]` batch upper bound?** A long offline stretch at 15s cadence = lots of pings
-  (e.g. 1h ≈ 240). Is there a max batch size, or should we chunk (e.g. 200/req)? Plan
-  will **chunk defensively** at ~200.
-- **NTP source** — any preferred SNTP host, or is `time.google.com`/pool.ntp.org fine?
+- ✅ **Offline photo = pool nonce, not request nonce.** Two nonce types: `TYPE_ONLINE`
+  (90s, judged at receipt) vs `TYPE_OFFLINE_POOL` (15-min, judged vs reconstructed capture
+  time). Offline capture draws a pool nonce + omits `request_id`. An online nonce on a
+  delayed upload → `NONCE_EXPIRED`. (`NonceService.php`, `PhotoVerificationService.php:360-374`)
+- ✅ **`/nonces/prefetch` shape** confirmed — see §4.2. Body `{count}` default 20, clamp
+  1–50; response `data.nonces[].{nonce_value,issued_at,expires_at,type}` + `remaining`.
+- ✅ **`pings[]` no hard cap** — only empty-array is rejected. Each ping does a geofence
+  `ST_CONTAINS` + UPSERT synchronously, so huge batches risk a timeout, not a 4xx. **Chunk
+  at 100–200** (plan uses ~200). Jerry offered to add an explicit server max + clean
+  `VALIDATION_ERROR` if we want a deterministic contract — defer unless flushes time out.
+- ✅ **NTP host = our choice** — server doesn't validate the host; it cross-checks our
+  `ntp_reference` vs the photo **EXIF** time (>30s ⇒ `CLOCK_MANIPULATION_SUSPECTED`). Use
+  `time.google.com` primary. **→ drives the EXIF risk below.**
+
+### Live risk to design around: NTP-vs-EXIF (§4.3)
+
+The photo JPEG must carry an EXIF `DateTimeOriginal` within **30s** of our NTP anchor or
+the server flags `CLOCK_MANIPULATION_SUSPECTED`. First task in Stage 5: verify the `camera`
+plugin's captured file actually contains EXIF on **both** platforms; if not, stamp it from
+the anchored time (`native_exif` or similar). Add a test asserting `|EXIF − ntp_reference|
+≤ 30s` on a queued capture.
 
 ---
 
 ## 9. Definition of done (from the contract, restated)
 
-- [ ] Captures persist to an **encrypted** queue while offline (GPS, wakefulness, photos +
-      nonce/signature/NTP anchor).
-- [ ] On reconnect, queue drains **wakefulness → GPS → photos**, oldest first.
-- [ ] GPS flushes as a **batch** (`pings[]`), chunked if huge.
-- [ ] Each offline photo uses a **distinct** prefetched nonce + its signature + NTP anchor.
-- [ ] Retry/backoff follows §4.5; terminal 4xx dequeue, success-codes dequeue, no loops.
-- [ ] No wall-clock sent as authoritative time; TOTP window + NTP anchor preserved verbatim.
-- [ ] Online happy-path unchanged; both Android & iOS verified.
-- [ ] `flutter analyze` clean, `flutter test` green, HANDOFF.md updated.
+- [x] Captures persist to an **encrypted** queue while offline (GPS, wakefulness, photos +
+      nonce/signature/NTP anchor). *(GPS + wakefulness wired end-to-end; photo enqueue machinery
+      ready — capture trigger open, see §8.)*
+- [x] On reconnect, queue drains **wakefulness → GPS → photos**, oldest first.
+- [x] GPS flushes as a **batch** (`pings[]`), chunked at ≤200.
+- [x] Each offline photo uses a **distinct** prefetched nonce + its signature + NTP anchor.
+- [x] Retry/backoff follows §4.5; terminal 4xx dequeue, success-codes dequeue, capped at 12.
+- [x] No wall-clock sent as authoritative time; TOTP window + NTP anchor preserved verbatim.
+- [x] Online happy-path unchanged. **Device verification on Android & iOS still pending** (host
+      verified incl. SQLCipher active).
+- [x] `flutter analyze` clean, `flutter test` green (131), HANDOFF.md updated.
+
+### Remaining before "fully shipped"
+
+1. ~~Offline-photo capture trigger~~ ✅ **Done 2026-06-30** — backend chose Option A (photo
+   schedule). `PhotoScheduleNotifier` + `PhotoScreen.scheduled()`; fires offline-only, judged on
+   the NTP-anchored `trustedNow()` so the device clock can't dodge/force a capture.
+2. **On-device verification** (Android + iOS): build with native-assets, confirm SQLCipher opens
+   on device, force-offline a shift, reconnect, confirm the dashboard "offline band" (with Jerry).
+3. **EXIF check** on a real capture: confirm `|EXIF − ntp_reference| ≤ 30s` (camera plugin EXIF).

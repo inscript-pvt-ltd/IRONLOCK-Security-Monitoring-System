@@ -14,8 +14,10 @@ import '../../providers/wakefulness_provider.dart';
 import '../../services/api_client.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/gps_service.dart';
+import '../../services/nonce_pool_service.dart';
 import '../../services/push_messaging_service.dart';
 import '../../services/secure_storage_service.dart';
+import '../../services/time_anchor_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_shadows.dart';
@@ -105,6 +107,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   // Guards against the 20s poll — which keeps reporting the same request as
   // pending until it's fulfilled — re-opening a second PhotoScreen on top (H1).
   String? _handlingPhotoRequestId;
+  // Guards against stacking two offline scheduled-capture screens.
+  bool _handlingScheduledPhoto = false;
 
   @override
   void initState() {
@@ -209,8 +213,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         }
       }
 
+      // Phase 7: offline-photo schedule. Self-fire a capture only when OFFLINE —
+      // online, the same mark is delivered by the server as a PHOTO_REQUEST
+      // (push or the /photos/pending poll below), so one schedule never
+      // double-fires. Due-ness is judged against the NTP anchor, not the device
+      // clock (tamper-resistant).
+      final photoScheduler = ref.read(photoScheduleProvider.notifier);
+      if (photoScheduler.isArmed) {
+        photoScheduler.checkSchedule(offline: !online);
+      }
+
       final shiftId = ref.read(shiftProvider).id;
       if (shiftId != null) {
+        // Phase 7: while online, keep the offline-photo nonce pool topped up and
+        // the NTP anchor fresh so a verification photo can still be captured +
+        // signed if the link drops mid-shift. Best-effort, fire-and-forget.
+        if (online) {
+          unawaited(ref.read(noncePoolServiceProvider).refillIfLow(shiftId));
+          unawaited(ref.read(timeAnchorServiceProvider).ensureFresh());
+        }
+
         final photoRes = await dio.get<Map<String, dynamic>>(
           ApiConfig.shiftPhotosPending(shiftId),
         );
@@ -323,6 +345,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
     // Navigate to photo screen when backend requests photo verification.
     ref.listen<PendingPhotoState>(pendingPhotoProvider, (_, next) {
+      // Phase 7: an OFFLINE schedule-triggered capture — no request id / nonce /
+      // countdown. Open PhotoScreen in scheduled mode; it draws a pool nonce and
+      // queues on submit.
+      if (next.pending && next.scheduled) {
+        if (_handlingScheduledPhoto) return;
+        _handlingScheduledPhoto = true;
+        ref.read(pendingPhotoProvider.notifier).setPending(false);
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const PhotoScreen.scheduled(),
+          ),
+        ).whenComplete(() => _handlingScheduledPhoto = false);
+        return;
+      }
       if (next.pending && next.requestId != null && next.nonceValue != null) {
         final requestId = next.requestId!;
         final nonceValue = next.nonceValue!;

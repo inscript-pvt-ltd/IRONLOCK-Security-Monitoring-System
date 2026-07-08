@@ -5,6 +5,104 @@ Each entry: what changed, current state, what's verified, and what's still open.
 
 ---
 
+## 2026-06-30 (cont. 2) — Phase 7 offline sync: CODE-COMPLETE + docs consolidated
+
+Phase 7 (offline capture → flush-on-reconnect) is now **feature-complete in code and unit-tested**
+across all three capabilities. Verified against **all three backend contracts** (the Flutter
+responsibilities doc, `PHASE_7_SYNC_INTEGRITY.md`, and the API guide) — every §5 Definition-of-Done
+item that's implementable in code is done; the retry table matches `classifyFlush` row-for-row.
+**143 tests pass · `flutter analyze` clean.** 8 commits on `saduka` (`110f64e`…`e18a8dd`).
+
+**The single source of truth for what's left is now `guardmonitor/docs/PHASE_7_REMAINING_WORK.md`.**
+Short version — everything remaining is **on-device / dashboard verification** (not new code):
+- 🔴 On-device: SQLCipher opens on Android+iOS (native-assets build); force a shift offline >60 s →
+  reconnect → confirm GPS batch flush + the dashboard "offline band" (with Jerry); offline
+  wakefulness replay + offline scheduled photo land.
+- 🔴 EXIF↔NTP ≤30 s on a real camera capture (stamp EXIF ourselves if the plugin doesn't).
+- 🟡 Confirm `elapsed_seconds:0` projection with Jerry; honor `max_photos_per_capture`; (pre-existing)
+  iOS APNs, Universal Links, cert pinning, obfuscation, prod-host confirm.
+
+**Docs touched this session:** `PHASE_7_IMPLEMENTATION_PLAN.md` (status/DoD),
+`PHASE_7_OFFLINE_PHOTO_TRIGGER_QUESTION.md` (RESOLVED → Option A),
+`PHASE_7_REMAINING_WORK.md` (new), this HANDOFF, and `CLAUDE.md` (architecture map + test count +
+an Offline Sync subsection). Full per-stage detail in the two entries below.
+
+---
+
+## 2026-06-30 (cont.) — Phase 7 Stage 7: offline-photo trigger (schedule) wired
+
+Backend answered the one open Phase 7 question (`PHASE_7_OFFLINE_PHOTO_TRIGGER_QUESTION.md`):
+**Option A — a photo schedule**, analogous to wakefulness TOTP. Built the trigger + the offline
+capture UI. **143 tests pass · analyze clean.**
+
+- **`PhotoProvisioning` + `PhotoScheduleNotifier`** (`photo_schedule_provider.dart`): parse/persist
+  the new `photos` block from `POST /shifts/{id}/start` (`schedule`, `response_seconds`,
+  `offline_nonce_ttl_minutes`, `max_photos_per_capture`); restore on relaunch; clear on
+  end/reconcile/sign-out. `shift_service.startShift` now returns `photos` too.
+- **Fires only when OFFLINE** (online marks arrive as a server `PHOTO_REQUEST` — one schedule,
+  no double-fire). Run from the active-shift home poll next to the wakefulness scheduler.
+- **⛔ Clock-tamper hardening (per request):** due-ness is judged against
+  **`TimeAnchorService.trustedNow()`** — the NTP anchor projected by a monotonic `Stopwatch`, not
+  `DateTime.now()`. Changing the device clock can't dodge or force a scheduled photo. The capture
+  itself already uses the same NTP projection for `ntp_reference`/`captured_at`.
+- **`PhotoScreen.scheduled()`** — reuses the camera/review widgets; **no countdown** (shows an
+  "Offline — saved and uploaded when you reconnect" hint); on submit calls
+  `OfflinePhotoService.enqueueCapture` (draw pool nonce → sign → persist → queue) and pops with a
+  "Saved" snackbar. The **online request path is byte-for-byte unchanged** (guarded by the
+  `scheduled` flag).
+- Tests: `PhotoProvisioning.fromJson` (+defaults/empty), `dueMark` decision incl. **back-dated-clock
+  tamper case**, and `checkSchedule` gating (offline-fires / online-suppresses / no-double-fire).
+
+Phase 7 is now **feature-complete on-device**. Remaining = **on-device verification** (Android +
+iOS native-assets build, SQLCipher opens, force-offline a shift → reconnect → dashboard offline
+band with Jerry) + the **EXIF/NTP ≤30s** check on a real camera capture.
+
+---
+
+## 2026-06-30 — Phase 7 Offline Sync (Stages 1–6 built; one trigger open)
+
+Built the **offline capture → flush-on-reconnect** subsystem per
+`guardmonitor/docs/PHASE_7_IMPLEMENTATION_PLAN.md`. Server side was already done + idempotent;
+this is all the on-device half. **131 tests pass · analyze clean.** Committed in 6 staged commits
+on branch `saduka`.
+
+**Storage decision (changed from the plan's literal wiring):** Drift + **SQLCipher**, but via
+sqlite3 3.x **build hooks** (`hooks.user_defines.sqlite3.source: sqlcipher` in pubspec) — the old
+`sqlcipher_flutter_libs` / `open.overrideFor` path was removed in sqlite3 3.0, and the analyzer-8
+toolchain forces sqlite3 3.x. Requires `flutter config --enable-native-assets` (done on this
+machine). **Verified on host: `PRAGMA cipher_version` → 4.16.0 community** (guard test
+`test/data/cipher_probe_test.dart`).
+
+What landed:
+- **`OfflineQueueDb`** (`lib/data/offline_queue_db.dart`): encrypted Drift DB, 4 tables
+  (GpsQueue/WakefulnessQueue/PhotoQueue/NoncePool) + typed CRUD w/ backoff gate. Cipher key in
+  secure storage (`db_cipher_key`), wiped on sign-out; stale/undecryptable file dropped on open.
+- **`sync_retry.dart`**: `classifyFlush()` = the §4 retry table (success/retry/drop;
+  ALREADY_RESOLVED & NONCE_ALREADY_USED = success), `backoffDelay()` exp+jitter cap 5m, max 12.
+- **`SyncFlushService`**: single-flight, connectivity false→true trigger, ordered
+  wakefulness→GPS→photos, best-effort. Started on sign-in (drains backlog + on each reconnect),
+  app-resume flush, stopped + `clearAll()` + photo-file purge on sign-out.
+- **GPS**: a ping the live POST can't deliver is queued (was dropped) → batch `pings[]` flush,
+  chunked ≤200.
+- **Wakefulness**: an offline TOTP answer that can't reach the server is queued (window_reference
+  preserved) → replayed via `submitOffline`.
+- **Photos**: `NoncePoolService` (prefetch/draw OFFLINE_POOL nonces), `TimeAnchorService` (NTP
+  anchor projected to shutter via monotonic clock — tamper-proof, EXIF-aligned),
+  `OfflinePhotoService.enqueueCapture` (sign + persist + queue), `PhotoService.submitOfflinePhotos`
+  (re-sends stored signature **verbatim**). Home poll tops up pool + anchor while online.
+
+⚠️ **OPEN — the offline-photo CAPTURE TRIGGER is not wired.** All photos today are server-initiated
+(online PHOTO_REQUEST, 90s request nonce). Offline photos need a pool-nonce, no-request_id capture —
+but there's no offline trigger in the app, and whether a pool-nonce photo should *answer* a missed
+PHOTO_REQUEST vs be a *standalone scheduled* offline capture is a **product/backend decision**. The
+machinery is complete and tested for whichever path; only the UI entry point + product rule remain.
+
+Other open items (unchanged from before): confirm the new HTTPS host serves the API on-device;
+device-verify the dashboard "offline band" appears after a GPS backlog flush (with Jerry); iOS APNs
+(FCM) still pending.
+
+---
+
 ## 2026-06-26 (cont. 7) — New HTTPS domain + cleartext removed (closes SECURITY #1 / audit C1·H4)
 
 Backend moved to **`https://dashboard.ironlock.co.uk/api/mobile/v1`** (real branded HTTPS host,

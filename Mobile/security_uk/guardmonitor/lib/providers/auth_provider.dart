@@ -2,14 +2,17 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/auth_token_model.dart';
 import '../models/guard_profile_model.dart';
+import '../data/offline_queue_db.dart';
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
 import '../services/shift_access_link.dart';
 import '../services/gps_service.dart';
+import '../services/offline_photo_service.dart';
 import '../services/notification_service.dart';
 import '../services/push_messaging_service.dart';
 import '../services/push_service.dart';
 import '../services/secure_storage_service.dart';
+import 'photo_schedule_provider.dart';
 import 'shift_provider.dart';
 import 'wakefulness_provider.dart';
 
@@ -140,10 +143,19 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     try {
       await ref.read(authServiceProvider).logout();
     } catch (_) {}
+    // Phase 7: empty the offline-sync queue + its photo files so a different
+    // guard on this device never inherits the previous one's un-flushed data.
+    // (The cipher key is wiped by clearSession too, so a leftover file would be
+    // dropped on next open anyway — this clears it within the running session.)
+    try {
+      await ref.read(offlineQueueDbProvider).clearAll();
+      await ref.read(offlinePhotoServiceProvider).purgeFiles();
+    } catch (_) {}
     await SecureStorageService.clearSession();
     ref.read(currentShiftProvider.notifier).clear();
     ref.invalidate(shiftProvider);
     ref.invalidate(wakefulnessScheduleProvider);
+    ref.invalidate(photoScheduleProvider);
     // Reset the wakefulness FSM + its handled-check history so a different guard
     // signing in on this device starts clean.
     ref.invalidate(wakefulnessProvider);

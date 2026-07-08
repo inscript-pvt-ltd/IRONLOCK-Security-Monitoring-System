@@ -161,6 +161,84 @@ class PhotoService {
     }
   }
 
+  /// Uploads a photo batch that was captured + signed **offline** against a
+  /// pre-fetched pool nonce, used by the Phase 7 flush engine. Everything is sent
+  /// **verbatim from the queue** — the stored [signatures], [capturedAt], GPS and
+  /// the [ntpReference]/[elapsedSeconds] time proof — because the signature was
+  /// computed over those exact strings at capture; recomputing here would break
+  /// it. No `request_id` (offline = self-initiated, pool nonce).
+  ///
+  /// Returns the [PhotoUploadResult] on success; throws [PhotoRejectedException]
+  /// on a `422 PHOTO_REJECTED` (so the flusher treats `NONCE_ALREADY_USED` as
+  /// success and other reasons as terminal) and rethrows other [DioException]s
+  /// for the retry table.
+  Future<PhotoUploadResult> submitOfflinePhotos({
+    required String shiftId,
+    required String nonceValue,
+    required List<String> filePaths,
+    required List<String> signatures,
+    required String capturedAt,
+    String? ntpReference,
+    double elapsedSeconds = 0,
+    String latitude = '',
+    String longitude = '',
+  }) async {
+    assert(filePaths.length == signatures.length && filePaths.isNotEmpty);
+    final single = filePaths.length == 1;
+
+    final formData = FormData();
+    formData.fields.addAll([
+      MapEntry('nonce_value', nonceValue),
+      MapEntry('captured_at', capturedAt),
+      MapEntry('latitude', latitude),
+      MapEntry('longitude', longitude),
+      MapEntry('elapsed_seconds', elapsedSeconds.toString()),
+      if (ntpReference != null) MapEntry('ntp_reference', ntpReference),
+      if (single)
+        MapEntry('signature', signatures.first)
+      else
+        ...signatures.map((s) => MapEntry('signatures[]', s)),
+    ]);
+    for (var i = 0; i < filePaths.length; i++) {
+      formData.files.add(MapEntry(
+        single ? 'photo' : 'photos[]',
+        await MultipartFile.fromFile(filePaths[i], filename: 'guard_photo_$i.jpg'),
+      ));
+    }
+
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        ApiConfig.shiftPhotos(shiftId),
+        data: formData,
+        options: Options(
+          contentType: 'multipart/form-data',
+          receiveTimeout: const Duration(seconds: 60),
+        ),
+      );
+      return ApiResponse.fromJson(response.data!, (data) {
+        final map = data as Map<String, dynamic>;
+        return PhotoUploadResult(
+          result: map['result'] as String? ?? 'VALIDATED',
+          flags: (map['flags'] as List?)?.cast<String>() ?? const [],
+          count: (map['count'] as num?)?.toInt() ?? filePaths.length,
+        );
+      }).data!;
+    } on DioException catch (e) {
+      final data = e.response?.data;
+      if (e.response?.statusCode == 422 && data is Map<String, dynamic>) {
+        final error = data['error'] as Map<String, dynamic>?;
+        if (error?['code'] == 'PHOTO_REJECTED') {
+          final details = error?['details'] as Map<String, dynamic>?;
+          throw PhotoRejectedException(
+            details?['reason'] as String? ?? 'UNKNOWN',
+            error?['message'] as String?,
+          );
+        }
+      }
+      rethrow;
+    }
+  }
+
   /// HMAC-SHA256 over the six fields joined by `\n`, in this exact order, keyed
   /// with the login `hmac_secret`. The server re-builds the same string and
   /// must get the same digest — so the fields here must equal the multipart
