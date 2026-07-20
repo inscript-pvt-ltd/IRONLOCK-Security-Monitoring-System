@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="csrf-token" content="{{ csrf_token() }}">
+    <link rel="icon" type="image/png" href="{{ asset('ironlock-favicon.png') }}">
     <title>Smart Guard Monitor - Admin Login</title>
     <style>
         *, *::before, *::after {
@@ -186,6 +187,49 @@
             display: none;
         }
 
+        /* Footer — pinned to the bottom of the viewport, spanning the full
+           width so the copyright sits bottom-left and the legal links
+           bottom-right, independent of the centred login card. */
+        .login-footer {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 24px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .login-footer .footer-copy {
+            white-space: nowrap;
+        }
+
+        .login-footer .footer-links {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .login-footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        .login-footer a:hover {
+            color: var(--premium-gold);
+        }
+
+        .login-footer .footer-sep {
+            color: var(--border-dark);
+        }
+
         /* Responsive design */
         @media (max-width: 640px) {
             .login-container {
@@ -194,6 +238,18 @@
 
             .login-card {
                 padding: 20px;
+            }
+
+            /* Stack the footer and centre it so nothing collides on narrow screens. */
+            .login-footer {
+                flex-direction: column;
+                gap: 6px;
+                padding: 12px 16px;
+                text-align: center;
+            }
+
+            .login-footer .footer-links {
+                justify-content: center;
             }
         }
     </style>
@@ -263,6 +319,16 @@
             </form>
         </div>
     </div>
+
+    <!-- Footer: copyright (left) and legal links (right) -->
+    <footer class="login-footer">
+        <div class="footer-copy">&copy; {{ date('Y') }} IronLock. All rights reserved.</div>
+        <div class="footer-links">
+            <a href="{{ route('legal.privacy') }}">Privacy Policy</a>
+            <span class="footer-sep">&middot;</span>
+            <a href="{{ route('legal.terms') }}">Terms &amp; Conditions</a>
+        </div>
+    </footer>
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {
