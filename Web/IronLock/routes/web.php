@@ -23,6 +23,12 @@ Route::get('m/shift-access/{token}', function (string $token) {
         ->header('Cache-Control', 'no-store, no-cache, must-revalidate');
 })->where('token', '[A-Fa-f0-9]{16,128}')->name('shift-access.open');
 
+// Legal pages — PUBLIC, no auth. Linked from the admin login footer and served
+// as static, cacheable content (no personal data, no forms). Route-model
+// binding is irrelevant here; these render a plain informational view.
+Route::view('privacy-policy', 'legal.privacy')->name('legal.privacy');
+Route::view('terms', 'legal.terms')->name('legal.terms');
+
 // Admin Authentication Routes
 Route::prefix('admin')->name('admin.')->group(function () {
     // Public routes (no auth required)
