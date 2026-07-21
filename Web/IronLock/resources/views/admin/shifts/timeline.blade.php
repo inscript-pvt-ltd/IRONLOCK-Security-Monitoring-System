@@ -829,6 +829,16 @@
             <div class="sum-row"><span class="sum-label">Sched. end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->scheduled_end) }}">{{ $fmt($shift->scheduled_end) }}</time></span></div>
             <div class="sum-row"><span class="sum-label">Actual start</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->actual_start) }}">{{ $fmt($shift->actual_start) }}</time></span></div>
             <div class="sum-row"><span class="sum-label">Actual end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->actual_end) }}">{{ $fmt($shift->actual_end) }}</time></span></div>
+            @php
+                $gpsCov = $gpsSummary['coverage_percent'] ?? null;
+                $gpsHint = $gpsCov === null
+                    ? 'Available once the shift has started.'
+                    : 'Share of the active shift the guard was confirmed on-post — inside the geofence with live GPS. Deducts time outside the zone and offline/comms gaps.';
+            @endphp
+            <div class="sum-row" title="{{ $gpsHint }}">
+                <span class="sum-label">GPS coverage</span>
+                <span class="sum-val">{{ $gpsCov === null ? '—' : number_format((float) $gpsCov, 1) . '%' }}</span>
+            </div>
         </div>
 
         <div class="panel">

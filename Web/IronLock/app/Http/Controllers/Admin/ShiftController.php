@@ -354,7 +354,14 @@ class ShiftController extends Controller
             // Shared with the generated reports via ComplianceCalculator (Phase 8).
             $wakefulnessSummary = $compliance->wakefulnessSummary($shift);
 
-            return view('admin.shifts.timeline', compact('shift', 'events', 'photoRequests', 'photoSummary', 'wakefulnessChecks', 'wakefulnessSummary'));
+            // GPS coverage for the Shift Details panel — the share of the active
+            // shift the guard was confirmed on-post (inside the geofence with
+            // live GPS), deducting both outside-zone excursions and offline gaps.
+            // Computed live via ComplianceCalculator so the panel and the
+            // generated reports (REP-001/REP-002) read one implementation (Phase 8).
+            $gpsSummary = $compliance->gpsCoverage($shift);
+
+            return view('admin.shifts.timeline', compact('shift', 'events', 'photoRequests', 'photoSummary', 'wakefulnessChecks', 'wakefulnessSummary', 'gpsSummary'));
         } catch (ModelNotFoundException $e) {
             return redirect()
                 ->route('admin.shifts.index')
