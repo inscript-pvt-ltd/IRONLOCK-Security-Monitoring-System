@@ -95,8 +95,10 @@ class ShiftWelfareReportBuilder extends ReportBuilder
         $gps = $s['gps'] ?? [];
         $cov = $gps['coverage_percent'] ?? null;
         $add('GPS', 'Coverage %', $cov === null ? '—' : round((float) $cov, 1));
-        $add('GPS', 'Time Inside', $gps['time_inside_label'] ?? '—');
-        $add('GPS', 'Time Outside', $gps['time_outside_label'] ?? '—');
+        $add('GPS', 'Time Inside Geofence', $gps['time_inside_label'] ?? '—');
+        $add('GPS', 'Time Outside Zone', $gps['time_outside_label'] ?? '—');
+        $add('GPS', 'Time Offline', $gps['time_offline_label'] ?? '—');
+        $add('GPS', 'Zone Exits', $gps['exit_count'] ?? 0);
         $add('GPS', 'Gap Count', $gps['gap_count'] ?? 0);
         $add('GPS', 'Final Location', $gps['final_location'] ?? '—');
 

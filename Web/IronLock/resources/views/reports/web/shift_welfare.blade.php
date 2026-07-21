@@ -77,14 +77,29 @@
         <summary class="wf-sechead"><span class="wf-secnum">4</span><span class="wf-sectitle">GPS &amp; Geofence Summary</span><span class="wf-secdesc">Location coverage</span><span class="wf-chev"></span></summary>
         <div class="wf-secbody">
             <div class="wf-info" style="grid-template-columns:1fr">
+                @php
+                    // Backward-compat with reports frozen BEFORE GPS coverage became
+                    // exit-aware (2026-07-20). Old snapshots stored offline time under
+                    // `time_outside_label` and have no `time_offline_label`/`exit_count`.
+                    // Detect the split by the presence of `time_offline_label`, and map
+                    // an old snapshot honestly: its figure was offline time (→ Time
+                    // Offline), with no separate outside-zone measure (→ "—", 0 exits).
+                    $gpsHasSplit = array_key_exists('time_offline_label', $gps);
+                    $gpsInside  = $gps['time_inside_label'] ?? null;
+                    $gpsOutside = $gpsHasSplit ? ($gps['time_outside_label'] ?? null) : null;
+                    $gpsOffline = $gpsHasSplit ? ($gps['time_offline_label'] ?? null) : ($gps['time_outside_label'] ?? null);
+                    $gpsExits   = $gps['exit_count'] ?? 0;
+                @endphp
                 <div class="wf-row"><span class="k">Site Name</span><span class="v">{{ $gps['site_name'] }}</span></div>
                 <div class="wf-row"><span class="k">GPS Coverage</span><span class="v">{{ $gps['coverage_percent'] === null ? '—' : number_format((float) $gps['coverage_percent'], 1) . '%' }}</span></div>
-                <div class="wf-row"><span class="k">Time Inside Geofence</span><span class="v">{{ $dash($gps['time_inside_label']) }}</span></div>
-                <div class="wf-row"><span class="k">Time Outside / Offline</span><span class="v">{{ $dash($gps['time_outside_label']) }}</span></div>
-                <div class="wf-row"><span class="k">Communication Gaps</span><span class="v">{{ $gps['gap_count'] > 0 ? '▲ ' . $gps['gap_count'] : 'None' }}</span></div>
-                <div class="wf-row"><span class="k">Final Shift Location</span><span class="v wf-mono">{{ $dash($gps['final_location']) }}</span></div>
+                <div class="wf-row"><span class="k">Time Inside Geofence</span><span class="v">{{ $dash($gpsInside) }}</span></div>
+                <div class="wf-row"><span class="k">Time Outside Zone</span><span class="v">{{ $dash($gpsOutside) }}</span></div>
+                <div class="wf-row"><span class="k">Time Offline</span><span class="v">{{ $dash($gpsOffline) }}</span></div>
+                <div class="wf-row"><span class="k">Zone Exits</span><span class="v">{{ $gpsExits > 0 ? '▲ ' . $gpsExits : 'None' }}</span></div>
+                <div class="wf-row"><span class="k">Communication Gaps</span><span class="v">{{ ($gps['gap_count'] ?? 0) > 0 ? '▲ ' . $gps['gap_count'] : 'None' }}</span></div>
+                <div class="wf-row"><span class="k">Final Shift Location</span><span class="v wf-mono">{{ $dash($gps['final_location'] ?? null) }}</span></div>
             </div>
-            <div class="wf-note">GPS coverage is derived from communication-gap audit events; IronLock does not retain a per-ping location history, so an absolute ping count is not reported.</div>
+            <div class="wf-note">GPS Coverage is the share of the active shift the guard was confirmed on-post — inside the geofence with live GPS — deducting both time spent outside the zone (from geofence-transition events) and offline/comms-gap time. IronLock retains no per-ping location history, so an absolute ping count is not reported.</div>
         </div>
     </details>
 

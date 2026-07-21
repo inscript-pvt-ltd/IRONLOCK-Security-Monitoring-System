@@ -2,6 +2,7 @@
 
 namespace App\Domains\Compliance\Services;
 
+use App\Domains\Geofences\Services\GeofenceService;
 use App\Domains\GPS\Models\GuardLocation;
 use App\Domains\Photos\Models\PhotoRequest;
 use App\Domains\Photos\Models\PhotoReview;
@@ -80,20 +81,31 @@ class ComplianceCalculator
 
     /**
      * GPS coverage over the shift's active window: the proportion of the worked
-     * period during which the guard's position was being received.
+     * period during which the guard was confirmed ON-POST — i.e. inside the
+     * geofence AND sending live GPS.
      *
      * There is no per-ping history table (guard_locations holds one mutable
-     * live row), so coverage is derived from the append-only comms-gap audit:
-     * every reconnect after a backfill-threshold silence writes a COMMS_GAP_END
-     * carrying gap_seconds. Coverage = (active_seconds − Σ gap_seconds) /
-     * active_seconds. This mirrors the Phase 7 "no retroactive alerts" model —
-     * a closed, backfilled gap is offline time, not covered time.
+     * live row), so coverage is reconstructed from two append-only audit
+     * signals, both deducted from the active window:
+     *   1. OFFLINE time — every reconnect after a backfill-threshold silence
+     *      writes a COMMS_GAP_END carrying gap_seconds (Σ = offline seconds).
+     *   2. OUTSIDE-ZONE time — each INSIDE→OUTSIDE / OUTSIDE→INSIDE pair of
+     *      ZONE_TRANSITION events bounds an excursion outside the geofence
+     *      (see outsideZoneSeconds()).
+     * Coverage = (active − offline − outside) / active. This mirrors the
+     * Phase 7 "no retroactive alerts" model — a closed gap is offline time, and
+     * an excursion the guard already returned from is still off-post time — and
+     * makes the figure reflect real on-post presence, not merely connectivity.
+     *
+     * The three parts are kept non-overlapping and summing to the active window:
+     * offline is authoritative (no observation possible while dark) and outside
+     * is capped to what remains, so inside + outside + offline = active exactly.
      *
      * The active window runs actual_start → actual_end (or scheduled_end, or
      * now for a still-active shift). Returns null percentages when the shift
      * never started (nothing to cover).
      *
-     * @return array{active_seconds:int,gap_seconds:int,covered_seconds:int,coverage_percent:?float,gap_count:int}
+     * @return array{active_seconds:int,gap_seconds:int,outside_seconds:int,covered_seconds:int,coverage_percent:?float,gap_count:int,exit_count:int}
      */
     public function gpsCoverage(Shift $shift): array
     {
@@ -103,9 +115,11 @@ class ComplianceCalculator
             return [
                 'active_seconds' => 0,
                 'gap_seconds' => 0,
+                'outside_seconds' => 0,
                 'covered_seconds' => 0,
                 'coverage_percent' => null,
                 'gap_count' => 0,
+                'exit_count' => 0,
             ];
         }
 
@@ -116,8 +130,8 @@ class ComplianceCalculator
 
         $activeSeconds = (int) $start->diffInSeconds($end);
 
-        // Sum the durations of comms gaps that closed during this shift. The
-        // duration lives on the COMMS_GAP_END metadata (gap_seconds).
+        // (1) Offline seconds — sum of comms gaps that closed during this shift.
+        // The duration lives on the COMMS_GAP_END metadata (gap_seconds).
         $gapEvents = ShiftEvent::where('shift_id', $shift->id)
             ->where('event_type', 'COMMS_GAP_END')
             ->get();
@@ -130,7 +144,16 @@ class ComplianceCalculator
         // A gap can never exceed the active window (clamp defends against a
         // gap that straddles the shift boundary).
         $gapSeconds = min($gapSeconds, $activeSeconds);
-        $coveredSeconds = max(0, $activeSeconds - $gapSeconds);
+
+        // (2) Outside-zone seconds — reconstructed from the ZONE_TRANSITION
+        // trail. Observable only while online, so these intervals do not overlap
+        // the offline gaps; capping to the non-offline remainder keeps the
+        // breakdown coherent even if a backfilled excursion nudges the two.
+        [$outsideSeconds, $exitCount] = $this->outsideZoneSeconds($shift, $start, $end);
+        $outsideSeconds = min($outsideSeconds, max(0, $activeSeconds - $gapSeconds));
+
+        // Covered = confirmed on-post: online AND inside the geofence.
+        $coveredSeconds = max(0, $activeSeconds - $gapSeconds - $outsideSeconds);
 
         $coveragePercent = $activeSeconds > 0
             ? round($coveredSeconds / $activeSeconds * 100, 1)
@@ -139,10 +162,71 @@ class ComplianceCalculator
         return [
             'active_seconds' => $activeSeconds,
             'gap_seconds' => $gapSeconds,
+            'outside_seconds' => $outsideSeconds,
             'covered_seconds' => $coveredSeconds,
             'coverage_percent' => $coveragePercent,
             'gap_count' => $gapEvents->count(),
+            'exit_count' => $exitCount,
         ];
+    }
+
+    /**
+     * Total time the guard spent outside the geofence over [$start, $end],
+     * reconstructed from the immutable ZONE_TRANSITION audit trail.
+     *
+     * Each INSIDE→OUTSIDE edge opens an excursion; the next OUTSIDE→INSIDE edge
+     * closes it. An excursion still open at shift end is closed at $end (the
+     * guard never came back on record). All transition timestamps are clamped to
+     * the active window so a stray edge cannot over- or under-count, and the
+     * events are read in server-time order (recorded_at) so pairing is stable.
+     *
+     * @return array{0:int,1:int}  [outsideSeconds, exitCount]
+     */
+    private function outsideZoneSeconds(Shift $shift, Carbon $start, Carbon $end): array
+    {
+        $transitions = ShiftEvent::where('shift_id', $shift->id)
+            ->where('event_type', 'ZONE_TRANSITION')
+            ->orderBy('recorded_at')
+            ->orderBy('created_at')
+            ->get();
+
+        $outsideSeconds = 0;
+        $exitCount = 0;
+        $outsideSince = null;
+
+        foreach ($transitions as $t) {
+            $to = is_array($t->metadata) ? ($t->metadata['to_status'] ?? null) : null;
+
+            $at = $t->recorded_at instanceof Carbon
+                ? $t->recorded_at->copy()
+                : Carbon::parse($t->recorded_at);
+
+            // Clamp into the active window (order-preserving, so pairing holds).
+            if ($at->lessThan($start)) {
+                $at = $start->copy();
+            } elseif ($at->greaterThan($end)) {
+                $at = $end->copy();
+            }
+
+            if ($to === GeofenceService::STATUS_OUTSIDE_ZONE) {
+                if ($outsideSince === null) {
+                    $outsideSince = $at;
+                    $exitCount++;
+                }
+            } elseif ($to === GeofenceService::STATUS_INSIDE_ZONE) {
+                if ($outsideSince !== null) {
+                    $outsideSeconds += (int) $outsideSince->diffInSeconds($at);
+                    $outsideSince = null;
+                }
+            }
+        }
+
+        // Never returned on record → outside until the shift window closes.
+        if ($outsideSince !== null) {
+            $outsideSeconds += (int) $outsideSince->diffInSeconds($end);
+        }
+
+        return [$outsideSeconds, $exitCount];
     }
 
     /**

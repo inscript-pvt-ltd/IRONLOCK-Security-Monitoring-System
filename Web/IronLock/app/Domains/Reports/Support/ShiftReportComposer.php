@@ -225,7 +225,8 @@ class ShiftReportComposer
     {
         $gps = $compliance['gps'];
         $covered = $gps['covered_seconds'];
-        $gapSecs = $gps['gap_seconds'] ?? 0;
+        $outsideSecs = $gps['outside_seconds'] ?? 0;
+        $offlineSecs = $gps['gap_seconds'] ?? 0;
 
         $final = \App\Domains\GPS\Models\GuardLocation::where('guard_id', $shift->guard_id)->first();
 
@@ -234,8 +235,14 @@ class ShiftReportComposer
             // No ping-history table exists — honestly null rather than invented.
             'total_updates' => null,
             'coverage_percent' => $gps['coverage_percent'],
+            // Covered = confirmed on-post (inside geofence AND online). The two
+            // deductions are reported separately so a supervisor can tell an
+            // off-post excursion (Time Outside Zone) from a connectivity loss
+            // (Time Offline) — they are distinct compliance concerns.
             'time_inside_label' => $covered !== null ? $this->secondsLabel((int) $covered) : null,
-            'time_outside_label' => $this->secondsLabel((int) $gapSecs),
+            'time_outside_label' => $this->secondsLabel((int) $outsideSecs),
+            'time_offline_label' => $this->secondsLabel((int) $offlineSecs),
+            'exit_count' => $gps['exit_count'] ?? 0,
             'gap_count' => $gps['gap_count'] ?? 0,
             'final_location' => $final ? ($final->latitude . ', ' . $final->longitude) : null,
         ];
