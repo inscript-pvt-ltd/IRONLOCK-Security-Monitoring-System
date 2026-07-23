@@ -41,9 +41,20 @@ class PhotoController extends Controller
             return $this->apiError('SHIFT_NOT_ACTIVE', 'No active shift found with this ID.', 409);
         }
 
+        // Only surface requests that are still ANSWERABLE. A request stays
+        // PENDING until the once-a-minute photos:timeout-sweep flips it to
+        // TIMEOUT, so a status-only filter would keep advertising a request for
+        // up to ~60s after its response window (and nonce TTL) already closed —
+        // the app would re-open it and any capture would fail NONCE_EXPIRED. The
+        // live deadline (requested_at + photo_response_seconds) closes that gap
+        // independently of when the sweep runs; the sweep still owns the TIMEOUT
+        // transition + CRITICAL alert.
+        $window = (int) config('ironlock.photo_response_seconds', 90);
+
         $requests = PhotoRequest::with('nonce')
             ->where('shift_id', $shift->id)
             ->where('status', PhotoRequest::STATUS_PENDING)
+            ->where('requested_at', '>=', now()->subSeconds($window))
             ->orderBy('requested_at')
             ->get()
             ->map(fn (PhotoRequest $r) => [

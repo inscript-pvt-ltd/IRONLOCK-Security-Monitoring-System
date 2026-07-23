@@ -128,6 +128,7 @@ class WakefulnessCheck extends Model
             'RESPONSE_LATE' => 'Answered after the window closed',
             'COMMS_INTERRUPTED' => 'Missed while offline — connectivity gap (not paged)',
             'PUSH_UNDELIVERED' => 'Challenge push never delivered (not paged)',
+            'STALE_CATCHUP' => 'Deadline lapsed during a monitoring gap — logged late (not paged)',
             default => 'Failed',
         };
     }

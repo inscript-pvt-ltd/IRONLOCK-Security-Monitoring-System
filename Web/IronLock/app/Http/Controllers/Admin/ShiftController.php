@@ -256,6 +256,13 @@ class ShiftController extends Controller
                 ->orderByDesc('created_at')
                 ->get();
 
+            // NTP_UNAVAILABLE is not a standalone timeline event: an online
+            // capture never supplies trusted network time, so it would fire on
+            // every online photo. The signal already rides the PHOTO_SUBMITTED
+            // row's `flags`, so drop the redundant standalone rows here — this
+            // also cleans historical shifts logged before we stopped emitting it.
+            $events = $events->reject(fn (ShiftEvent $e) => $e->event_type === 'NTP_UNAVAILABLE')->values();
+
             // Photo verification (Phase 4): all requests for this shift, newest
             // first, each with ALL its stored evidence images (a request may now
             // carry up to 5). The images are served only through an admin-
@@ -291,12 +298,22 @@ class ShiftController extends Controller
                             ];
                         })->all();
 
+                    // Mode parity with the wakefulness table: an OFFLINE_POOL
+                    // capture (flushed on reconnect) is tagged Offline. Read the
+                    // flag off the first stored evidence's metadata — the same
+                    // source the welfare report uses (ShiftReportComposer::photos()).
+                    // A request with no evidence yet is an online dispatch awaiting
+                    // a response, so it stays Online (false) by default.
+                    $firstEvidence = $r->evidences->sortBy('created_at')->first();
+                    $firstMeta = is_array($firstEvidence?->metadata) ? $firstEvidence->metadata : [];
+
                     return [
                         'status' => $r->status,
                         'request_type' => $r->request_type,
                         'requested_at' => $r->requested_at,
                         'submitted_at' => $r->submitted_at,
                         'image_count' => count($evidences),
+                        'captured_offline' => (bool) ($firstMeta['captured_offline'] ?? false),
                         'evidences' => $evidences,
                     ];
                 });

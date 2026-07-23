@@ -282,27 +282,39 @@ class WakefulnessService
         // Backfill the challenge into the timeline too — the online path logs
         // WAKEFULNESS_CHALLENGE at dispatch; offline it fired on-device, so we
         // record it here at its actual mark so the trail isn't missing the ask.
-        $this->logEvent($shift, 'WAKEFULNESS_CHALLENGE', [
+        // Carry the true on-device challenge/response times into the audit
+        // metadata. An offline check MATERIALISES at flush time, so its event
+        // rows are stamped (recorded_at) when the app reconnected and POSTed —
+        // NOT when the code was actually shown. Without these fields the timeline
+        // can only show the flush instant, which reads minutes/hours late; the
+        // dashboard surfaces these so an offline row states when it really fired.
+        $offlineAudit = [
+            'scheduled_at' => optional($check->scheduled_at)->toISOString(),
+            'responded_at' => optional($check->responded_at)->toISOString(),
+            'response_time_seconds' => $responseTime,
+        ];
+
+        $this->logEvent($shift, 'WAKEFULNESS_CHALLENGE', array_merge([
             'check_id' => $check->id,
             'mode' => WakefulnessCheck::MODE_OFFLINE,
             'request_type' => WakefulnessCheck::TYPE_SCHEDULED,
             'backfilled' => true,
-        ]);
+        ], $offlineAudit));
 
         if ($correct) {
-            $this->logEvent($shift, 'WAKEFULNESS_CONFIRMED', [
+            $this->logEvent($shift, 'WAKEFULNESS_CONFIRMED', array_merge([
                 'check_id' => $check->id,
                 'mode' => WakefulnessCheck::MODE_OFFLINE,
-                'response_time_seconds' => $responseTime,
                 'backfilled' => true,
-            ]);
+            ], $offlineAudit));
 
             return ['result' => 'PASSED', 'reason' => null, 'check' => $check];
         }
 
         // Failed offline replay — WAKEFULNESS_FAILED audit event only, never a
-        // retroactive live CRITICAL alert (raiseAlert:false).
-        $this->escalateUnresponsive($check, 'OFFLINE_CODE_MISMATCH', raiseAlert: false);
+        // retroactive live CRITICAL alert (raiseAlert:false). Same on-device
+        // challenge/response times so a failed offline row reads honestly too.
+        $this->escalateUnresponsive($check, 'OFFLINE_CODE_MISMATCH', raiseAlert: false, extraMeta: $offlineAudit);
 
         return ['result' => 'FAILED', 'reason' => 'OFFLINE_CODE_MISMATCH', 'check' => $check];
     }
@@ -365,19 +377,32 @@ class WakefulnessService
      * $raiseAlert is false when the timeout-sweep determines the guard was
      * comms-interrupted: the missed challenge is recorded for audit, but no
      * supervisor is paged for what is a connectivity gap, not a sleeping guard.
+     *
+     * $occurredAt overrides when the failure is treated as having happened. It
+     * defaults to the check's server_received_at (i.e. now, for a response-path
+     * failure). The timeout-sweep passes the check's real deadline instead, so a
+     * miss detected minutes late (e.g. after a scheduler gap) reports the failure
+     * at the moment the guard actually went unresponsive, not when the sweep
+     * finally caught up. $extraMeta is merged into the audit event (the sweep uses
+     * it to record deadline_at / detected_late_by_seconds).
      */
-    public function escalateUnresponsive(WakefulnessCheck $check, string $reason, bool $raiseAlert = true): void
-    {
+    public function escalateUnresponsive(
+        WakefulnessCheck $check,
+        string $reason,
+        bool $raiseAlert = true,
+        ?Carbon $occurredAt = null,
+        array $extraMeta = []
+    ): void {
         $shift = $check->shift;
         $guard = $check->assignedGuard;
-        $occurredAt = ($check->server_received_at ?? Carbon::now());
+        $occurredAt = $occurredAt ?? ($check->server_received_at ?? Carbon::now());
 
-        $this->logEvent($shift, 'WAKEFULNESS_FAILED', [
+        $this->logEvent($shift, 'WAKEFULNESS_FAILED', array_merge([
             'check_id' => $check->id,
             'mode' => $check->online_or_offline,
             'reason' => $reason,
             'alerted' => $raiseAlert,
-        ]);
+        ], $extraMeta));
 
         if (!$raiseAlert) {
             return;
@@ -426,6 +451,11 @@ class WakefulnessService
                     'shift_id' => $check->shift_id,
                     'code' => $code,
                     'response_seconds' => $this->responseSeconds(),
+                    // Countdown anchor (parity with PHOTO_REQUEST). For an online
+                    // challenge scheduled_at IS the dispatch instant, so a tapped
+                    // notification can anchor its countdown / drop a stale tap
+                    // without waiting for the /wakefulness/pending poll.
+                    'issued_at' => optional($check->scheduled_at)->toISOString(),
                 ]
             );
         } catch (\Throwable $e) {

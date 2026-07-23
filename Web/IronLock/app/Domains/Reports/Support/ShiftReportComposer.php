@@ -92,7 +92,25 @@ class ShiftReportComposer
             'duration_label' => $this->durationLabel($shift->actual_duration),
             'status' => $shift->status,
             'status_label' => $shift->formatted_status,
+            // How the shift ended. actual_end above is the compliance-credited
+            // value (auto-close credits it to scheduled_end), so this flag is the
+            // only signal that the guard never ended the shift themselves — the
+            // system force-closed an overdue one. The report shows the label
+            // beside Actual End so an on-time-looking value isn't misread.
+            'end_type' => $shift->end_type,
+            'auto_closed' => $shift->end_type === Shift::END_TYPE_AUTO,
+            'end_type_label' => $this->endTypeLabel($shift->end_type),
         ];
+    }
+
+    /** Human label for a shift end_type, or null for a normal guard-ended shift. */
+    private function endTypeLabel(?string $endType): ?string
+    {
+        return match ($endType) {
+            Shift::END_TYPE_AUTO  => 'Auto-closed (overdue)',
+            Shift::END_TYPE_EARLY => 'Early end (approved)',
+            default => null,
+        };
     }
 
     private function attendance(Shift $shift, array $compliance): array

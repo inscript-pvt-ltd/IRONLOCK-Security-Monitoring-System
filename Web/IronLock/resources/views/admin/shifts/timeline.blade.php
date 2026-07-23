@@ -113,6 +113,14 @@
     .detail-status-chip.cancelled  { color: var(--text-muted);     border-color: var(--text-muted); }
     .detail-status-chip.missed     { color: var(--error-red);      border-color: var(--error-red); }
 
+    /* Small red marker next to a shift's Actual end when it was auto-closed
+       (force-closed overdue) rather than ended by the guard. */
+    .auto-close-dot {
+        display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+        background: var(--error-red); margin-left: 6px; vertical-align: middle;
+        cursor: help;
+    }
+
     .detail-btn-back {
         font-size: 11px; color: var(--text-secondary); text-decoration: none;
         border: 1px solid var(--border-dark); border-radius: 4px; padding: 5px 10px;
@@ -162,6 +170,9 @@
         background: var(--bg-dark); border: 1px solid var(--border-dark);
         color: var(--text-secondary); line-height: 1.5; word-break: break-word;
     }
+    /* Plain-English lead line for a ZONE_EXIT card (SHIFT_START vs MID_SHIFT),
+       so the timeline reads like the alert instead of dumping raw metadata. */
+    .tl-zone-desc { color: var(--text-primary); font-weight: 600; margin-bottom: 6px; }
     .tl-empty { font-size: 12px; color: var(--text-muted); padding: 10px 0; }
 
     /* ── Offline / backfilled (Phase 7) ─────────────────
@@ -264,8 +275,10 @@
         display: inline-block; padding: 2px 7px; border-radius: 9px; font-size: 9px;
         font-weight: bold; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid;
     }
+    .photo-badge.fulfilled { color: var(--success-green); border-color: var(--success-green); }
     .photo-badge.validated { color: var(--success-green); border-color: var(--success-green); }
     .photo-badge.flagged   { color: var(--warning-amber);  border-color: var(--warning-amber); }
+    .photo-badge.offline   { color: var(--warning-amber);  border-color: var(--warning-amber); }
     .photo-badge.pending   { color: var(--text-muted);     border-color: var(--border-dark); }
     .photo-badge.rejected,
     .photo-badge.anomaly,
@@ -517,6 +530,22 @@
         'auto'  => 'var(--error-red)',
         default => 'var(--text-primary)',
     };
+    // Auto-closed shift: autoClose() credits actual_end back to scheduled_end for
+    // compliance, but the guard never actually ended the shift — the system
+    // force-closed it. So the Shift Details "Actual end" shows the REAL force-close
+    // moment (SHIFT_AUTO_CLOSED metadata closed_at) with a red dot, rather than the
+    // scheduled time, so a supervisor sees when the shift was really shut down.
+    $isAutoClosed = $shift->end_type === \App\Domains\Shifts\Models\Shift::END_TYPE_AUTO;
+    $autoClosedAt = null;
+    if ($isAutoClosed) {
+        $autoEvent = $events->firstWhere('event_type', 'SHIFT_AUTO_CLOSED');
+        $autoMeta = is_array($autoEvent?->metadata) ? $autoEvent->metadata : [];
+        $autoClosedAt = $autoMeta['closed_at'] ?? null;
+    }
+    // The time to display for "Actual end": the real force-close moment when
+    // auto-closed (falling back to actual_end if the event metadata is missing),
+    // otherwise the recorded actual_end.
+    $actualEndDisplay = ($isAutoClosed && $autoClosedAt) ? $autoClosedAt : $shift->actual_end;
 @endphp
 
 <div class="detail-head">
@@ -603,6 +632,83 @@
                                     . '.';
                             }
                         }
+
+                        // ZONE_EXIT: render a plain-English description plus only the
+                        // fields that make sense for each flavour, instead of dumping
+                        // raw metadata. Wording mirrors the supervisor alert
+                        // (AlertService::createZoneExitAlert). SHIFT_START = never
+                        // reached post (judged vs scheduled_start, so no exit time and
+                        // grace is irrelevant); MID_SHIFT = stepped out mid-shift past
+                        // the site grace (so scheduled_start is irrelevant). Display
+                        // only — the immutable metadata still holds every field, so
+                        // this also cleans up ZONE_EXIT rows already on file.
+                        $zoneExitDesc = null;
+                        $zoneExitFields = [];
+                        if ($event->event_type === 'ZONE_EXIT') {
+                            $zeReason = $payload['reason'] ?? 'MID_SHIFT';
+                            $zeCoords = $payload['coordinates'] ?? null;
+                            $zeLastKnown = is_array($zeCoords)
+                                ? (($zeCoords['latitude'] ?? '?') . ', ' . ($zeCoords['longitude'] ?? '?'))
+                                : null;
+
+                            if ($zeReason === 'SHIFT_START') {
+                                $zoneExitDesc = 'Guard was still outside the site boundary at their scheduled start time — never reached their post.';
+                                if (!empty($payload['scheduled_start'])) {
+                                    $zoneExitFields['Scheduled start'] = $payload['scheduled_start'];
+                                }
+                            } else {
+                                $zeGrace = $payload['grace_period_minutes'] ?? null;
+                                $zoneExitDesc = 'Guard left the site boundary during the shift and stayed outside past the'
+                                    . ($zeGrace !== null ? ' ' . $zeGrace . '-minute' : '') . ' grace period.';
+                                if (!empty($payload['exited_at'])) {
+                                    $zoneExitFields['Exited zone at'] = $payload['exited_at'];
+                                }
+                                if ($zeGrace !== null) {
+                                    $zoneExitFields['Grace period'] = $zeGrace . ' min';
+                                }
+                            }
+                            if ($zeLastKnown !== null) {
+                                $zoneExitFields['Last known location'] = $zeLastKnown;
+                            }
+                        }
+
+                        // WAKEFULNESS_FAILED: deadline_at / detected_late_by_seconds are
+                        // scheduler-gap diagnostics. On a healthy miss the sweep always
+                        // catches it within ~one minute, so they're just noise. Show them
+                        // only when they signal something — a suppressed STALE_CATCHUP, or
+                        // a detection later than the staleness threshold (a real cron gap) —
+                        // and round the raw float to 1dp. Display-only: the stored metadata
+                        // keeps every field (same curation approach as ZONE_EXIT above).
+                        if ($event->event_type === 'WAKEFULNESS_FAILED') {
+                            $wfLate = $payload['detected_late_by_seconds'] ?? null;
+                            $wfStale = (int) config('ironlock.catchup_staleness_seconds', 180);
+                            $wfShowGap = (($payload['reason'] ?? null) === 'STALE_CATCHUP')
+                                || (is_numeric($wfLate) && $wfLate > $wfStale);
+                            if (!$wfShowGap) {
+                                unset($payload['deadline_at'], $payload['detected_late_by_seconds']);
+                            } elseif (is_numeric($wfLate)) {
+                                $payload['detected_late_by_seconds'] = round((float) $wfLate, 1);
+                            }
+                        }
+
+                        // OFFLINE wakefulness (TOTP): the challenge fires on-device and
+                        // the result MATERIALISES on reconnect, so the audit row's server
+                        // time is the flush instant — minutes/hours after the code was
+                        // actually shown. Flag the row "Offline" and render a curated card
+                        // with the true on-device times (challenged / responded / duration)
+                        // carried in the metadata, so it never reads as a live challenge.
+                        $wfOffline = in_array($event->event_type, ['WAKEFULNESS_CHALLENGE', 'WAKEFULNESS_CONFIRMED', 'WAKEFULNESS_FAILED'], true)
+                            && (($payload['mode'] ?? null) === 'OFFLINE');
+                        $wfFields = [];
+                        if ($wfOffline) {
+                            if (!empty($payload['scheduled_at'])) { $wfFields['Challenged'] = $payload['scheduled_at']; }
+                            if (!empty($payload['responded_at'])) { $wfFields['Responded'] = $payload['responded_at']; }
+                            if (isset($payload['response_time_seconds']) && $payload['response_time_seconds'] !== null && $payload['response_time_seconds'] !== '') {
+                                $wfFields['Response duration'] = $payload['response_time_seconds'] . 's';
+                            }
+                            if (!empty($payload['reason'])) { $wfFields['Reason'] = $payload['reason']; }
+                            if (!empty($payload['check_id'])) { $wfFields['Check Id'] = $payload['check_id']; }
+                        }
                     @endphp
                     <div class="tl-row">
                         <div class="tl-node">
@@ -613,6 +719,7 @@
                             <div class="tl-heading">
                                 {{ $meta['label'] }}
                                 @if ($isOfflineEvent)<span class="tl-offline-badge">⟲ Backfilled</span>@endif
+                                @if ($wfOffline)<span class="tl-offline-badge">Offline</span>@endif
                             </div>
                             @if ($isOfflineEvent)
                                 {{-- Offline / backfilled band. Dated to when it actually
@@ -633,7 +740,35 @@
                                 <div class="tl-meta">
                                     <time class="tl-ts" data-ts="{{ $iso($event->server_received_at ?? $event->created_at) }}">{{ $time($event->server_received_at ?? $event->created_at) }}</time> · server time · {{ $event->event_type }}
                                 </div>
-                                @if (!empty($payload))
+                                @if ($event->event_type === 'ZONE_EXIT')
+                                    <div class="tl-card">
+                                        <div class="tl-zone-desc">{{ $zoneExitDesc }}</div>
+                                        @foreach ($zoneExitFields as $k => $v)
+                                            <div>{{ $k }}:
+                                                @if ($isTs($v))
+                                                    <time class="tl-ts-full" data-ts="{{ $iso($v) }}">{{ $fmt($v) }}</time>
+                                                @else
+                                                    {{ $v }}
+                                                @endif
+                                            </div>
+                                        @endforeach
+                                    </div>
+                                @elseif ($wfOffline && !empty($wfFields))
+                                    {{-- Curated offline-wakefulness card: the true on-device
+                                         challenge/response times (metadata), not the flush
+                                         instant in the server-time line above. --}}
+                                    <div class="tl-card">
+                                        @foreach ($wfFields as $k => $v)
+                                            <div>{{ $k }}:
+                                                @if ($isTs($v))
+                                                    <time class="tl-ts-full" data-ts="{{ $iso($v) }}">{{ $fmt($v) }}</time>
+                                                @else
+                                                    {{ $v }}
+                                                @endif
+                                            </div>
+                                        @endforeach
+                                    </div>
+                                @elseif (!empty($payload))
                                     <div class="tl-card">
                                         @foreach ($payload as $k => $v)
                                             @php $v = is_bool($v) ? ($v ? 'yes' : 'no') : (is_array($v) ? json_encode($v) : $v); @endphp
@@ -691,6 +826,9 @@
                             $ordLabel   = $ordinals[$prIdx] ?? (($prIdx + 1) . 'th');
                             $hasImages  = !empty($pr['evidences']);
                             $reqBadge   = strtolower($pr['status'] ?? 'pending');
+                            // Offline tag parity with the wakefulness Mode column: an
+                            // OFFLINE_POOL capture flushed on reconnect reads "Offline".
+                            $capturedOffline = (bool) ($pr['captured_offline'] ?? false);
                             $previewEvs = array_slice($pr['evidences'] ?? [], 0, 3);
                             $imgCount   = $pr['image_count'] ?? 0;
                             $moreCount  = max(0, $imgCount - 3);
@@ -726,6 +864,7 @@
                                 </div>
                                 <div class="attempt-info-sub">
                                     {{ ucfirst($pr['request_type'] ?? 'manual') }}
+                                    @if ($capturedOffline)<span class="photo-badge offline" style="font-size:8px;padding:1px 5px;margin-left:4px;">Offline</span>@endif
                                     &nbsp;·&nbsp;<time class="tl-ts-full" data-ts="{{ $iso($pr['requested_at']) }}">{{ $fmt($pr['requested_at']) }}</time>
                                     &nbsp;·&nbsp;<span class="photo-badge {{ $reqBadge }}" style="font-size:8px;padding:1px 5px;">{{ str_replace('_', ' ', $reqBadge) }}</span>
                                 </div>
@@ -799,10 +938,7 @@
                             <tr>
                                 <td><span class="wake-badge {{ $badge }}">{{ $wc['result'] ?? 'PENDING' }}</span></td>
                                 <td>{{ ucfirst($wc['request_type'] ?? 'scheduled') }}</td>
-                                <td>
-                                    {{ ucfirst(strtolower($wc['mode'] ?? '—')) }}
-                                    @if (!empty($wc['is_offline']))<span class="wake-badge pending" style="margin-left:4px;">Offline</span>@endif
-                                </td>
+                                <td style="color: {{ !empty($wc['is_offline']) ? 'var(--warning-amber)' : 'inherit' }};">{{ ucfirst(strtolower($wc['mode'] ?? '—')) }}</td>
                                 <td><time class="tl-ts-full" data-ts="{{ $iso($wc['scheduled_at']) }}">{{ $fmt($wc['scheduled_at']) }}</time></td>
                                 <td><time class="tl-ts-full" data-ts="{{ $iso($wc['responded_at']) }}">{{ $fmt($wc['responded_at']) }}</time></td>
                                 <td>{{ $wc['response_time_seconds'] !== null ? $wc['response_time_seconds'] . 's' : '—' }}</td>
@@ -828,7 +964,7 @@
             <div class="sum-row"><span class="sum-label">Scheduled</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->scheduled_start) }}">{{ $fmt($shift->scheduled_start) }}</time></span></div>
             <div class="sum-row"><span class="sum-label">Sched. end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->scheduled_end) }}">{{ $fmt($shift->scheduled_end) }}</time></span></div>
             <div class="sum-row"><span class="sum-label">Actual start</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->actual_start) }}">{{ $fmt($shift->actual_start) }}</time></span></div>
-            <div class="sum-row"><span class="sum-label">Actual end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($shift->actual_end) }}">{{ $fmt($shift->actual_end) }}</time></span></div>
+            <div class="sum-row"><span class="sum-label">Actual end</span><span class="sum-val"><time class="tl-ts-full" data-ts="{{ $iso($actualEndDisplay) }}">{{ $fmt($actualEndDisplay) }}</time>@if ($isAutoClosed)<span class="auto-close-dot" title="Auto-closed (overdue) — the guard didn't end the shift; the system force-closed it"></span>@endif</span></div>
             @php
                 $gpsCov = $gpsSummary['coverage_percent'] ?? null;
                 $gpsHint = $gpsCov === null

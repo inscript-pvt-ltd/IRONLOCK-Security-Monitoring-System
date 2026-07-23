@@ -30,6 +30,11 @@ use Illuminate\Console\Command;
  *    it (minus a one-run tolerance), so it never double-fires.
  *  - Only the latest due-but-unfired mark is fired per run; stale marks the
  *    server slept through are not spammed out one-by-one.
+ *  - A due mark older than catchup_staleness_seconds (default 180s) is NOT fired
+ *    online at all: it came due while the guard/scheduler was offline, where the
+ *    app's own offline capture already covered the guard. Firing it online now
+ *    would land a surprise request seconds after reconnect (finding #3). The next
+ *    future mark still fires normally. --force bypasses this.
  *  - A comms-interrupted guard (stale/absent GPS ping) is skipped: an online
  *    push can't reach an offline device, and the app's own offline capture
  *    covers them. This is what stops a guard in a dead-signal zone from
@@ -50,6 +55,7 @@ class DispatchScheduledPhotos extends Command
     public function handle(PhotoVerificationService $photos): int
     {
         $now = Carbon::now();
+        $staleCutoff = $now->copy()->subSeconds((int) config('ironlock.catchup_staleness_seconds', 180));
 
         $shifts = Shift::with('assignedGuard')
             ->where('status', Shift::STATUS_ACTIVE)
@@ -57,6 +63,7 @@ class DispatchScheduledPhotos extends Command
 
         $fired = 0;
         $skippedOffline = 0;
+        $skippedStale = 0;
 
         foreach ($shifts as $shift) {
             if (!$shift->assignedGuard) {
@@ -106,6 +113,14 @@ class DispatchScheduledPhotos extends Command
                 continue;
             }
 
+            // Catch-up guard: a mark that came due long ago was already covered by
+            // the app's offline capture during the gap. Skip it so a reconnecting
+            // guard isn't hit with a retroactive online request (finding #3).
+            if ($dueMark !== null && !$this->option('force') && $dueMark->lessThan($staleCutoff)) {
+                $skippedStale++;
+                continue;
+            }
+
             try {
                 $photos->createRequest($shift, null, PhotoRequest::TYPE_SCHEDULED);
                 $fired++;
@@ -114,7 +129,7 @@ class DispatchScheduledPhotos extends Command
             }
         }
 
-        $this->info("Dispatched {$fired} scheduled photo check(s); skipped {$skippedOffline} offline guard(s).");
+        $this->info("Dispatched {$fired} scheduled photo check(s); skipped {$skippedOffline} offline guard(s), {$skippedStale} stale catch-up mark(s).");
 
         return self::SUCCESS;
     }

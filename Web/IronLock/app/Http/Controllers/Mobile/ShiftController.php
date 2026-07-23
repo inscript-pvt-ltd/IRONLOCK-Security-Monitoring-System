@@ -137,9 +137,14 @@ class ShiftController extends Controller
                 'schedule' => $shift->photo_schedule ?? [],
                 // Online window: seconds to capture+upload after a pushed request.
                 'response_seconds' => (int) config('ironlock.photo_response_seconds', 90),
-                // Offline window: a drawn pool nonce is valid this many minutes
-                // from issuance; the capture's reconstructed time must fall inside.
-                'offline_nonce_ttl_minutes' => NonceService::OFFLINE_TTL_MINUTES,
+                // Offline window: an OFFLINE_POOL nonce prefetched now stays
+                // valid for the whole shift (to scheduled_end + grace), so it
+                // spans every 50–70-min photo mark — NOT a fixed 15 min, which
+                // would expire before the first mark and fail NONCE_EXPIRED. The
+                // authoritative per-nonce deadline is each nonce's `expires_at`
+                // from /nonces/prefetch; this figure is the shift-wide window for
+                // a prefetch made now.
+                'offline_nonce_ttl_minutes' => NonceService::offlineTtlMinutesFor($shift),
                 'max_photos_per_capture' => PhotoVerificationService::MAX_PHOTOS_PER_REQUEST,
             ],
         ]);

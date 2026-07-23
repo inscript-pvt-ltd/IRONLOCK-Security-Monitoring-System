@@ -12,8 +12,9 @@ class Nonce extends Model
 {
     use HasUuids;
 
-    // Nonce types (spec §23.6). ONLINE = issued live per request (60s expiry);
-    // OFFLINE_POOL = pre-fetched batch for offline capture (15-min expiry).
+    // Nonce types (spec §23.6). ONLINE = issued live per request (90s expiry);
+    // OFFLINE_POOL = pre-fetched batch for offline capture, valid for the whole
+    // shift (NonceService::offlineExpiryFor) so it spans the 50–70-min marks.
     public const TYPE_ONLINE = 'ONLINE';
     public const TYPE_OFFLINE_POOL = 'OFFLINE_POOL';
 

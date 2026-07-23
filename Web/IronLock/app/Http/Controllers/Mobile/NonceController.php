@@ -49,7 +49,7 @@ class NonceController extends Controller
 
         return $this->apiSuccess([
             'nonces' => $pool,
-            'expiry_minutes' => NonceService::OFFLINE_TTL_MINUTES,
+            'expiry_minutes' => NonceService::offlineTtlMinutesFor($shift),
             'remaining' => $this->nonces->remainingPoolCount($guard, $shift),
         ]);
     }

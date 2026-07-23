@@ -24,6 +24,11 @@ use Illuminate\Console\Command;
  *    (minus a one-run tolerance), so it never double-fires.
  *  - Only the latest due-but-unfired mark is fired per run; stale marks the
  *    server slept through are not spammed out one-by-one.
+ *  - A due mark older than catchup_staleness_seconds (default 180s) is NOT fired
+ *    online at all: it came due while the guard/scheduler was offline, where the
+ *    app's own offline challenge already covered the guard. Firing it online now
+ *    would land a surprise challenge seconds after reconnect (finding #3). The
+ *    next future mark still fires normally. --force bypasses this.
  *  - A comms-interrupted guard (stale/absent GPS ping) is skipped: an online
  *    push can't reach an offline device, and the app's own offline TOTP
  *    challenge covers them. This is what stops a guard in a dead-signal zone
@@ -44,6 +49,7 @@ class DispatchScheduledWakefulness extends Command
     public function handle(WakefulnessService $wakefulness): int
     {
         $now = Carbon::now();
+        $staleCutoff = $now->copy()->subSeconds((int) config('ironlock.catchup_staleness_seconds', 180));
 
         $shifts = Shift::with('assignedGuard')
             ->where('status', Shift::STATUS_ACTIVE)
@@ -51,6 +57,7 @@ class DispatchScheduledWakefulness extends Command
 
         $fired = 0;
         $skippedOffline = 0;
+        $skippedStale = 0;
 
         foreach ($shifts as $shift) {
             if (!$shift->assignedGuard) {
@@ -100,6 +107,14 @@ class DispatchScheduledWakefulness extends Command
                 continue;
             }
 
+            // Catch-up guard: a mark that came due long ago was already covered by
+            // the app's offline challenge during the gap. Skip it so a reconnecting
+            // guard isn't hit with a retroactive online challenge (finding #3).
+            if ($dueMark !== null && !$this->option('force') && $dueMark->lessThan($staleCutoff)) {
+                $skippedStale++;
+                continue;
+            }
+
             try {
                 $wakefulness->dispatchOnlineCheck($shift, WakefulnessCheck::TYPE_SCHEDULED);
                 $fired++;
@@ -108,7 +123,7 @@ class DispatchScheduledWakefulness extends Command
             }
         }
 
-        $this->info("Dispatched {$fired} wakefulness challenge(s); skipped {$skippedOffline} offline guard(s).");
+        $this->info("Dispatched {$fired} wakefulness challenge(s); skipped {$skippedOffline} offline guard(s), {$skippedStale} stale catch-up mark(s).");
 
         return self::SUCCESS;
     }

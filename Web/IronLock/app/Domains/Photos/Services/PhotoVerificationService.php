@@ -46,6 +46,15 @@ class PhotoVerificationService
     /** NTP vs EXIF delta before CLOCK_MANIPULATION_SUSPECTED is flagged. */
     public const CLOCK_SKEW_SECONDS = 30;
 
+    /**
+     * Forward slack, in seconds, when snapping an offline capture back to the
+     * schedule mark it answered. The offline camera fires at a mark and capture
+     * follows moments later, so the mark is normally <= capture; this absorbs
+     * minor capture-time reconstruction undershoot. Photo marks sit ~1h apart,
+     * so this can never grab the next mark.
+     */
+    private const OFFLINE_MARK_TOLERANCE_SECONDS = 90;
+
     public function __construct(
         private readonly NonceService $nonces,
         private readonly AlertService $alerts,
@@ -201,8 +210,13 @@ class PhotoVerificationService
         $exifTimestamp = $this->parse($payload['exif_timestamp'] ?? null);
 
         if (!$ntpAvailable) {
+            // Annotate the submission only — no standalone NTP_UNAVAILABLE
+            // timeline event. An online capture never carries trusted network
+            // time (the live server receipt is the anchor), so this fires on
+            // every online photo; a separate warn-tone event just duplicates the
+            // flag already shown on the PHOTO_SUBMITTED row. The flag still rides
+            // the submission (and the welfare report reads it off the evidence).
             $flags[] = PhotoEvidence::FLAG_NTP_UNAVAILABLE;
-            $this->logEvent($shift, 'NTP_UNAVAILABLE', ['request_id' => $request->id]);
         } elseif ($exifTimestamp && $ntpAtCapture && abs($ntpAtCapture->diffInSeconds($exifTimestamp)) > self::CLOCK_SKEW_SECONDS) {
             $flags[] = PhotoEvidence::FLAG_CLOCK_MANIPULATION;
             $this->logEvent($shift, 'CLOCK_MANIPULATION_SUSPECTED', [
@@ -213,7 +227,20 @@ class PhotoVerificationService
             $this->raiseAlert($guard, $shift, 'CLOCK_MANIPULATION_SUSPECTED', 'Photo EXIF time differs from NTP by more than 30s.');
         }
 
-        if ($captureTime->diffInSeconds($serverReceivedAt) > self::DELAYED_UPLOAD_SECONDS) {
+        // An OFFLINE_POOL nonce means the guard captured this while disconnected
+        // and it flushed on reconnect — recorded so the timeline and the welfare
+        // report can label the attempt "Offline" (the report reads this flag off
+        // the first evidence's metadata; without it every photo read as Online).
+        // Resolved here (before the delayed-upload check) because that flag only
+        // applies to online captures — see below.
+        $capturedOffline = $nonce->type !== Nonce::TYPE_ONLINE;
+
+        // DELAYED_UPLOAD only means something for an ONLINE capture (a guard
+        // stalling between shooting a live photo and uploading it). For an OFFLINE
+        // capture the capture→receipt gap IS the offline hold — the photo can only
+        // reach the server once the device reconnects — so flagging it would be a
+        // guaranteed false positive on every offline flush. Judge it online only.
+        if (!$capturedOffline && $captureTime->diffInSeconds($serverReceivedAt) > self::DELAYED_UPLOAD_SECONDS) {
             $flags[] = PhotoEvidence::FLAG_DELAYED_UPLOAD;
             $this->logEvent($shift, 'DELAYED_UPLOAD', [
                 'request_id' => $request->id,
@@ -228,12 +255,6 @@ class PhotoVerificationService
             return $this->reject('NONCE_ALREADY_USED');
         }
 
-        // An OFFLINE_POOL nonce means the guard captured this while disconnected
-        // and it flushed on reconnect — recorded so the timeline and the welfare
-        // report can label the attempt "Offline" (the report reads this flag off
-        // the first evidence's metadata; without it every photo read as Online).
-        $capturedOffline = $nonce->type !== Nonce::TYPE_ONLINE;
-
         $evidences = [];
         $total = count($items);
         foreach ($items as $i => $item) {
@@ -243,11 +264,26 @@ class PhotoVerificationService
             );
         }
 
-        $request->update([
+        $updates = [
             'status' => PhotoRequest::STATUS_FULFILLED,
             'submitted_at' => $captureTime,
             'server_received_at' => $serverReceivedAt,
-        ]);
+        ];
+
+        // An offline (pool-nonce) request is materialised at receipt with its
+        // requested_at set to the nonce's issued_at — but that pool nonce was
+        // minted at shift start (prefetch), so requested_at reads as the shift's
+        // start time, not when the offline check actually fired. Re-anchor it to
+        // the schedule mark the offline camera answered (falling back to the
+        // reconstructed capture time), so the attempt shows its true time, sorts
+        // chronologically on the timeline, and self-registers against its mark in
+        // the dispatcher's already-fired check — mirroring online semantics
+        // (requested at the mark, submitted at capture).
+        if ($capturedOffline) {
+            $updates['requested_at'] = $this->offlineScheduledMark($shift, $captureTime) ?? $captureTime;
+        }
+
+        $request->update($updates);
 
         $this->logEvent($shift, 'PHOTO_SUBMITTED', [
             'request_id' => $request->id,
@@ -324,6 +360,34 @@ class PhotoVerificationService
     }
 
     /**
+     * The schedule mark an offline capture answered: the latest provisioned
+     * photo_schedule mark at or before the reconstructed capture time (plus a
+     * small forward tolerance for reconstruction jitter). Recovers the true
+     * "requested" time for a request materialised on reconnect, whose pool nonce
+     * was minted at shift start and so carries the shift's start time in its
+     * issued_at. Returns null when the shift has no schedule or none precede the
+     * capture (the caller then falls back to the capture time itself).
+     */
+    private function offlineScheduledMark(Shift $shift, Carbon $captureTime): ?Carbon
+    {
+        $schedule = is_array($shift->photo_schedule) ? $shift->photo_schedule : [];
+        $cutoff = $captureTime->copy()->addSeconds(self::OFFLINE_MARK_TOLERANCE_SECONDS);
+
+        $best = null;
+        foreach ($schedule as $markIso) {
+            $mark = $this->parse($markIso);
+            if (!$mark || $mark->greaterThan($cutoff)) {
+                continue;
+            }
+            if ($best === null || $mark->greaterThan($best)) {
+                $best = $mark;
+            }
+        }
+
+        return $best;
+    }
+
+    /**
      * Reconstruct the photo's effective capture time and whether trusted
      * network time was available.
      *
@@ -384,8 +448,12 @@ class PhotoVerificationService
             return null;
         }
 
-        // OFFLINE_POOL — 15-min window judged against the reconstructed capture.
-        if ($captureTime->gt($issuedAt->copy()->addMinutes(NonceService::OFFLINE_TTL_MINUTES))) {
+        // OFFLINE_POOL — validity spans the whole shift and is stored on the
+        // nonce's own expires_at at prefetch (NonceService::offlineExpiryFor);
+        // judge the reconstructed capture against that stored deadline. A fixed
+        // issued_at + 15 min would be dead before the first ~50-min photo mark,
+        // so every offline capture failed NONCE_EXPIRED (2026-07-23 fix).
+        if ($nonce->expires_at && $captureTime->gt($nonce->expires_at)) {
             return 'NONCE_EXPIRED';
         }
 
