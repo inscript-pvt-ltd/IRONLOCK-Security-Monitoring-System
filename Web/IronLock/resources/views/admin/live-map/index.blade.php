@@ -34,11 +34,41 @@
 
     /* ── Guard pins — colour + shape + border, never colour alone ──────────── */
     .map-pin {
+        position: relative;
         width: 26px; height: 26px; border-radius: 50%;
         display: flex; align-items: center; justify-content: center;
         font-size: 9px; font-weight: 800; color: #06121f;
         box-shadow: 0 0 6px rgba(0,0,0,.6); cursor: pointer;
         box-sizing: border-box;
+    }
+
+    /* Keep-alive "blink": a radar ring that expands and fades so an online pin
+       reads as a living, breathing presence. Applied only to pins with a live
+       comms link (`.alive`); offline/comms-gap pins stay faded and static,
+       which correctly reads as "not live".
+
+       The ring is drawn as a second box-shadow layer directly on the pin (the
+       first layer keeps the existing depth shadow), so it needs no pseudo-
+       element and no z-index — it can never be hidden behind a stacking
+       context or intercept clicks. */
+    .map-pin.alive {
+        animation: pin-alive 2.2s ease-out infinite;
+    }
+    @keyframes pin-alive {
+        0%   { box-shadow: 0 0 6px rgba(0,0,0,.6), 0 0 0 0   rgba(255,255,255,.7); }
+        70%  { box-shadow: 0 0 6px rgba(0,0,0,.6), 0 0 0 13px rgba(255,255,255,0); }
+        100% { box-shadow: 0 0 6px rgba(0,0,0,.6), 0 0 0 0   rgba(255,255,255,0); }
+    }
+    /* Under reduced-motion we keep the pin "alive" but swap the expanding sweep
+       for a gentle in-place glow — no positional/scale movement, just a soft
+       box-shadow fade — so motion-sensitive viewers still get the live-presence
+       cue without a travelling ring. */
+    @media (prefers-reduced-motion: reduce) {
+        .map-pin.alive { animation: pin-alive-soft 2.6s ease-in-out infinite; }
+    }
+    @keyframes pin-alive-soft {
+        0%, 100% { box-shadow: 0 0 6px rgba(0,0,0,.6), 0 0 0 2px rgba(255,255,255,.55); }
+        50%      { box-shadow: 0 0 6px rgba(0,0,0,.6), 0 0 0 5px rgba(255,255,255,.12); }
     }
 
     /* ── Legend (bottom-left) ─────────────────────────────────────────────── */
@@ -196,6 +226,9 @@
         if (g.zone_status === 'OUTSIDE_ZONE' && !g.comms_interrupted) el.style.borderStyle = 'dashed';
         if (g.comms_interrupted) { el.style.borderStyle = 'dashed'; el.style.opacity = '.5'; }
         if (g.has_open_alert) { el.style.borderColor = '#DC2626'; el.style.borderWidth = '3px'; }
+        // Live-presence blink: only online (comms-linked) pins breathe; offline
+        // pins stay faded and static. Cosmetic only — see the .map-pin.alive rule.
+        el.classList.toggle('alive', !g.comms_interrupted);
     }
 
     function makePinEl(g) {

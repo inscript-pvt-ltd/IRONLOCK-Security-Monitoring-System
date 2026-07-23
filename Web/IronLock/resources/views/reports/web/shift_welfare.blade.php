@@ -29,6 +29,9 @@
                 <div class="wf-row"><span class="k">Scheduled End</span><span class="v">{!! $t($info['scheduled_end']) !!}</span></div>
                 <div class="wf-row"><span class="k">Actual Check-In</span><span class="v">{!! $t($info['actual_start']) !!}</span></div>
                 <div class="wf-row"><span class="k">Actual Check-Out</span><span class="v">{!! $t($info['actual_end']) !!}</span></div>
+                @if (!empty($info['end_type_label']))
+                    <div class="wf-row"><span class="k">End Type</span><span class="v"><span class="wf-badge {{ !empty($info['auto_closed']) ? 'bad' : 'warn' }}"><span class="dot">●</span>{{ $info['end_type_label'] }}</span></span></div>
+                @endif
                 <div class="wf-row"><span class="k">Shift Duration</span><span class="v">{{ $dash($info['duration_label']) }}</span></div>
                 <div class="wf-row"><span class="k">Shift Status</span><span class="v"><span class="wf-badge"><span class="dot">●</span>{{ $info['status_label'] }}</span></span></div>
             </div>

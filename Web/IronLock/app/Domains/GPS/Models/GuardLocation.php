@@ -70,6 +70,9 @@ class GuardLocation extends Model
         'battery_level',
         'zone_status',
         'zone_left_at',
+        'pending_zone_status',
+        'pending_zone_since',
+        'pending_is_shift_start',
         'recorded_at',
         'updated_at',
     ];
@@ -85,6 +88,8 @@ class GuardLocation extends Model
             'accuracy' => 'decimal:2',
             'battery_level' => 'integer',
             'zone_left_at' => 'datetime',
+            'pending_zone_since' => 'datetime',
+            'pending_is_shift_start' => 'boolean',
             'recorded_at' => 'datetime',
             'updated_at' => 'datetime',
         ];

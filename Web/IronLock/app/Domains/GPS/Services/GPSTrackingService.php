@@ -18,12 +18,24 @@ use Illuminate\Support\Str;
  * GPSTrackingService — ingest live guard positions and drive zone logic.
  *
  * One mutable row per guard (UPSERT, no history). Each ping runs a server-side
- * ST_CONTAINS check via GeofenceService to set zone_status. On an INSIDE→OUTSIDE
- * transition we log a ZONE_TRANSITION shift_event and schedule a grace-period
- * CheckZoneExitJob; the job — not this method — decides whether to raise a
- * ZONE_EXIT alert. The client clock is never trusted: `recorded_at` is kept for
- * diagnostics only and `updated_at` (the server's authoritative "last seen") is
- * what the dashboard and COMMS_INTERRUPTED logic rely on.
+ * ST_CONTAINS check via GeofenceService to get a RAW zone reading. A reading is
+ * not trusted to flip the confirmed zone_status on its own: GPS jitter near the
+ * boundary is debounced through a confirmation window (ironlock.
+ * zone_exit_confirm_seconds) — a status change must PERSIST that long before it
+ * commits, writes a ZONE_TRANSITION and (on an exit) schedules a grace-period
+ * CheckZoneExitJob. A flicker that reverts inside the window leaves no trace and
+ * never resets the excursion anchor. The grace deadline is measured from the
+ * guard's real step-out moment, so the confirmation window is absorbed into the
+ * grace (a 5-min grace stays 5 min), not added on top. The job — not this method
+ * — decides whether to raise a ZONE_EXIT alert. The client clock is never
+ * trusted: `recorded_at` is kept for diagnostics only and `updated_at` (the
+ * server's authoritative "last seen") is what the dashboard and COMMS_INTERRUPTED
+ * logic rely on.
+ *
+ * Debounce is a LIVE-tick behaviour only. The controller routes a request by
+ * the guard's pre-batch state: a fresh same-shift last-seen is a live tick
+ * (debounced, dispatches inline on a confirmed exit); a stale/absent/cross-shift
+ * last-seen is a reconnect (replayed immediately, decided once by finalizeFlush).
  *
  * Offline backfill (Phase 7): when an app reconnects it flushes buffered pings
  * in one batch (§6.1). The flush is recorded for audit ping-by-ping, but live
@@ -67,11 +79,16 @@ class GPSTrackingService
      * (per-ping) appending the immutable ZONE_TRANSITION audit trail. Returns the
      * persisted GuardLocation.
      *
-     * $dispatchZoneCheck gates the *live* grace-period zone-exit job. It is true
-     * for a normal standalone ping (so a fresh INSIDE→OUTSIDE edge schedules the
-     * check inline), and false when the caller is replaying a flush — there, the
-     * decision is deferred to finalizeFlush() so a buffered backlog logs its
-     * history without paging retroactively for events already over.
+     * $dispatchZoneCheck selects the zone-state path. TRUE is the LIVE tick: the
+     * change is debounced through the confirmation window (confirmZoneState) and,
+     * once a change CONFIRMS, a fresh exit schedules the grace-period job inline.
+     * FALSE is the REPLAY path for a reconnect flush (replayZoneState): each raw
+     * edge commits immediately for a faithful audit trail but never pages here —
+     * the single live decision is deferred to finalizeFlush() so a buffered
+     * backlog logs its history without paging retroactively for events already
+     * over. The caller (GPSController) picks the path per request: a fresh
+     * same-shift last-seen is a live tick; a stale/absent/cross-shift one is a
+     * reconnect. Both paths keep the ZONE_TRANSITION audit trail complete.
      */
     public function recordLocation(
         string $guardId,
@@ -81,25 +98,26 @@ class GPSTrackingService
     ): GuardLocation {
         $now = Carbon::now();
 
-        // Read the prior zone status before the UPSERT overwrites the row, so
-        // we can detect a transition. guard_locations is a single mutable row
-        // per guard (no history), so a row left over from a PREVIOUS shift must
-        // never be read as this shift's prior state — that would log a phantom
-        // cross-shift ZONE_TRANSITION on the first ping. Scope by shift_id, and
-        // when there is no same-shift prior fall back to the shift-start
-        // baseline of INSIDE_ZONE (the guard is expected at their post), so a
-        // guard who is already OUTSIDE on their first ping registers a real
-        // INSIDE→OUTSIDE transition instead of being silently missed.
+        // Read the guard's live row before the UPSERT overwrites it, to detect a
+        // change against the prior CONFIRMED state. guard_locations is a single
+        // mutable row per guard (no history), so a row left over from a PREVIOUS
+        // shift must never be read as this shift's prior state — that would log a
+        // phantom cross-shift transition on the first ping. Scope by shift_id, and
+        // with no same-shift prior fall back to the shift-start baseline of
+        // INSIDE_ZONE (the guard is expected at their post), so a guard already
+        // OUTSIDE on their first fix registers a real INSIDE→OUTSIDE change.
         $previous = GuardLocation::where('guard_id', $guardId)->first();
         $prevSameShift = $previous && $previous->shift_id === $shiftId;
-        $previousZoneStatus = $prevSameShift
+        $confirmedZoneStatus = $prevSameShift
             ? $previous->zone_status
             : GeofenceService::STATUS_INSIDE_ZONE;
 
-        // Resolve zone status via the shift's geofence (server-side spatial check).
+        // Resolve the RAW zone reading for this fix (server-side spatial check).
+        // "Raw" because a single reading is not yet trusted to flip the confirmed
+        // status — jitter near the boundary is debounced below.
         $shift = Shift::with('site')->find($shiftId);
         $geofenceId = $shift?->geofence_id;
-        $zoneStatus = GeofenceService::STATUS_INSIDE_ZONE;
+        $rawZoneStatus = GeofenceService::STATUS_INSIDE_ZONE;
 
         if ($geofenceId) {
             $isInside = $this->geofenceService->isInsideZone(
@@ -108,26 +126,18 @@ class GPSTrackingService
                 (float) $locationData['longitude']
             );
 
-            $zoneStatus = $isInside
+            $rawZoneStatus = $isInside
                 ? GeofenceService::STATUS_INSIDE_ZONE
                 : GeofenceService::STATUS_OUTSIDE_ZONE;
         }
 
-        // Maintain the current-excursion anchor. Set on a fresh exit, preserved
-        // across consecutive OUTSIDE pings (same shift), cleared on the return.
-        // A stale cross-shift row is never carried forward — its anchor would
-        // belong to a different excursion — so a new shift's first OUTSIDE ping
-        // starts a fresh anchor. This anchor is the token CheckZoneExitJob checks
-        // to know it is still policing the live excursion (fixes re-exit reset).
-        if ($zoneStatus === GeofenceService::STATUS_OUTSIDE_ZONE) {
-            $zoneLeftAt = ($prevSameShift
-                && $previous->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE
-                && $previous->zone_left_at)
-                ? $previous->zone_left_at
-                : $now;
-        } else {
-            $zoneLeftAt = null;
-        }
+        // Decide the persisted state. The LIVE path debounces a change through the
+        // confirmation window (jitter rejection + a stable grace clock); the flush
+        // REPLAY path keeps the legacy immediate-commit behaviour and defers the
+        // single live decision to finalizeFlush().
+        $state = $dispatchZoneCheck
+            ? $this->confirmZoneState($previous, $prevSameShift, $confirmedZoneStatus, $rawZoneStatus, $now)
+            : $this->replayZoneState($previous, $prevSameShift, $confirmedZoneStatus, $rawZoneStatus, $now);
 
         // UPSERT: replace the single live-location row for this guard.
         // `updated_at` is the authoritative "last seen" time that drives
@@ -143,8 +153,11 @@ class GPSTrackingService
                 'longitude' => $locationData['longitude'],
                 'accuracy' => $locationData['accuracy'] ?? null,
                 'battery_level' => $locationData['battery_level'] ?? null,
-                'zone_status' => $zoneStatus,
-                'zone_left_at' => $zoneLeftAt,
+                'zone_status' => $state['zone_status'],
+                'zone_left_at' => $state['zone_left_at'],
+                'pending_zone_status' => $state['pending_zone_status'],
+                'pending_zone_since' => $state['pending_zone_since'],
+                'pending_is_shift_start' => $state['pending_is_shift_start'],
                 'recorded_at' => isset($locationData['recorded_at'])
                     ? Carbon::parse($locationData['recorded_at'])
                     : null,
@@ -152,35 +165,29 @@ class GPSTrackingService
             ]
         );
 
-        // Only act when the zone status actually changes (avoids per-ping noise).
-        // The ZONE_TRANSITION audit row is ALWAYS written so the timeline is
-        // complete even for a replayed backlog; only the *live alert* dispatch is
-        // gated by $dispatchZoneCheck.
-        if ($previousZoneStatus !== null && $previousZoneStatus !== $zoneStatus) {
+        // A CONFIRMED status change writes the immutable ZONE_TRANSITION audit row
+        // (always — the timeline stays complete even for a replayed backlog) and,
+        // on a confirmed exit from the LIVE path, schedules the delayed grace job.
+        // The job re-confirms present state before it ever raises an alert.
+        if ($state['committed_to'] !== null) {
             $this->logZoneTransitionEvent(
                 $guardId,
                 $shiftId,
                 $geofenceId,
-                $previousZoneStatus,
-                $zoneStatus,
+                $state['committed_from'],
+                $state['committed_to'],
                 (float) $locationData['latitude'],
                 (float) $locationData['longitude'],
                 $now
             );
 
-            // On leaving the zone, schedule the zone-exit check. The job
-            // re-confirms the guard is still outside (and still this excursion)
-            // before raising an alert. Suppressed during a flush replay —
-            // finalizeFlush() makes the single present-state decision instead.
-            // A first-position exit (no same-shift prior) is shift-start
-            // positioning: the deadline is scheduled_start, not the grace period.
-            if ($dispatchZoneCheck && $zoneStatus === GeofenceService::STATUS_OUTSIDE_ZONE) {
+            if ($state['dispatch_exit']) {
                 $this->dispatchZoneExitCheck(
                     $shift,
                     $guardId,
                     $shiftId,
-                    $zoneLeftAt,
-                    isShiftStartPositioning: !$prevSameShift
+                    $state['zone_left_at'] ?? $now,
+                    isShiftStartPositioning: $state['is_shift_start']
                 );
             }
         }
@@ -207,6 +214,12 @@ class GPSTrackingService
      *     one already outside before the flush is not re-paged; one still outside
      *     now is alerted on present state (the job re-confirms before raising).
      *
+     *     This runs ONLY for a reconnect/replay batch. A live tick (fresh
+     *     same-shift last-seen) is debounced ping-by-ping in recordLocation(),
+     *     which dispatches the grace job inline on a CONFIRMED exit — so the
+     *     caller passes $dispatchPresentState = false there to avoid a second,
+     *     mis-classified dispatch. The comms-gap audit (2) always runs.
+     *
      *  2. Comms-gap audit — if the last server-receipt before this flush is older
      *     than the backfill threshold, this flush is a RECONNECT: record an
      *     explicit COMMS_GAP_START / COMMS_GAP_END pair and a SYNC_FLUSH summary
@@ -217,9 +230,18 @@ class GPSTrackingService
      *     offline window (that stale row is not a comms interruption).
      *
      * @param  array{shift_id: ?string, zone_status: ?string, last_seen_at: ?Carbon}  $pre
+     * @param  bool  $dispatchPresentState  Whether to make the net present-state
+     *   zone-exit decision here. True for a reconnect/replay batch; false for a
+     *   live tick, where recordLocation() already dispatched inline on a confirmed
+     *   exit. The comms-gap audit runs regardless.
      */
-    public function finalizeFlush(string $guardId, string $shiftId, array $pre, int $pingsApplied): void
-    {
+    public function finalizeFlush(
+        string $guardId,
+        string $shiftId,
+        array $pre,
+        int $pingsApplied,
+        bool $dispatchPresentState = true
+    ): void {
         $now = Carbon::now();
         $current = GuardLocation::where('guard_id', $guardId)->first();
 
@@ -237,7 +259,8 @@ class GPSTrackingService
             ? ($pre['zone_status'] ?? null)
             : GeofenceService::STATUS_INSIDE_ZONE;
 
-        if ($current
+        if ($dispatchPresentState
+            && $current
             && $current->zone_status === GeofenceService::STATUS_OUTSIDE_ZONE
             && $preZoneStatus === GeofenceService::STATUS_INSIDE_ZONE) {
             $shift = Shift::with('site')->find($shiftId);
@@ -304,12 +327,183 @@ class GPSTrackingService
             $reason = CheckZoneExitJob::REASON_SHIFT_START;
         } else {
             $gracePeriodMinutes = (int) ($shift?->site?->grace_period_minutes ?? Site::DEFAULT_GRACE_PERIOD_MINUTES);
-            $fireAt = $now->copy()->addMinutes($gracePeriodMinutes);
+            // Measure the grace from the guard's REAL step-out moment (the
+            // excursion anchor), not from now, so the confirmation window is
+            // absorbed into the grace rather than added on top. A late commit
+            // (e.g. sparse pings) can land this in the past — delay() then simply
+            // dispatches immediately, which is correct (grace already elapsed).
+            $fireAt = $zoneLeftAt->copy()->addMinutes($gracePeriodMinutes);
             $reason = CheckZoneExitJob::REASON_MID_SHIFT;
         }
 
         CheckZoneExitJob::dispatch($guardId, $shiftId, $zoneLeftAt->toISOString(), $reason)
             ->delay($fireAt);
+    }
+
+    /**
+     * LIVE zone-state decision with GPS-jitter debounce.
+     *
+     * A raw reading that differs from the guard's CONFIRMED zone_status becomes a
+     * *candidate*; it only commits — flipping zone_status, writing a
+     * ZONE_TRANSITION and (on an exit) scheduling the grace job — once it has
+     * persisted for ironlock.zone_exit_confirm_seconds. A reading that matches the
+     * confirmed status cancels any candidate, so a brief flicker across the
+     * boundary leaves no trace and never resets the excursion anchor.
+     *
+     * The excursion anchor (zone_left_at) is set from the candidate's birth time
+     * — the guard's REAL step-out moment — so the grace deadline runs from the
+     * actual exit and the confirmation window is absorbed into the grace.
+     *
+     * @return array{
+     *   zone_status: string, zone_left_at: ?Carbon, pending_zone_status: ?string,
+     *   pending_zone_since: ?Carbon, pending_is_shift_start: ?bool,
+     *   committed_from: ?string, committed_to: ?string, dispatch_exit: bool,
+     *   is_shift_start: bool
+     * }
+     */
+    private function confirmZoneState(
+        ?GuardLocation $previous,
+        bool $prevSameShift,
+        string $confirmedZoneStatus,
+        string $rawZoneStatus,
+        Carbon $now
+    ): array {
+        $outside = GeofenceService::STATUS_OUTSIDE_ZONE;
+
+        // Prior candidate + anchor count only when the row is this shift's (a
+        // stale cross-shift row carries neither forward).
+        $prevPendingStatus = $prevSameShift ? $previous?->pending_zone_status : null;
+        $prevPendingSince = $prevSameShift ? $previous?->pending_zone_since : null;
+        $prevPendingIsShiftStart = $prevSameShift ? $previous?->pending_is_shift_start : null;
+        $prevAnchor = ($prevSameShift && $confirmedZoneStatus === $outside)
+            ? $previous?->zone_left_at
+            : null;
+
+        // Baseline: no change. Preserve the anchor while confirmed OUTSIDE.
+        $state = [
+            'zone_status' => $confirmedZoneStatus,
+            'zone_left_at' => $confirmedZoneStatus === $outside ? ($prevAnchor ?? $now) : null,
+            'pending_zone_status' => null,
+            'pending_zone_since' => null,
+            'pending_is_shift_start' => null,
+            'committed_from' => null,
+            'committed_to' => null,
+            'dispatch_exit' => false,
+            'is_shift_start' => false,
+        ];
+
+        // (a) Reading matches confirmed status => stable, or a flicker reverted.
+        // Cancel any candidate; nothing logged, anchor untouched.
+        if ($rawZoneStatus === $confirmedZoneStatus) {
+            return $state;
+        }
+
+        // (b) Reading differs. Continue the same candidate, or start a new one.
+        // A candidate's "is shift start" is fixed at birth: true when the guard's
+        // first established fix of the shift is outside (no same-shift prior).
+        $sameCandidate = $prevPendingStatus === $rawZoneStatus && $prevPendingSince instanceof Carbon;
+        $candidateSince = $sameCandidate ? $prevPendingSince : $now;
+        $isShiftStart = $sameCandidate
+            ? (bool) $prevPendingIsShiftStart
+            : ($rawZoneStatus === $outside && !$prevSameShift);
+
+        $confirmSeconds = (int) config('ironlock.zone_exit_confirm_seconds', 60);
+
+        if ($candidateSince->diffInSeconds($now) < $confirmSeconds) {
+            // Still within the window — hold the candidate, keep confirmed state.
+            $state['pending_zone_status'] = $rawZoneStatus;
+            $state['pending_zone_since'] = $candidateSince;
+            $state['pending_is_shift_start'] = $rawZoneStatus === $outside ? $isShiftStart : null;
+            return $state;
+        }
+
+        // (c) Candidate persisted long enough => COMMIT the change.
+        $state['zone_status'] = $rawZoneStatus;
+        $state['committed_from'] = $confirmedZoneStatus;
+        $state['committed_to'] = $rawZoneStatus;
+
+        if ($rawZoneStatus === $outside) {
+            // Anchor the excursion to the guard's real step-out moment so the
+            // grace runs from there (confirm window absorbed into grace).
+            $state['zone_left_at'] = $candidateSince;
+            $state['dispatch_exit'] = true;
+            $state['is_shift_start'] = $isShiftStart;
+        } else {
+            // Confirmed return — end the excursion.
+            $state['zone_left_at'] = null;
+        }
+
+        return $state;
+    }
+
+    /**
+     * REPLAY (offline-backfill) zone-state decision — legacy immediate commit.
+     *
+     * A buffered backlog is applied ping-by-ping for a faithful audit trail, so
+     * each raw INSIDE<->OUTSIDE edge commits at once and is logged; the single
+     * *live* alert decision is deferred to finalizeFlush() (present net state) and
+     * never paged retroactively. Debounce is intentionally NOT applied here — it
+     * would need the client clock to measure persistence across buffered
+     * timestamps — and the pending fields are cleared so LIVE tracking resumes
+     * from a clean baseline.
+     *
+     * Grace anchor across an offline gap: if the pre-flush row shows an exit
+     * candidate that was still FORMING when the device dropped (pending OUTSIDE,
+     * not yet committed), the fresh exit committed here inherits that candidate's
+     * real step-out time as its anchor rather than `now`, so the grace clock
+     * counts the offline time already elapsed (remaining grace, not a fresh one).
+     *
+     * @return array matching confirmZoneState()'s shape (dispatch_exit always
+     *               false — replay never pages live).
+     */
+    private function replayZoneState(
+        ?GuardLocation $previous,
+        bool $prevSameShift,
+        string $confirmedZoneStatus,
+        string $rawZoneStatus,
+        Carbon $now
+    ): array {
+        $outside = GeofenceService::STATUS_OUTSIDE_ZONE;
+
+        // Preserve the anchor across consecutive OUTSIDE pings, set it fresh on a
+        // new exit, clear it on return — mirrors the pre-debounce behaviour.
+        if ($rawZoneStatus === $outside) {
+            if ($prevSameShift && $previous?->zone_status === $outside && $previous?->zone_left_at) {
+                // Continuing an already-committed excursion — keep its anchor.
+                $zoneLeftAt = $previous->zone_left_at;
+            } elseif ($prevSameShift
+                && $previous?->zone_status !== $outside
+                && $previous?->pending_zone_status === $outside
+                && $previous?->pending_zone_since instanceof Carbon) {
+                // The guard had stepped out and the LIVE exit candidate was still
+                // forming (not yet committed) when the device went offline, so the
+                // debounce never got the post-window ping it needed to commit. Anchor
+                // the excursion to that real, server-observed step-out moment instead
+                // of resetting to `now`, so the grace period counts the time already
+                // elapsed during the gap — only the REMAINING grace applies on
+                // reconnect, not a fresh full one. Mirrors the live path's "grace
+                // from real step-out" (zone-transition debounce).
+                $zoneLeftAt = $previous->pending_zone_since;
+            } else {
+                $zoneLeftAt = $now;
+            }
+        } else {
+            $zoneLeftAt = null;
+        }
+
+        $committed = $confirmedZoneStatus !== $rawZoneStatus;
+
+        return [
+            'zone_status' => $rawZoneStatus,
+            'zone_left_at' => $zoneLeftAt,
+            'pending_zone_status' => null,
+            'pending_zone_since' => null,
+            'pending_is_shift_start' => null,
+            'committed_from' => $committed ? $confirmedZoneStatus : null,
+            'committed_to' => $committed ? $rawZoneStatus : null,
+            'dispatch_exit' => false,
+            'is_shift_start' => false,
+        ];
     }
 
     /**

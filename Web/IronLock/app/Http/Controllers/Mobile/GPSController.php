@@ -51,14 +51,40 @@ class GPSController extends Controller
         // whether a backlog is a reconnect or whether to raise a live alert).
         $pre = $this->gpsService->flushPreState($guard->id);
 
+        // Route the request: a LIVE tick (this shift's row, seen within the
+        // backfill threshold) is debounced ping-by-ping and dispatches its own
+        // grace job on a CONFIRMED exit; a RECONNECT (stale/absent/cross-shift
+        // last-seen — the same signal finalizeFlush uses for its comms gap) is
+        // replayed immediately and its single live decision is made in
+        // finalizeFlush. The freshness test uses server-side last-seen only.
+        //
+        // `backfill:true` is an explicit producer signal that this POST is a
+        // buffered reconnect drain, not a live 15s tick. When set it FORCES the
+        // reconnect/replay path regardless of last-seen — the fix for a backlog
+        // bigger than one batch (§6.1): chunk #1 refreshes the live row, so
+        // without this flag chunk #2 would be misread as a live tick and
+        // debounce/dispatch on HISTORICAL pings. Absent the flag we fall back to
+        // the last-seen heuristic, so older apps are unaffected. It can only make
+        // a batch MORE conservative (never turns a real live tick into paging),
+        // so a mislabelled request degrades safely (the grace job re-confirms
+        // against the live row before it ever raises).
+        $isBackfill = $request->boolean('backfill');
+        $threshold = (int) config('ironlock.gps_backfill_threshold_seconds', 60);
+        $lastSeen = $pre['last_seen_at'];
+        $isLiveTick = !$isBackfill
+            && ($pre['shift_id'] === $shift->id)
+            && $lastSeen instanceof \Carbon\Carbon
+            && $lastSeen->diffInSeconds(now()) <= $threshold;
+
         $results = [];
         $pingsApplied = 0;
 
         // Process in order — the UPSERT means the last valid ping is the final
         // live position, and the transition logic sees each step in sequence.
-        // Live zone-exit dispatch is SUPPRESSED per-ping ($dispatchZoneCheck =
-        // false) so a replayed backlog never pages retroactively; the single
-        // present-state decision is made once below in finalizeFlush().
+        // On the LIVE path each ping is debounced ($dispatchZoneCheck = true) and
+        // a confirmed exit dispatches inline; on the RECONNECT path dispatch is
+        // suppressed per-ping so a replayed backlog never pages retroactively —
+        // the single present-state decision is made once below in finalizeFlush().
         foreach ($pings as $ping) {
             $lat = $ping['latitude'] ?? null;
             $lng = $ping['longitude'] ?? null;
@@ -82,7 +108,7 @@ class GPSController extends Controller
                     ? (int) round((float) $ping['battery'] * 100)
                     : null,
                 'recorded_at' => $ping['recorded_at'] ?? null,
-            ], dispatchZoneCheck: false);
+            ], dispatchZoneCheck: $isLiveTick);
 
             $pingsApplied++;
 
@@ -93,11 +119,18 @@ class GPSController extends Controller
             ];
         }
 
-        // Close out the flush once: present-state zone-exit dispatch (if the guard
-        // is now outside having been inside) + comms-gap / SYNC_FLUSH audit when
-        // this batch is a reconnect after a stale last-seen.
+        // Close out the flush once: present-state zone-exit dispatch (only on the
+        // reconnect path — a live tick already dispatched inline on a confirmed
+        // exit, so we suppress it here to avoid a second, mis-classified job) plus
+        // the comms-gap / SYNC_FLUSH audit, which runs on either path.
         if ($pingsApplied > 0) {
-            $this->gpsService->finalizeFlush($guard->id, $shift->id, $pre, $pingsApplied);
+            $this->gpsService->finalizeFlush(
+                $guard->id,
+                $shift->id,
+                $pre,
+                $pingsApplied,
+                dispatchPresentState: !$isLiveTick
+            );
         }
 
         return $this->apiSuccess(['results' => $results]);

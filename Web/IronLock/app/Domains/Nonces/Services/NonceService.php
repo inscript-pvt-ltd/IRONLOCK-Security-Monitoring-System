@@ -19,7 +19,9 @@ use Illuminate\Support\Collection;
  *
  *   ONLINE       — issued live per request; TTL = config('ironlock.photo_response_seconds')
  *                  (default 90s — see onlineTtlSeconds()).
- *   OFFLINE_POOL — pre-fetched batch (10–20) for offline capture, 15-min expiry.
+ *   OFFLINE_POOL — pre-fetched batch (10–20) for offline capture; validity spans
+ *                  the whole shift (offlineExpiryFor()) so a start-time prefetch
+ *                  covers every 50–70-min photo mark while disconnected.
  *
  * Every timestamp here is server-assigned (UTC) and set explicitly in PHP so it
  * never falls back to a DB CURRENT_TIMESTAMP default (which uses the DB session
@@ -27,7 +29,17 @@ use Illuminate\Support\Collection;
  */
 class NonceService
 {
-    /** Offline-pool nonce lifetime in minutes (spec §16.4 #12). */
+    /**
+     * Offline-pool nonce MINIMUM lifetime in minutes — a floor, not the normal
+     * life. Offline photo marks fall 50–70 min apart across a whole shift
+     * (photo_min/max_gap_minutes), so a pool nonce prefetched at start must stay
+     * valid for the ENTIRE shift or it would be dead (at +15 min) long before
+     * the first mark (~+50 min) — and an offline device cannot refill. So
+     * offlineExpiryFor() spans a pool nonce to the shift's scheduled end (+
+     * grace); this floor only guards a pathological prefetch made at/after the
+     * scheduled end. Replay safety is independent of the window — single-use is
+     * enforced atomically in markUsed().
+     */
     public const OFFLINE_TTL_MINUTES = 15;
 
     /** Default offline pool batch size (spec §12.5: 10–20). */
@@ -64,6 +76,39 @@ class NonceService
     }
 
     /**
+     * When an OFFLINE_POOL nonce issued now for this shift should expire: the
+     * shift's scheduled end plus a grace margin (covers scheduled-end overrun
+     * and the auto-close grace), floored to now + OFFLINE_TTL_MINUTES so an
+     * edge-case prefetch made at/after scheduled_end still yields a usable
+     * window. This is what lets a single prefetch at shift start cover every
+     * 50–70-min offline photo mark for the whole shift — see OFFLINE_TTL_MINUTES.
+     */
+    public static function offlineExpiryFor(Shift $shift): Carbon
+    {
+        $now = Carbon::now();
+        $floor = $now->copy()->addMinutes(self::OFFLINE_TTL_MINUTES);
+        $grace = (int) config('ironlock.offline_nonce_grace_minutes', 120);
+
+        $end = $shift->scheduled_end
+            ? Carbon::parse($shift->scheduled_end)->addMinutes($grace)
+            : $floor;
+
+        return $end->greaterThan($floor) ? $end : $floor;
+    }
+
+    /**
+     * The offline window as whole minutes from now — the shift-spanning value
+     * surfaced to the app (the shift-start payload and the prefetch response) in
+     * place of the old fixed 15. The authoritative per-nonce deadline is still
+     * each nonce's own expires_at; this is just the convenience aggregate for a
+     * prefetch made right now (rounded up so it never under-reports the window).
+     */
+    public static function offlineTtlMinutesFor(Shift $shift): int
+    {
+        return (int) ceil(Carbon::now()->diffInSeconds(self::offlineExpiryFor($shift)) / 60);
+    }
+
+    /**
      * Issue a batch of OFFLINE_POOL nonces for the guard to draw from while
      * offline. Returns the freshly created collection.
      */
@@ -71,7 +116,10 @@ class NonceService
     {
         $count = max(1, min($count, 50)); // sane upper bound
         $now = Carbon::now();
-        $expiresAt = $now->copy()->addMinutes(self::OFFLINE_TTL_MINUTES);
+        // Span the pool nonce to the whole shift (see offlineExpiryFor) — a fixed
+        // 15-min TTL dies before the first ~50-min photo mark and can't be
+        // refilled offline. Single-use (markUsed) still caps each to one photo.
+        $expiresAt = self::offlineExpiryFor($shift);
 
         return collect(range(1, $count))->map(fn () => Nonce::create([
             'guard_id' => $guard->id,
@@ -88,7 +136,7 @@ class NonceService
      * it exists, belongs to this guard, and has not been used. Expiry is
      * deliberately NOT checked here because the window semantics differ by
      * type and must be evaluated against the photo's *capture* time, not the
-     * upload time (an OFFLINE_POOL photo can be captured inside its 15-min
+     * upload time (an OFFLINE_POOL photo can be captured inside its shift-long
      * window but uploaded much later when connectivity returns). The photo
      * pipeline owns that window logic — see PhotoVerificationService.
      *

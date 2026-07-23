@@ -60,7 +60,8 @@ return [
     | Owner-set to 90s. This supersedes the master spec's original 60s ONLINE
     | nonce expiry (§16.4 #12); raising it to match the 90s response window
     | removes the 60–90s dead zone where an honest upload was rejected yet still
-    | alerted. The OFFLINE pool TTL (15 min) is unaffected.
+    | alerted. The OFFLINE pool nonce is a separate mechanism: it spans the whole
+    | shift (offline_nonce_grace_minutes below), NOT 90s or 15 min.
     |
     | photo_min_gap_minutes / photo_max_gap_minutes (Phase 7 Option A): the
     | random spacing between consecutive verification-photo marks on a shift.
@@ -81,6 +82,19 @@ return [
     'photo_min_gap_minutes' => (int) env('IRONLOCK_PHOTO_MIN_GAP', 50),
 
     'photo_max_gap_minutes' => (int) env('IRONLOCK_PHOTO_MAX_GAP', 70),
+
+    /*
+    | offline_nonce_grace_minutes (Phase 7 Option A fix, 2026-07-23): how far
+    | past scheduled_end an OFFLINE_POOL nonce stays valid. Offline photo marks
+    | fall 50–70 min apart across the whole shift, so a pool nonce prefetched at
+    | start must remain valid for the ENTIRE shift — a fixed 15-min TTL expired
+    | (~+15 min) long before the first mark (~+50 min) and could not be refilled
+    | while the device was offline, so every offline capture failed NONCE_EXPIRED.
+    | NonceService::offlineExpiryFor() now spans a pool nonce to scheduled_end +
+    | this margin (covers overrun / the auto-close grace). Replay safety is
+    | unaffected — single-use is enforced atomically at consume time, not by TTL.
+    */
+    'offline_nonce_grace_minutes' => (int) env('IRONLOCK_OFFLINE_NONCE_GRACE_MINUTES', 120),
 
     /*
     |--------------------------------------------------------------------------
@@ -207,6 +221,67 @@ return [
     */
 
     'gps_backfill_threshold_seconds' => (int) env('IRONLOCK_GPS_BACKFILL_THRESHOLD', 60),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Catch-up staleness (Phase 7 — reconnect / scheduler-gap guard)
+    |--------------------------------------------------------------------------
+    |
+    | The minute-crons (wakefulness:dispatch, photos:dispatch-scheduled,
+    | wakefulness:timeout-sweep) are meant to run every minute. When they DON'T —
+    | a guard was offline for a stretch, or the scheduler itself stalled — a batch
+    | of schedule marks / deadlines comes due while nothing is running, then all
+    | catches up in one tick on resume. Two symptoms follow, both fixed by this
+    | one threshold:
+    |
+    |   - Dispatch would retroactively fire an ONLINE challenge/photo for a mark
+    |     that fell due minutes ago (which the app's OFFLINE path already covered),
+    |     landing a surprise window seconds after reconnect. So a mark due more
+    |     than this many seconds ago is treated as "the offline path owns it" and
+    |     is NOT fired online; the next future mark fires normally.
+    |
+    |   - The timeout-sweep would fail a long-overdue check and raise a fresh
+    |     CRITICAL "unresponsive" alert for a deadline that lapsed minutes ago —
+    |     paging a supervisor after the fact isn't actionable. A miss detected more
+    |     than this many seconds late is recorded for audit (STALE_CATCHUP) but not
+    |     paged.
+    |
+    | 180s ≈ up to three missed one-minute ticks — long enough to ride out a
+    | normal cron hiccup and still fire/alert on a genuinely-current mark, short
+    | enough that any real outage (always minutes+) is treated as catch-up. It
+    | bounds worst-case retroactive firing to ~3 min instead of the whole outage.
+    |
+    */
+
+    'catchup_staleness_seconds' => (int) env('IRONLOCK_CATCHUP_STALENESS_SECONDS', 180),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Zone-transition confirmation (GPS-jitter debounce)
+    |--------------------------------------------------------------------------
+    |
+    | A guard standing on the geofence boundary pings OUT/IN/OUT as GPS accuracy
+    | drifts. Without debouncing, every flip logged a phantom ZONE_TRANSITION and
+    | reset the zone-exit grace clock — so a genuinely-outside guard could keep
+    | postponing their own alert. A raw reading must now PERSIST for this many
+    | seconds before the confirmed zone_status flips (and a ZONE_TRANSITION is
+    | logged / the grace job dispatched). A flicker that reverts inside the window
+    | cancels the candidate — no transition, no anchor reset.
+    |
+    | The window is ABSORBED into the grace period, not added on top: the grace
+    | deadline is measured from the guard's real step-out moment (zone_left_at),
+    | so a 5-minute grace stays 5 minutes total (≈1 min to confirm + 4 remaining).
+    | Keep this SHORTER than the smallest site grace_period_minutes; if it is not,
+    | the deadline lands immediately on confirmation (still safe, just no grace).
+    | It applies to the LIVE ping path only — offline-backfill replay logs raw
+    | edges and lets finalizeFlush() decide the (net-state) alert.
+    |
+    | 60s ≈ four 15s pings — long enough to reject a single stray reading, short
+    | enough to stay well within a typical grace period.
+    |
+    */
+
+    'zone_exit_confirm_seconds' => (int) env('IRONLOCK_ZONE_CONFIRM_SECONDS', 60),
 
     /*
     |--------------------------------------------------------------------------

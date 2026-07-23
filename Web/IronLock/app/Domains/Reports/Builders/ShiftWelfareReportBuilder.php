@@ -81,6 +81,7 @@ class ShiftWelfareReportBuilder extends ReportBuilder
         $add('Shift', 'Scheduled End', '', $info['scheduled_end'] ?? null);
         $add('Shift', 'Actual Start', '', $info['actual_start'] ?? null);
         $add('Shift', 'Actual End', '', $info['actual_end'] ?? null);
+        $add('Shift', 'End Type', $info['end_type_label'] ?? 'Guard ended');
         $add('Shift', 'Duration', $info['duration_label'] ?? '—');
 
         $att = $s['attendance'] ?? [];

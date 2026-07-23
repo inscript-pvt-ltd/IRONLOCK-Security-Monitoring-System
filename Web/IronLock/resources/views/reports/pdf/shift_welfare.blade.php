@@ -29,6 +29,9 @@
             <td class="k">Actual</td><td class="v">{{ $f($info['actual_start']) }} – {{ $f($info['actual_end']) }}</td></tr>
         <tr><td class="k">Duration</td><td class="v">{{ $dash($info['duration_label']) }}</td>
             <td class="k">Status</td><td class="v">{{ $info['status_label'] }}</td></tr>
+        @if (!empty($info['end_type_label']))
+        <tr><td class="k">End Type</td><td class="v" colspan="3" style="{{ !empty($info['auto_closed']) ? 'color:#8a2a2a;font-weight:700' : '' }}">{{ $info['end_type_label'] }}</td></tr>
+        @endif
     </table>
 
     <h2 class="section">Attendance</h2>
