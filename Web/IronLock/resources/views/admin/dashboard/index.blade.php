@@ -90,6 +90,61 @@
         50% { border-left-color: #ff6b6b; }
     }
 
+    /* ── Offline chip + source toggle ─────────────────────────────────────── */
+    .offline-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        margin-left: 6px;
+        font-size: 10px;
+        font-weight: bold;
+        border-radius: 4px;
+        white-space: nowrap;
+        background: rgba(120, 120, 160, 0.18);
+        color: var(--text-muted);
+        border: 1px solid rgba(120, 120, 160, 0.35);
+        vertical-align: middle;
+    }
+
+    .alerts-section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .alerts-source-toggle {
+        display: inline-flex;
+        gap: 2px;
+        background: var(--surface-dark);
+        border: 1px solid var(--border-dark);
+        border-radius: 4px;
+        padding: 2px;
+    }
+
+    .alerts-source-toggle .src-tab {
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        font-size: 10px;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 3px 10px;
+        border-radius: 3px;
+        cursor: pointer;
+    }
+
+    .alerts-source-toggle .src-tab.active {
+        background: var(--premium-gold);
+        color: #1a1206;
+    }
+
+    .alerts-empty-filtered {
+        text-align: center;
+        padding: 20px;
+        color: var(--text-muted);
+        font-size: 12px;
+    }
+
     .alerts-pagination {
         display: flex;
         justify-content: space-between;
@@ -166,12 +221,21 @@
 </div>
 
 <!-- Critical/Warning Alerts -->
-<div class="section-header">Critical / Warning Alerts — Unacknowledged</div>
+<div class="section-header alerts-section-header">
+    <span>Critical / Warning Alerts — Unacknowledged</span>
+    @if(isset($alerts) && count($alerts) > 0)
+        <span class="alerts-source-toggle" id="alerts-source-toggle">
+            <button type="button" class="src-tab active" data-source="all" onclick="setAlertSource('all', this)">All</button>
+            <button type="button" class="src-tab" data-source="offline" onclick="setAlertSource('offline', this)">⚑ Offline</button>
+        </span>
+    @endif
+</div>
 
 @if(isset($alerts) && count($alerts) > 0)
     <div id="alerts-list">
     @foreach($alerts as $i => $alert)
-        <div class="alert-row {{ strtolower($alert['severity']) }}" data-alert-index="{{ $i }}" onclick="viewAlert('{{ $alert['id'] }}')">
+        @php $isOffline = !empty($alert['is_offline']); @endphp
+        <div class="alert-row {{ strtolower($alert['severity']) }}" data-alert-index="{{ $i }}" data-offline="{{ $isOffline ? '1' : '0' }}" onclick="viewAlert('{{ $alert['id'] }}')">
             <div class="severity-badge {{ strtolower($alert['severity']) }}">
                 @if($alert['severity'] === 'CRITICAL')
                     ● {{ $alert['type'] }}
@@ -180,7 +244,7 @@
                 @endif
             </div>
             <div class="alert-content">
-                <div class="alert-title">{{ $alert['title'] }}</div>
+                <div class="alert-title">{{ $alert['title'] }}@if($isOffline)<span class="offline-chip" title="Raised from an offline flush on reconnect">⚑ Offline</span>@endif</div>
                 <div class="alert-meta">{{ $alert['guard_name'] }} · {{ $alert['site_name'] }} · {{ $alert['age'] }}</div>
             </div>
             <div class="alert-actions">
@@ -255,35 +319,71 @@
 @section('scripts')
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script>
-    // ── Unacknowledged alerts: page 4 at a time ─────────────────────────────
+    // ── Unacknowledged alerts: source filter (All / Offline) + page 4 ───────
     // The list is server-rendered once (not part of the 15s live refresh), so
-    // paging is purely client-side: hide all but the current window of 4 rows
-    // and swap with Prev/Next. Controls stay hidden when there are ≤ 4 alerts.
+    // both the source filter and paging are purely client-side: the source tab
+    // narrows to the matching rows, then those are paged 4 at a time with
+    // Prev/Next. Controls stay hidden when the filtered set fits on one page.
+    // Exposed on window so the toggle buttons' inline onclick can reach it.
     (function () {
         const PAGE_SIZE = 4;
-        const rows = Array.from(document.querySelectorAll('#alerts-list .alert-row'));
-        if (rows.length <= PAGE_SIZE) return; // all fit — leave them visible
+        const allRows = Array.from(document.querySelectorAll('#alerts-list .alert-row'));
 
+        const listEl = document.getElementById('alerts-list');
         const pager = document.getElementById('alerts-pagination');
         const prevBtn = document.getElementById('alerts-prev');
         const nextBtn = document.getElementById('alerts-next');
         const indicator = document.getElementById('alerts-page-indicator');
-        const totalPages = Math.ceil(rows.length / PAGE_SIZE);
+
+        let activeSource = 'all';
         let page = 0;
 
+        // Empty-state shown when the Offline tab matches no rows.
+        const emptyEl = document.createElement('div');
+        emptyEl.className = 'alerts-empty-filtered';
+        emptyEl.style.display = 'none';
+        emptyEl.textContent = 'No offline-flush alerts right now.';
+        listEl.after(emptyEl);
+
+        function matches(row) {
+            return activeSource === 'all' || row.dataset.offline === '1';
+        }
+
         function render() {
-            rows.forEach((row, i) => {
+            const visible = allRows.filter(matches);
+            const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+            if (page >= totalPages) page = totalPages - 1;
+
+            // Non-matching rows are always hidden; matching rows are paged.
+            allRows.forEach(row => { row.style.display = 'none'; });
+            visible.forEach((row, i) => {
                 row.style.display = (Math.floor(i / PAGE_SIZE) === page) ? '' : 'none';
             });
-            indicator.textContent = `Page ${page + 1} of ${totalPages}`;
-            prevBtn.disabled = page === 0;
-            nextBtn.disabled = page === totalPages - 1;
+
+            emptyEl.style.display = visible.length ? 'none' : 'block';
+
+            if (visible.length > PAGE_SIZE) {
+                pager.style.display = 'flex';
+                indicator.textContent = `Page ${page + 1} of ${totalPages}`;
+                prevBtn.disabled = page === 0;
+                nextBtn.disabled = page === totalPages - 1;
+            } else {
+                pager.style.display = 'none';
+            }
         }
 
         prevBtn.addEventListener('click', () => { if (page > 0) { page--; render(); } });
-        nextBtn.addEventListener('click', () => { if (page < totalPages - 1) { page++; render(); } });
+        nextBtn.addEventListener('click', () => { if (page < Math.ceil(allRows.filter(matches).length / PAGE_SIZE) - 1) { page++; render(); } });
 
-        pager.style.display = 'flex';
+        window.setAlertSource = function (source, btn) {
+            activeSource = source;
+            page = 0;
+            document.querySelectorAll('#alerts-source-toggle .src-tab')
+                .forEach(t => t.classList.remove('active'));
+            if (btn) btn.classList.add('active');
+            render();
+        };
+
         render();
     })();
 

@@ -297,6 +297,28 @@ class ShiftCalendar {
         });
     }
 
+    // Make sure a specific guard is selectable even when they're not in the
+    // active-guards picker (e.g. a shift's assigned guard was later suspended).
+    // Adds a labelled option so the edit form can show and bind them; the
+    // backend still refuses to save the shift onto a non-active guard.
+    ensureGuardOption(guardId, guard) {
+        if (!guardId) return;
+        const sel = document.getElementById('guard-select');
+        if (sel.querySelector(`option[value="${guardId}"]`)) return;
+
+        const name = guard && (guard.first_name || guard.last_name)
+            ? `${guard.first_name || ''} ${guard.last_name || ''}`.trim()
+            : 'Assigned guard';
+        const status = guard && guard.employment_status && guard.employment_status !== 'active'
+            ? guard.employment_status
+            : (guard && guard.erased_at ? 'erased' : 'inactive');
+
+        const opt = document.createElement('option');
+        opt.value = guardId;
+        opt.textContent = `${name} (${status})`;
+        sel.appendChild(opt);
+    }
+
     populateSiteSelect() {
         const sel = document.getElementById('site-select');
         sel.innerHTML = '<option value="">Select Site</option>';
@@ -902,7 +924,12 @@ class ShiftCalendar {
             const data = await res.json();
 
             if (!data.success) {
-                if (data.errors) {
+                // Reassigning onto a suspended/deactivated/erased guard — same
+                // red toast as the create/edit flow, plus the inline error.
+                if (data.guard_status_block) {
+                    this.showAccessToast(data.error || 'This guard cannot be assigned to shifts.', false);
+                    errEl.textContent = data.error || 'This guard cannot be assigned to shifts.';
+                } else if (data.errors) {
                     errEl.textContent = Object.values(data.errors).flat().join('\n');
                 } else if (data.conflicts && data.conflicts.length) {
                     errEl.textContent = data.error || 'The selected guard is already booked for that time.';
@@ -1024,7 +1051,7 @@ class ShiftCalendar {
 
             const copied = await this.copyToClipboard(data.url);
             this.showAccessToast(
-                copied ? '✓ Access link copied to clipboard.'
+                copied ? 'Access link copied to clipboard'
                        : 'Link generated, but copying failed. Copy it manually:\n' + data.url,
                 copied
             );
@@ -1063,27 +1090,26 @@ class ShiftCalendar {
         }
     }
 
-    // Lightweight transient toast (created on first use). Green for success,
-    // red for failure; auto-hides after a few seconds.
+    // Transient toast (created on first use). Matches the app-wide default
+    // success toast (solid, top-right, white text — see showSuccessToast on the
+    // guards page): solid green for success, solid red for failure; auto-hides.
     showAccessToast(message, ok = true) {
         let toast = document.getElementById('access-link-toast');
         if (!toast) {
             toast = document.createElement('div');
             toast.id = 'access-link-toast';
             toast.style.cssText = [
-                'position:fixed', 'bottom:24px', 'left:50%', 'transform:translateX(-50%)',
-                'z-index:1000', 'max-width:520px', 'padding:11px 16px', 'border-radius:6px',
-                'font-size:12px', 'font-weight:bold', 'white-space:pre-line', 'text-align:center',
-                'box-shadow:0 10px 30px rgba(0,0,0,0.5)', 'opacity:0', 'transition:opacity 0.2s ease',
+                'position:fixed', 'top:20px', 'right:20px',
+                'z-index:9999', 'max-width:520px', 'padding:12px 16px', 'border-radius:4px',
+                'font-size:12px', 'font-weight:bold', 'white-space:pre-line', 'color:white',
+                'box-shadow:0 4px 6px rgba(0,0,0,0.1)', 'opacity:0', 'transition:opacity 0.2s ease',
                 'pointer-events:none'
             ].join(';');
             document.body.appendChild(toast);
         }
 
         toast.textContent = message;
-        toast.style.background = ok ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
-        toast.style.border = '1px solid ' + (ok ? 'var(--success-green)' : 'var(--error-red)');
-        toast.style.color = ok ? 'var(--success-green)' : 'var(--error-red)';
+        toast.style.background = ok ? 'var(--success-green)' : 'var(--error-red)';
 
         clearTimeout(this._accessToastTimer);
         // force reflow so re-show re-triggers the fade
@@ -1261,6 +1287,13 @@ class ShiftCalendar {
         if (date)    document.getElementById('shift-date').value   = this.formatDate(date);
 
         if (shift) {
+            // The guard picker only lists active guards. If this shift's assigned
+            // guard has since been suspended/deactivated they won't be an option,
+            // so the select would silently fall back to "Select Guard". Inject the
+            // real guard as a marked option so the field shows who it is and the
+            // value binds — saving then returns the clear "guard is suspended"
+            // red toast from the backend rather than a generic "guard required".
+            this.ensureGuardOption(shift.guard_id, shift.assigned_guard);
             document.getElementById('guard-select').value = shift.guard_id;
             document.getElementById('site-select').value  = shift.site_id;
             document.getElementById('shift-date').value   = this.formatDate(new Date(shift.scheduled_start));
@@ -1526,6 +1559,15 @@ class ShiftCalendar {
             const data = await res.json();
 
             if (!data.success) {
+                // Guard is suspended/deactivated/erased — the backend refuses to
+                // schedule or reassign onto them. Surface it as a red toast (the
+                // guard was picked/kept in the form; the drawer stays open so the
+                // admin can choose another) as well as the inline drawer error.
+                if (data.guard_status_block) {
+                    this.showAccessToast(data.error || 'This guard cannot be assigned to shifts.', false);
+                    this.showError(data.error || 'This guard cannot be assigned to shifts.');
+                    return;
+                }
                 // WTR warning returned from backend
                 if (data.wtr_warning) {
                     this.displayWTRResults({ compliant: false, violations: data.violations });

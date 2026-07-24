@@ -604,9 +604,15 @@
                                     @endif
                                 </td>
                                 <td>
-                                    <div class="status-chip {{ $guard->employment_status === 'active' ? '' : 'unresponsive' }}">
-                                        {{ $guard->employment_status === 'active' ? 'Active' : 'Inactive' }}
-                                    </div>
+                                    @php
+                                        // active → green, suspended → amber (distinct tag), inactive → red.
+                                        [$statusClass, $statusLabel] = match ($guard->employment_status) {
+                                            'active'    => ['inside', 'Active'],
+                                            'suspended' => ['outside', 'Suspended'],
+                                            default     => ['unresponsive', 'Inactive'],
+                                        };
+                                    @endphp
+                                    <div class="status-chip {{ $statusClass }}">{{ $statusLabel }}</div>
                                 </td>
                                 <td>
                                     <div style="display: flex; gap: 4px;">
@@ -617,7 +623,7 @@
                                         @else
                                             <button class="btn-sm btn-secondary-sm" onclick="toggleGuardStatus('{{ $guard->id }}', 'activate')">Activate</button>
                                         @endif
-                                        <button class="btn-sm btn-danger-sm" onclick="deleteGuard('{{ $guard->id }}', '{{ $guard->first_name }} {{ $guard->last_name }}')">Erase</button>
+                                        <button class="btn-sm btn-danger-sm" onclick="deleteGuard('{{ $guard->id }}', '{{ $guard->first_name }} {{ $guard->last_name }}')">Remove</button>
                                     </div>
                                 </td>
                                 <td>
@@ -840,21 +846,21 @@
 <!-- Delete Confirmation Modal -->
 <div class="delete-confirmation" id="deleteConfirmation">
     <div class="delete-modal">
-        <h3>⚠️ Erase Guard Personal Data</h3>
-        <p>You are about to <strong>erase the personal data</strong> (GDPR right to erasure) for:</p>
+        <h3>⚠️ Remove Guard</h3>
+        <p>You are about to <strong>remove</strong> this guard from the roster:</p>
         <p style="text-align: center; font-weight: bold; color: var(--premium-gold);" id="deleteGuardName">-</p>
 
         <div class="warning">
-            <strong>GDPR Compliance Notice:</strong><br>
-            • Personal data (name, email, phone, SIA number) will be redacted<br>
-            • Audit trails (shifts, alerts, evidence, reports) are preserved<br>
-            • The account is deactivated and can no longer sign in<br>
-            • This action cannot be undone — use "Deactivate" to retain the account
+            <strong>What happens:</strong><br>
+            • The guard is hidden from the roster and can't be added to new shifts<br>
+            • Their real details are kept, so historical shifts, alerts, evidence and reports still show them<br>
+            • The account is deactivated and signed out — they can no longer sign in<br>
+            • Reversible: an admin can restore the guard later
         </div>
 
         <div class="delete-actions">
             <button type="button" class="delete-btn cancel" onclick="cancelDelete()">Cancel</button>
-            <button type="button" class="delete-btn confirm" onclick="confirmDelete()">ERASE PERSONAL DATA</button>
+            <button type="button" class="delete-btn confirm" onclick="confirmDelete()">REMOVE GUARD</button>
         </div>
     </div>
 </div>
@@ -865,14 +871,15 @@
     let currentGuardId = null;
     let currentGuardData = null; // Store guard data for reuse
 
-    // Success message function for consistency
-    function showSuccessToast(message) {
+    // Toast message function for consistency. Defaults to a green success toast;
+    // pass 'error' to show a red error toast (e.g. "can't remove — active shift").
+    function showSuccessToast(message, type = 'success') {
         const successMsg = document.createElement('div');
         successMsg.style.cssText = `
             position: fixed;
             top: 20px;
             right: 20px;
-            background: var(--success-green);
+            background: ${type === 'error' ? 'var(--error-red)' : 'var(--success-green)'};
             color: white;
             padding: 12px 16px;
             border-radius: 4px;
@@ -1441,12 +1448,13 @@
 
         const confirmBtn = document.querySelector('.delete-btn.confirm');
         const originalText = confirmBtn.textContent;
-        confirmBtn.textContent = 'ERASING...';
+        confirmBtn.textContent = 'REMOVING...';
         confirmBtn.disabled = true;
 
-        // GDPR right-to-erasure: anonymise PII in place, preserve the audit trail
-        // (Phase 8). Distinct from a hard delete — the row is kept as a redacted
-        // tombstone so historical shift/alert/evidence records stay FK-valid.
+        // Data-preserving removal: archive the guard (stamp erased_at + set
+        // inactive + invalidate sessions) WITHOUT redacting their details, so the
+        // row is hidden from the roster but historical shift/alert/evidence
+        // records still resolve the real guard. Reversible.
         fetch(`/admin/guards/${guardToDelete}/erase`, {
             method: 'POST',
             headers: {
@@ -1469,14 +1477,16 @@
                     location.reload(); // Refresh page to show updated data
                 }, 1000);
             } else {
-                alert(data.error || 'Error deleting guard');
+                // e.g. guard has an active/checked-in shift — show a red toast,
+                // keep the modal open so the admin can act on it.
+                showSuccessToast(data.error || 'Error removing guard', 'error');
                 confirmBtn.textContent = originalText;
                 confirmBtn.disabled = false;
             }
         })
         .catch(error => {
-            console.error('Error deleting guard:', error);
-            alert('Error deleting guard: ' + error.message);
+            console.error('Error removing guard:', error);
+            showSuccessToast('Error removing guard: ' + error.message, 'error');
             confirmBtn.textContent = originalText;
             confirmBtn.disabled = false;
         });

@@ -73,7 +73,6 @@ Route::prefix('admin')->name('admin.')->group(function () {
         // GDPR right-to-erasure (Phase 8): anonymise PII, preserve the audit
         // trail (distinct from destroy(), which hard-deletes the row).
         Route::post('guards/{guard}/erase', [App\Http\Controllers\Admin\GuardController::class, 'erase'])->name('guards.erase');
-        Route::delete('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'destroy'])->name('guards.destroy');
 
         // Site Management routes - Phase 3: Core Location System
         Route::get('sites', [App\Http\Controllers\Admin\SiteController::class, 'index'])->name('sites.index');

@@ -47,7 +47,7 @@ class AlertController extends Controller
      */
     public function list(Request $request): JsonResponse
     {
-        $filters = $request->only(['severity', 'type', 'site_id', 'guard_id', 'status']);
+        $filters = $request->only(['severity', 'type', 'site_id', 'guard_id', 'status', 'offline']);
         $perPage = (int) config('ironlock.alerts_feed_per_page', 25);
 
         $result = $this->alerts->getAlertsFiltered($filters, $perPage);

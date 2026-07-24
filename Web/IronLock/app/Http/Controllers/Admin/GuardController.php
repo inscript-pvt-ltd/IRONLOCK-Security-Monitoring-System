@@ -18,7 +18,9 @@ class GuardController extends Controller
      */
     public function index(Request $request)
     {
-        $query = Guard::query();
+        // Removed (archived) guards are hidden from the roster — their real
+        // records stay in the DB so historical shifts still show their details.
+        $query = Guard::query()->notErased();
 
         // Search functionality
         if ($request->filled('search')) {
@@ -333,95 +335,17 @@ class GuardController extends Controller
     }
 
     /**
-     * Delete the specified guard (GDPR compliant - removes personal data, preserves audit trails).
-     */
-    public function destroy(Request $request, Guard $guard)
-    {
-        // Business validation - check for active shifts
-        $activeShifts = $guard->shifts()->where('status', 'active')->count();
-        if ($activeShifts > 0) {
-            if ($request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Cannot delete guard with active shifts. Please end all shifts first.'
-                ], 400);
-            }
-            return redirect()
-                ->route('admin.guards.index')
-                ->with('error', 'Cannot delete guard with active shifts. Please end all shifts first.');
-        }
-
-        $guardName = "{$guard->first_name} {$guard->last_name}";
-        $guardId = $guard->id;
-
-        // Log deletion action BEFORE deletion (for audit trail)
-        $this->logGuardAction('deleted', $guard, [
-            'deletion_reason' => 'GDPR deletion request',
-            'deleted_by' => session('admin_id'),
-            'personal_data_removed' => true,
-            'audit_trails_preserved' => true,
-            'deletion_timestamp' => now()->toISOString()
-        ]);
-
-        try {
-            // GDPR-compliant deletion: Remove personal data but preserve audit trails.
-            // Re-check for active shifts inside the transaction to avoid a race
-            // where a shift becomes active between the initial check and delete.
-            DB::transaction(function () use ($guard) {
-                $activeShifts = $guard->shifts()->where('status', 'active')->lockForUpdate()->count();
-                if ($activeShifts > 0) {
-                    throw new \RuntimeException('Guard has active shifts');
-                }
-
-                // Foreign key constraints with CASCADE handle related data appropriately.
-                $guard->delete();
-            });
-
-            if ($request->expectsJson()) {
-                return response()->json([
-                    'success' => true,
-                    'message' => "Guard {$guardName} has been permanently deleted (GDPR compliant)"
-                ]);
-            }
-
-            return redirect()
-                ->route('admin.guards.index')
-                ->with('success', "Guard {$guardName} has been permanently deleted (GDPR compliant)");
-
-        } catch (\Exception $e) {
-            // Log the error
-            logger()->error('Guard deletion failed', [
-                'guard_id' => $guardId,
-                'guard_name' => $guardName,
-                'error' => $e->getMessage(),
-                'admin_id' => session('admin_id')
-            ]);
-
-            if ($request->expectsJson()) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Failed to delete guard. Please contact system administrator.'
-                ], 500);
-            }
-
-            return redirect()
-                ->route('admin.guards.index')
-                ->with('error', 'Failed to delete guard. Please contact system administrator.');
-        }
-    }
-
-    /**
-     * GDPR right-to-erasure (Phase 8 · SEC-004) — anonymise a guard's PII while
-     * preserving the append-only audit trail.
+     * Remove a guard from the active roster (Phase 8 · SEC-004, revised) — a
+     * data-preserving archive, NOT a hard delete or PII anonymisation.
      *
-     * Unlike destroy() (a hard delete), erase() redacts identity in place so the
-     * historical shift_events / alerts / evidence / reports that reference this
-     * guard stay intact and FK-valid. The heavy lifting is in
-     * GuardErasureService; this only authorises, delegates and audits.
+     * The guard's real details are kept so historical shift_events / alerts /
+     * evidence / reports that reference them still show the real guard; the row
+     * is only hidden from the roster + shift picker and the account is signed
+     * out and deactivated. The heavy lifting is in GuardErasureService; this
+     * only authorises, delegates and audits. Reversible.
      */
     public function erase(Request $request, Guard $guard, \App\Domains\Guards\Services\GuardErasureService $erasure)
     {
-        // Capture the (pre-redaction) name for the audit log + response message.
         $guardName = trim("{$guard->first_name} {$guard->last_name}");
 
         $result = $erasure->erase($guard);
@@ -430,17 +354,17 @@ class GuardController extends Controller
             return response()->json(['success' => false, 'error' => $result['error']], 422);
         }
 
-        $this->logGuardAction('erased', $guard, [
-            'erasure_reason' => 'GDPR right-to-erasure request',
-            'erased_by' => session('admin_id'),
-            'personal_data_redacted' => true,
+        $this->logGuardAction('removed', $guard, [
+            'removal_reason' => 'Removed from active roster',
+            'removed_by' => session('admin_id'),
+            'data_preserved' => true,
             'audit_trails_preserved' => true,
-            'erasure_timestamp' => now()->toISOString(),
+            'removal_timestamp' => now()->toISOString(),
         ]);
 
         return response()->json([
             'success' => true,
-            'message' => "{$guardName}'s personal data has been erased. The audit trail is preserved.",
+            'message' => "{$guardName} has been removed. Their records are preserved for historical shifts.",
         ]);
     }
 
@@ -546,6 +470,7 @@ class GuardController extends Controller
     public function list()
     {
         $guards = Guard::where('employment_status', 'active')
+            ->notErased()
             ->select('id', 'first_name', 'last_name', 'username', 'employment_status')
             ->orderBy('first_name')
             ->orderBy('last_name')

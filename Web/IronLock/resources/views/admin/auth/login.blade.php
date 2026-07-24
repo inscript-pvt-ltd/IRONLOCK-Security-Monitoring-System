@@ -153,14 +153,22 @@
             display: block;
         }
 
+        /* Logout / success notice — floating toast matching the app-wide default
+           success toast (solid green, top-right, white text, auto-hides). Fixed
+           so it overlays rather than sitting inside the login card. */
         .success-banner {
-            background: rgba(34, 197, 94, 0.1);
-            border: 1px solid #22c55e;
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            max-width: 520px;
+            padding: 12px 16px;
             border-radius: 4px;
-            padding: 8px 12px;
             font-size: 12px;
-            color: #22c55e;
-            margin-top: 12px;
+            font-weight: bold;
+            color: white;
+            background: #22c55e;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             display: none;
         }
 
@@ -354,6 +362,13 @@
             // Initial validation
             validateForm();
 
+            // Reset the button back to its idle "Sign In" state.
+            function resetSubmitState() {
+                submitLoading.classList.add('hidden');
+                submitText.classList.remove('hidden');
+                validateForm(); // re-derives submitBtn.disabled from current input
+            }
+
             // Form submission
             form.addEventListener('submit', function(e) {
                 if (submitBtn.disabled) {
@@ -369,6 +384,16 @@
                 // Hide previous errors
                 const errorBanners = document.querySelectorAll('.error-banner');
                 errorBanners.forEach(banner => banner.classList.remove('show'));
+            });
+
+            // When the page is restored from the browser's back/forward cache
+            // (e.g. user logs in, then hits the Back button), the DOM is a frozen
+            // snapshot with the button still disabled and the "Signing In..."
+            // spinner showing. Reset it so the form is usable again.
+            window.addEventListener('pageshow', function(e) {
+                if (e.persisted) {
+                    resetSubmitState();
+                }
             });
 
             // Auto-hide success messages after 3 seconds

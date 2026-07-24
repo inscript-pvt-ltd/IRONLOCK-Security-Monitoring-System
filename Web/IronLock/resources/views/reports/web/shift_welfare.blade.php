@@ -108,7 +108,11 @@
 
     {{-- 5. Wakefulness Verification --}}
     <details class="wf-sec" open>
-        <summary class="wf-sechead"><span class="wf-secnum">5</span><span class="wf-sectitle">Wakefulness Verification</span><span class="wf-secdesc">{{ count($data['wakefulness']) }} challenges</span><span class="wf-chev"></span></summary>
+        @php
+            $wfMissed = $data['missed_checks']['wakefulness'] ?? [];
+            $wfDesc = count($data['wakefulness']) . ' challenges' . (count($wfMissed) ? ' · ' . count($wfMissed) . ' missed' : '');
+        @endphp
+        <summary class="wf-sechead"><span class="wf-secnum">5</span><span class="wf-sectitle">Wakefulness Verification</span><span class="wf-secdesc">{{ $wfDesc }}</span><span class="wf-chev"></span></summary>
         <div class="wf-secbody">
             @if (count($data['wakefulness']))
                 <table class="wf-table">
@@ -132,12 +136,33 @@
             @else
                 <div class="wf-empty">No wakefulness checks were issued for this shift.</div>
             @endif
+            @if (count($wfMissed))
+                <div class="wf-missed">
+                    <div class="wf-missed-head">Missed while offline</div>
+                    <div class="wf-missed-sub">Scheduled challenge{{ count($wfMissed) === 1 ? '' : 's' }} that came due while the guard's device was offline and no check materialised on reconnect. Neutral — distinct from a failed response.</div>
+                    <table class="wf-table">
+                        <thead><tr><th>Scheduled Time</th><th>Result</th></tr></thead>
+                        <tbody>
+                            @foreach ($wfMissed as $m)
+                                <tr>
+                                    <td class="wf-mono">{!! $t($m['time'], 'rpt-ts-time') !!}</td>
+                                    <td><span class="wf-badge missed">Missed</span></td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @endif
         </div>
     </details>
 
     {{-- 6. Photo Verification --}}
     <details class="wf-sec" open>
-        <summary class="wf-sechead"><span class="wf-secnum">6</span><span class="wf-sectitle">Photo Verification</span><span class="wf-secdesc">{{ count($data['photos']) }} requests</span><span class="wf-chev"></span></summary>
+        @php
+            $phMissed = $data['missed_checks']['photos'] ?? [];
+            $phDesc = count($data['photos']) . ' requests' . (count($phMissed) ? ' · ' . count($phMissed) . ' missed' : '');
+        @endphp
+        <summary class="wf-sechead"><span class="wf-secnum">6</span><span class="wf-sectitle">Photo Verification</span><span class="wf-secdesc">{{ $phDesc }}</span><span class="wf-chev"></span></summary>
         <div class="wf-secbody">
             @forelse ($data['photos'] as $p)
                 <div class="wf-vr">
@@ -182,6 +207,23 @@
             @empty
                 <div class="wf-empty">No photos were submitted for this shift.</div>
             @endforelse
+            @if (count($phMissed))
+                <div class="wf-missed">
+                    <div class="wf-missed-head">Missed while offline</div>
+                    <div class="wf-missed-sub">Scheduled photo request{{ count($phMissed) === 1 ? '' : 's' }} that came due while the guard's device was offline and no capture materialised on reconnect. Neutral — distinct from a rejected image.</div>
+                    <table class="wf-table">
+                        <thead><tr><th>Scheduled Time</th><th>Result</th></tr></thead>
+                        <tbody>
+                            @foreach ($phMissed as $m)
+                                <tr>
+                                    <td class="wf-mono">{!! $t($m['time'], 'rpt-ts-time') !!}</td>
+                                    <td><span class="wf-badge missed">Missed</span></td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @endif
         </div>
     </details>
 

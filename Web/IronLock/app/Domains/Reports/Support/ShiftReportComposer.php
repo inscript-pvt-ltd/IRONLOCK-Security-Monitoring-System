@@ -48,6 +48,7 @@ class ShiftReportComposer
             'gps' => $this->gps($shift, $compliance),
             'wakefulness' => $this->wakefulness($shift, $events),
             'photos' => $this->photos($shift, $includeNonce, $includeHashes),
+            'missed_checks' => $this->missedChecks($shift),
             'security_validation' => $this->securityValidation($shift, $compliance),
             'wtr' => $this->wtr($shift, $compliance),
             'alerts' => $this->alerts($shift),
@@ -355,6 +356,32 @@ class ShiftReportComposer
                     ])->all(),
                 ];
             })->all();
+    }
+
+    /**
+     * Scheduled offline checks that left zero trace — a photo_schedule /
+     * wakefulness_schedule mark that came due while the guard's device was
+     * provably offline (inside a recorded comms gap) yet materialised no check on
+     * reconnect. These are computed on read (never persisted as synthetic rows,
+     * so a late flush self-heals) and reported as a neutral "Missed" state,
+     * distinct from FAILED (a check that ran and the guard answered wrong). The
+     * comms-gap gating means a mark the guard was online for but the server never
+     * dispatched (cron lag) is a dispatch gap, not a guard miss, and is excluded.
+     *
+     * @return array{photos:list<array{time:?string}>,wakefulness:list<array{time:?string}>}
+     */
+    private function missedChecks(Shift $shift): array
+    {
+        $marks = $this->compliance->missedScheduleMarks($shift);
+        $fmt = fn (array $list): array => array_values(array_map(
+            fn ($iso): array => ['time' => $this->iso($iso)],
+            $list
+        ));
+
+        return [
+            'photos' => $fmt($marks['photos'] ?? []),
+            'wakefulness' => $fmt($marks['wakefulness'] ?? []),
+        ];
     }
 
     /**

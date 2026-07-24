@@ -139,7 +139,8 @@ class AlertService
         string $shiftId,
         ?Guard $guard,
         string $reason,
-        string $occurredAt
+        string $occurredAt,
+        bool $isOffline = false
     ): Alert {
         $guardName = $guard ? trim($guard->first_name . ' ' . $guard->last_name) : 'Unknown Guard';
         $occurredFmt = Carbon::parse($occurredAt)->format('H:i:s');
@@ -151,12 +152,22 @@ class AlertService
             ? "Last known location: {$location->latitude}, {$location->longitude}."
             : 'No recent location on file.';
 
+        // An offline flush is retroactive: the failure happened during a
+        // connectivity gap and only reached us on reconnect, by which point the
+        // guard is back online. Say so, so a supervisor reads it as "review what
+        // happened" rather than a live "respond now" incident.
+        $description = $isOffline
+            ? "{$guardName} failed an OFFLINE wakefulness check ({$reason}) at {$occurredFmt} while disconnected; "
+                . "flushed on reconnect. Review the shift and confirm welfare. {$where}"
+            : "{$guardName} failed a wakefulness check ({$reason}) at {$occurredFmt}. "
+                . "Welfare check required. {$where}";
+
         return $this->createAlert($guardId, $shiftId, [
             'type' => 'GUARD_UNRESPONSIVE',
             'severity' => 'CRITICAL',
-            'title' => "Unresponsive — {$guardName}",
-            'description' => "{$guardName} failed a wakefulness check ({$reason}) at {$occurredFmt}. "
-                . "Welfare check required. {$where}",
+            'is_offline' => $isOffline,
+            'title' => ($isOffline ? 'Unresponsive (Offline) — ' : 'Unresponsive — ') . $guardName,
+            'description' => $description,
         ]);
     }
 
@@ -209,7 +220,7 @@ class AlertService
      * filters, CRITICAL-first then newest-first, paginated. Distinct from
      * getActiveAlerts() (which is the OPEN-only, unpaginated dashboard preview).
      *
-     * @param  array  $filters  severity|type|site_id|guard_id|status (any omitted/blank = no constraint)
+     * @param  array  $filters  severity|type|site_id|guard_id|status|offline (any omitted/blank = no constraint)
      * @return array{rows: array, pagination: array}
      */
     public function getAlertsFiltered(array $filters, int $perPage): array
@@ -223,6 +234,11 @@ class AlertService
         }
         if (!empty($filters['type'])) {
             $query->where('type', $filters['type']);
+        }
+        // Offline tab: 'offline' → only retroactive offline-flush alerts,
+        // 'online' → only live alerts, blank/absent → no constraint.
+        if (!empty($filters['offline'])) {
+            $query->where('is_offline', $filters['offline'] === 'offline');
         }
         if (!empty($filters['status'])) {
             $query->where('status', $filters['status']);
@@ -242,6 +258,7 @@ class AlertService
                 'id' => $a->id,
                 'type' => $a->type,
                 'severity' => $a->severity,
+                'is_offline' => (bool) $a->is_offline,
                 'status' => $a->status,
                 'guard_name' => $a->assignedGuard
                     ? trim($a->assignedGuard->first_name . ' ' . $a->assignedGuard->last_name)
@@ -276,6 +293,7 @@ class AlertService
             'id' => $alert->id,
             'type' => $alert->type,
             'severity' => $alert->severity,
+            'is_offline' => (bool) $alert->is_offline,
             'status' => $alert->status,
             'guard_name' => $alert->assignedGuard
                 ? trim($alert->assignedGuard->first_name . ' ' . $alert->assignedGuard->last_name)
@@ -336,6 +354,7 @@ class AlertService
             'id' => $a->id,
             'type' => $a->type,
             'severity' => $a->severity,
+            'is_offline' => (bool) $a->is_offline,
             'guard_name' => $a->assignedGuard
                 ? trim($a->assignedGuard->first_name . ' ' . $a->assignedGuard->last_name)
                 : 'Unknown',

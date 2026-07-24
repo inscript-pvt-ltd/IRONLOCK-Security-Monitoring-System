@@ -170,6 +170,18 @@ class PhotoVerificationService
         //     pool nonce from a shift that just ended, uploaded after the next
         //     shift starts) would be filed against the wrong shift's timeline.
         if ($nonce->shift_id !== $shift->id) {
+            // Suspicious for an OFFLINE flush: a pool nonce minted for one shift
+            // being replayed onto a different shift's endpoint (mis-filed or
+            // forged). Surface it to the admin as a WARNING, tagged offline so it
+            // lands in the Offline tab. Online mismatches are ordinary client
+            // bugs and stay silent (rejected either way).
+            if ($nonce->type !== Nonce::TYPE_ONLINE) {
+                $this->raiseAlert(
+                    $guard, $shift, 'PHOTO_NONCE_WRONG_SHIFT',
+                    'Offline photo was flushed under a shift it was not minted for — rejected.',
+                    severity: 'WARNING', isOffline: true,
+                );
+            }
             return $this->reject('NONCE_WRONG_SHIFT');
         }
 
@@ -185,6 +197,18 @@ class PhotoVerificationService
         foreach ($items as $item) {
             if (!$this->verifyHmac($guard, $item['file'], $payload + ['signature' => $item['signature']])) {
                 $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt);
+                // A bad signature on an OFFLINE flush means the stored capture was
+                // tampered with (or signed with the wrong secret) before it synced
+                // — genuinely suspicious, so alert the admin as a WARNING in the
+                // Offline tab. Online HMAC failures are already covered elsewhere
+                // and stay silent here.
+                if ($nonce->type !== Nonce::TYPE_ONLINE) {
+                    $this->raiseAlert(
+                        $guard, $shift, 'PHOTO_HMAC_INVALID',
+                        'Offline photo failed signature verification on flush — possible tampering.',
+                        severity: 'WARNING', isOffline: true,
+                    );
+                }
                 return $this->reject('HMAC_INVALID');
             }
         }
@@ -599,14 +623,21 @@ class PhotoVerificationService
         ];
     }
 
-    private function raiseAlert(Guard $guard, Shift $shift, string $type, string $description): void
-    {
+    private function raiseAlert(
+        Guard $guard,
+        Shift $shift,
+        string $type,
+        string $description,
+        string $severity = 'CRITICAL',
+        bool $isOffline = false
+    ): void {
         try {
             $name = trim($guard->first_name . ' ' . $guard->last_name);
             $this->alerts->createAlert($guard->id, $shift->id, [
                 'type' => $type,
-                'severity' => 'CRITICAL',
-                'title' => "{$type} — {$name}",
+                'severity' => $severity,
+                'is_offline' => $isOffline,
+                'title' => ($isOffline ? "{$type} (Offline) — " : "{$type} — ") . $name,
                 'description' => $description,
             ]);
         } catch (\Throwable $e) {

@@ -76,6 +76,7 @@ class Site extends Model
             'latitude' => 'decimal:8',
             'longitude' => 'decimal:8',
             'grace_period_minutes' => 'integer',
+            'archived_at' => 'datetime',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
@@ -125,6 +126,25 @@ class Site extends Model
     public function scopeActive($query)
     {
         return $query->where('status', self::STATUS_ACTIVE);
+    }
+
+    /**
+     * Exclude archived (soft-removed) sites. Archived sites are hidden from the
+     * admin list and the shift picker, but the row is kept so historical shifts
+     * still resolve the real site — so this scope is applied only to listing and
+     * picker queries, never as a global scope (@see the archived_at migration).
+     */
+    public function scopeNotArchived($query)
+    {
+        return $query->whereNull('archived_at');
+    }
+
+    /**
+     * Whether this site has been archived (soft-removed from the roster).
+     */
+    public function isArchived(): bool
+    {
+        return $this->archived_at !== null;
     }
 
     /**
