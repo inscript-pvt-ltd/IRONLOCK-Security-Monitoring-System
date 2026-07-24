@@ -185,14 +185,23 @@ class WakefulnessService
             return ['result' => 'PASSED', 'reason' => null, 'check' => $check];
         }
 
-        // An OFFLINE answer is replayed on reconnect, after its window has already
-        // closed — record the failure for audit (WAKEFULNESS_FAILED is written
-        // regardless below), but do NOT raise a live CRITICAL welfare-check alert
-        // retroactively for a challenge that is already over (Phase 7 §7.3, "no
-        // retroactive alerts"; the guard is back online by the time we see this).
-        // A genuine *live* miss is still escalated: the online timeout sweep pages
-        // unanswered online challenges, and an online failure here keeps alerting.
-        $this->escalateUnresponsive($check, $reason ?? 'FAILED', raiseAlert: !$isOffline);
+        // Both online and offline failures now escalate. An OFFLINE answer is a
+        // wrong TOTP replayed on reconnect (a genuine wakefulness miss that
+        // happened during the gap) — it raises a GUARD_UNRESPONSIVE alert flagged
+        // `is_offline` so the Alert Feed / dashboard surface it under the Offline
+        // tab as "review what happened" rather than a live "respond now" incident.
+        // Anchored to the guard's true on-device response time (not the flush
+        // instant); online failures keep their original server-receipt anchor.
+        // Idempotency (the ALREADY_RESOLVED early-returns above) means a re-flushed
+        // or re-submitted window never raises a duplicate. Mirrors the offline
+        // materialise-on-flush path in recordOfflineResult().
+        $this->escalateUnresponsive(
+            $check,
+            $reason ?? 'FAILED',
+            raiseAlert: true,
+            occurredAt: $isOffline ? $check->responded_at : null,
+            isOffline: $isOffline,
+        );
 
         return ['result' => 'FAILED', 'reason' => $reason, 'check' => $check];
     }
@@ -211,10 +220,12 @@ class WakefulnessService
      * 404 CHECK_NOT_FOUND) and was silently dropped.
      *
      * Judged cryptographically: the server re-derives the TOTP for the claimed
-     * window from the shift seed. A wrong code is recorded FAILED but raises NO
-     * live alert — the window is long closed and the guard is back online by the
-     * time we see this (Phase 7 §7.3, "no retroactive alerts"). Idempotent: a
-     * re-flushed window echoes the first recorded outcome (replay-safe).
+     * window from the shift seed. A wrong code is recorded FAILED and raises a
+     * GUARD_UNRESPONSIVE alert (same as an online failure) flagged `is_offline`,
+     * so it surfaces under the dashboard/Alert-Feed "Offline" tab as a
+     * retroactive failure to review rather than a live incident. Idempotent: a
+     * re-flushed window echoes the first recorded outcome and never re-alerts
+     * (replay-safe).
      *
      * @return array{result:'PASSED'|'FAILED', reason:?string, check:?WakefulnessCheck}
      */
@@ -299,22 +310,38 @@ class WakefulnessService
             'mode' => WakefulnessCheck::MODE_OFFLINE,
             'request_type' => WakefulnessCheck::TYPE_SCHEDULED,
             'backfilled' => true,
-        ], $offlineAudit));
+        ], $offlineAudit), $serverReceivedAt);
 
         if ($correct) {
+            // Stamp the confirmation strictly after the challenge (+1s) so it
+            // always sorts above its own CHALLENGE on the timeline, even though
+            // both materialise in the same flush instant.
             $this->logEvent($shift, 'WAKEFULNESS_CONFIRMED', array_merge([
                 'check_id' => $check->id,
                 'mode' => WakefulnessCheck::MODE_OFFLINE,
                 'backfilled' => true,
-            ], $offlineAudit));
+            ], $offlineAudit), $serverReceivedAt->copy()->addSecond());
 
             return ['result' => 'PASSED', 'reason' => null, 'check' => $check];
         }
 
-        // Failed offline replay — WAKEFULNESS_FAILED audit event only, never a
-        // retroactive live CRITICAL alert (raiseAlert:false). Same on-device
-        // challenge/response times so a failed offline row reads honestly too.
-        $this->escalateUnresponsive($check, 'OFFLINE_CODE_MISMATCH', raiseAlert: false, extraMeta: $offlineAudit);
+        // Failed offline replay — WAKEFULNESS_FAILED audit event AND a
+        // GUARD_UNRESPONSIVE alert, same as an online failure, but flagged
+        // `is_offline` so the Alert Feed / dashboard surface it under the Offline
+        // tab (a retroactive failure the supervisor must still review, raised on
+        // reconnect rather than live). The alert is anchored to the guard's true
+        // on-device response time — not the flush instant — so it reads honestly,
+        // and recordOfflineResult's idempotency guard (the $existing early-return
+        // above) means a re-flushed window never raises a duplicate alert.
+        $this->escalateUnresponsive(
+            $check,
+            'OFFLINE_CODE_MISMATCH',
+            raiseAlert: true,
+            occurredAt: $check->responded_at,
+            extraMeta: $offlineAudit,
+            isOffline: true,
+            eventAt: $serverReceivedAt->copy()->addSecond(),
+        );
 
         return ['result' => 'FAILED', 'reason' => 'OFFLINE_CODE_MISMATCH', 'check' => $check];
     }
@@ -385,24 +412,35 @@ class WakefulnessService
      * at the moment the guard actually went unresponsive, not when the sweep
      * finally caught up. $extraMeta is merged into the audit event (the sweep uses
      * it to record deadline_at / detected_late_by_seconds).
+     *
+     * $isOffline marks the failure as originating from an offline flush (a wrong
+     * TOTP replayed on reconnect); it flags the audit event and the raised alert
+     * so the dashboard/Alert Feed can group it under the "Offline" tab.
      */
     public function escalateUnresponsive(
         WakefulnessCheck $check,
         string $reason,
         bool $raiseAlert = true,
         ?Carbon $occurredAt = null,
-        array $extraMeta = []
+        array $extraMeta = [],
+        bool $isOffline = false,
+        ?Carbon $eventAt = null
     ): void {
         $shift = $check->shift;
         $guard = $check->assignedGuard;
         $occurredAt = $occurredAt ?? ($check->server_received_at ?? Carbon::now());
 
+        // $eventAt overrides only the audit event's server time (not $occurredAt,
+        // which drives the alert). The offline path passes challenge_time + 1s so
+        // the FAILED row sorts strictly above its paired CHALLENGE despite both
+        // materialising in the same flush second (UUID keys can't break the tie).
         $this->logEvent($shift, 'WAKEFULNESS_FAILED', array_merge([
             'check_id' => $check->id,
             'mode' => $check->online_or_offline,
             'reason' => $reason,
             'alerted' => $raiseAlert,
-        ], $extraMeta));
+            'offline' => $isOffline,
+        ], $extraMeta), $eventAt);
 
         if (!$raiseAlert) {
             return;
@@ -414,7 +452,8 @@ class WakefulnessService
                 $check->shift_id,
                 $guard,
                 $reason,
-                $occurredAt instanceof Carbon ? $occurredAt->toISOString() : (string) $occurredAt
+                $occurredAt instanceof Carbon ? $occurredAt->toISOString() : (string) $occurredAt,
+                $isOffline
             );
         } catch (\Throwable $e) {
             Log::warning('Wakefulness: failed to raise GUARD_UNRESPONSIVE alert', [
@@ -466,21 +505,28 @@ class WakefulnessService
         }
     }
 
-    private function logEvent(?Shift $shift, string $eventType, array $metadata = []): void
+    private function logEvent(?Shift $shift, string $eventType, array $metadata = [], ?Carbon $occurredAt = null): void
     {
         if (!$shift) {
             return;
         }
 
         try {
+            // Timeline sorts by server_received_at DESC (then created_at DESC).
+            // ShiftEvent keys are UUIDs, so insertion order can't break a tie:
+            // back-to-back offline CHALLENGE + CONFIRMED events logged in the same
+            // second would sort indeterminately (CHALLENGE could float above its own
+            // CONFIRMED). Callers that log a paired sequence pass an explicit
+            // $occurredAt so the confirmation stamps strictly after the challenge.
+            $ts = $occurredAt ?? Carbon::now();
             ShiftEvent::create([
                 'id' => (string) Str::uuid(),
                 'shift_id' => $shift->id,
                 'guard_id' => $shift->guard_id,
                 'event_type' => $eventType,
                 'metadata' => $metadata,
-                'recorded_at' => Carbon::now(),
-                'server_received_at' => Carbon::now(),
+                'recorded_at' => $ts,
+                'server_received_at' => $ts,
             ]);
         } catch (\Throwable $e) {
             // Audit is non-critical to the request path.

@@ -79,6 +79,183 @@ class ComplianceCalculator
         ];
     }
 
+    /** Tolerance when matching a materialised check back to its schedule mark. */
+    private const MISSED_MATCH_TOLERANCE_SECONDS = 90;
+
+    /**
+     * Scheduled verification marks that came due within the worked window but
+     * were never fulfilled — no online request/challenge fired AND no offline
+     * capture/challenge materialised on reconnect.
+     *
+     * These are "unverified" checks, distinct from a FAILED check (where the
+     * guard answered wrong): the check simply never happened. The online
+     * dispatcher deliberately skips an offline/unreachable guard (photos:
+     * dispatch-scheduled / wakefulness:dispatch — the app's own offline capture
+     * is meant to cover them), so a schedule mark with no trace at all means
+     * neither path ran: the device was dark and nothing was flushed for it — a
+     * real gap the supervisor should see.
+     *
+     * Computed on-read, never persisted: a late offline flush that materialises
+     * a genuine check for the mark automatically stops it counting here —
+     * self-healing and idempotent, with no synthetic audit rows to reconcile.
+     *
+     * @return array{photos: list<string>, wakefulness: list<string>}
+     */
+    public function missedScheduleMarks(Shift $shift): array
+    {
+        // Reconstruct the offline windows once — a mark only counts as missed if
+        // we have positive proof the guard's device was dark at that moment.
+        $windows = $this->offlineWindows($shift);
+
+        // No recorded offline window ⇒ no offline miss is provable. A mark with no
+        // check while the guard was ONLINE is a server/dispatch gap (e.g. a cron
+        // lag), never the guard's fault, so it is deliberately NOT flagged here.
+        if (empty($windows)) {
+            return ['photos' => [], 'wakefulness' => []];
+        }
+
+        return [
+            'photos' => $this->unfulfilledMarks(
+                $shift,
+                is_array($shift->photo_schedule) ? $shift->photo_schedule : [],
+                PhotoRequest::where('shift_id', $shift->id)->pluck('requested_at')->all(),
+                $windows
+            ),
+            'wakefulness' => $this->unfulfilledMarks(
+                $shift,
+                is_array($shift->wakefulness_schedule) ? $shift->wakefulness_schedule : [],
+                WakefulnessCheck::where('shift_id', $shift->id)->pluck('scheduled_at')->all(),
+                $windows
+            ),
+        ];
+    }
+
+    /**
+     * The shift's recorded offline windows as [start, end] Carbon pairs, from the
+     * COMMS_GAP_END audit events (each logged with its gap_seconds on reconnect;
+     * start = reconnected_at − gap_seconds). A window is only ever written once
+     * the guard reconnects and the on-device backlog has flushed, so a mark that
+     * falls inside one has already had its chance to materialise a real check —
+     * if none did, the check genuinely never happened.
+     *
+     * @return list<array{0:Carbon,1:Carbon}>
+     */
+    private function offlineWindows(Shift $shift): array
+    {
+        $ends = ShiftEvent::where('shift_id', $shift->id)
+            ->where('event_type', 'COMMS_GAP_END')
+            ->get();
+
+        $windows = [];
+        foreach ($ends as $event) {
+            $endAt = $event->recorded_at instanceof Carbon
+                ? $event->recorded_at->copy()
+                : Carbon::parse($event->recorded_at);
+            $gapSeconds = (int) round((float) ($event->metadata['gap_seconds'] ?? 0));
+            if ($gapSeconds <= 0) {
+                continue;
+            }
+            $windows[] = [$endAt->copy()->subSeconds($gapSeconds), $endAt];
+        }
+
+        return $windows;
+    }
+
+    /**
+     * Schedule marks inside [actual_start, active-end − staleness] with no
+     * materialised check within tolerance. The staleness cutoff (the
+     * dispatcher's own catch-up threshold) keeps a just-due mark on a still-
+     * active shift from being flagged before the guard has had a chance to
+     * answer or the app to flush. A materialised check is matched to its mark
+     * by proximity: offline captures re-anchor requested_at to the mark, and
+     * wakefulness scheduled_at IS the mark, so a tolerance comfortably below the
+     * inter-mark gap (30–45 min) pairs them without ever crossing marks.
+     *
+     * @param  array<int,string>              $schedule    ISO schedule marks
+     * @param  array<int,mixed>               $actualTimes requested_at / scheduled_at of real checks
+     * @param  list<array{0:Carbon,1:Carbon}> $windows     recorded offline windows
+     * @return list<string>                                ISO marks that went unverified
+     */
+    private function unfulfilledMarks(Shift $shift, array $schedule, array $actualTimes, array $windows): array
+    {
+        $start = $shift->actual_start;
+        if (!$start || empty($schedule) || empty($windows)) {
+            return [];
+        }
+        $start = $start instanceof Carbon ? $start->copy() : Carbon::parse($start);
+
+        $end = $shift->actual_end ?? $shift->scheduled_end ?? Carbon::now();
+        $end = $end instanceof Carbon ? $end->copy() : Carbon::parse($end);
+        if ($end->lessThan($start)) {
+            $end = $start->copy();
+        }
+
+        $actual = [];
+        foreach ($actualTimes as $t) {
+            if (empty($t)) {
+                continue;
+            }
+            try {
+                $actual[] = $t instanceof Carbon ? $t : Carbon::parse($t);
+            } catch (\Throwable $e) {
+                // Skip an unparseable timestamp rather than fail the whole tally.
+            }
+        }
+
+        $tol = self::MISSED_MATCH_TOLERANCE_SECONDS;
+        $missed = [];
+        foreach ($schedule as $markIso) {
+            try {
+                $mark = Carbon::parse($markIso);
+            } catch (\Throwable $e) {
+                continue;
+            }
+            // Must have come due inside the worked window...
+            if ($mark->lessThan($start) || $mark->greaterThan($end)) {
+                continue;
+            }
+            // ...AND while the guard's device was provably offline (inside a
+            // recorded comms gap). A mark the guard was online for but the server
+            // never fired is a dispatch gap, not a guard miss — excluded.
+            if (!$this->markInAnyWindow($mark, $windows)) {
+                continue;
+            }
+
+            $fulfilled = false;
+            foreach ($actual as $a) {
+                if (abs($a->diffInSeconds($mark)) <= $tol) {
+                    $fulfilled = true;
+                    break;
+                }
+            }
+            if (!$fulfilled) {
+                $missed[] = $mark->toISOString();
+            }
+        }
+
+        return $missed;
+    }
+
+    /**
+     * True if $mark falls within any [start, end] offline window (inclusive of a
+     * small tolerance at each edge, so a mark right on the boundary of the gap it
+     * belongs to still counts).
+     *
+     * @param  list<array{0:Carbon,1:Carbon}> $windows
+     */
+    private function markInAnyWindow(Carbon $mark, array $windows): bool
+    {
+        $tol = self::MISSED_MATCH_TOLERANCE_SECONDS;
+        foreach ($windows as [$from, $to]) {
+            if ($mark->greaterThanOrEqualTo($from->copy()->subSeconds($tol))
+                && $mark->lessThanOrEqualTo($to->copy()->addSeconds($tol))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * GPS coverage over the shift's active window: the proportion of the worked
      * period during which the guard was confirmed ON-POST — i.e. inside the

@@ -541,25 +541,30 @@
             border: 1px solid var(--error-red);
         }
 
-        /* Flash Messages */
+        /* Flash Messages — floating toast (matches the app-wide default success
+           toast: solid, top-right, white text, auto-hides). Fixed-position so it
+           overlays rather than pushing page content down. */
         .flash-message {
-            padding: 12px;
-            margin-bottom: 16px;
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            max-width: 520px;
+            padding: 12px 16px;
             border-radius: 4px;
             font-size: 12px;
+            font-weight: bold;
+            color: white;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
             display: none;
         }
 
         .flash-message.success {
-            background: rgba(34, 197, 94, 0.1);
-            border: 1px solid var(--success-green);
-            color: var(--success-green);
+            background: var(--success-green);
         }
 
         .flash-message.error {
-            background: rgba(239, 68, 68, 0.1);
-            border: 1px solid var(--error-red);
-            color: var(--error-red);
+            background: var(--error-red);
         }
 
         .flash-message.show {
@@ -842,7 +847,7 @@
             flashMessages.forEach(message => {
                 setTimeout(() => {
                     message.classList.remove('show');
-                }, 5000);
+                }, 3000);
             });
         });
 

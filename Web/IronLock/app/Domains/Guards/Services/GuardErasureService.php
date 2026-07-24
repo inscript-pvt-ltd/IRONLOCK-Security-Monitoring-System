@@ -6,23 +6,30 @@ use App\Domains\Guards\Models\Guard;
 use App\Domains\Shifts\Models\Shift;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 /**
- * GDPR right-to-erasure for a guard (Phase 8 · SEC-004).
+ * Remove a guard from the active roster (Phase 8 · SEC-004, revised).
  *
- * IronLock erases by ANONYMISATION, not deletion: the guard's identifying data
- * is redacted in place while the append-only audit trail (shift_events, alerts,
- * photo evidence, reports) is PRESERVED — that history is legally required for
- * regulatory defensibility (BS 8484) and the FK from those rows must stay
- * valid. Erasure removes identity, not history.
+ * IronLock removes a guard by ARCHIVING, not deletion and not anonymisation:
+ * the guard's real details are PRESERVED in place so the append-only audit
+ * trail (shift_events, alerts, photo evidence, reports) — and every historical
+ * shift that references this guard — keeps showing the real name and licence.
+ * The FK from those rows stays valid; only the guard's presence on the live
+ * roster and their ability to sign in are removed.
  *
  * The operation:
- *   - redacts PII (name, email, phone, username, SIA number) with sentinels;
- *   - destroys secrets (password, HMAC key, device + push identifiers);
- *   - invalidates every live session (the guard can no longer sign in);
- *   - marks the guard inactive + stamps erased_at (excluded from scheduling,
- *     rosters and SIA checks via Guard::notErased()).
+ *   - stamps erased_at + marks the guard inactive, which removes them from the
+ *     roster and shift picker (Guard::notErased()), from SIA-expiry checks, and
+ *     from any new shift assignment (ShiftController::guardAssignableError);
+ *   - invalidates every live session and the account is inactive, so the guard
+ *     can no longer sign in (GuardAuth rejects non-active accounts per request);
+ *   - leaves all identifying data intact, so old shifts still resolve the real
+ *     guard details and the removal is reversible (restore = clear erased_at +
+ *     set active).
+ *
+ * NOTE: this is a data-preserving removal, not a GDPR right-to-erasure. A
+ * genuine "destroy my personal data" request would need a separate hard-redact
+ * path — this deliberately keeps the data for historical shifts.
  */
 class GuardErasureService
 {
@@ -32,45 +39,34 @@ class GuardErasureService
     public function erase(Guard $guard): array
     {
         if ($guard->isErased()) {
-            return ['success' => false, 'error' => 'This guard has already been erased.'];
+            return ['success' => false, 'error' => 'This guard has already been removed.'];
         }
 
         // Refuse while the guard is on duty — an active/checked-in shift must be
         // ended or resolved first, otherwise a live monitoring session would be
-        // left pointing at an anonymised record.
+        // left pointing at a removed guard.
         $onDuty = Shift::where('guard_id', $guard->id)
             ->whereIn('status', [Shift::STATUS_ACTIVE, Shift::STATUS_CHECKED_IN])
             ->exists();
         if ($onDuty) {
-            return ['success' => false, 'error' => 'This guard has an active or checked-in shift. End or resolve it before erasing.'];
+            return ['success' => false, 'error' => 'This guard has an active or checked-in shift. End or resolve it before removing.'];
         }
 
         $now = Carbon::now();
-        // A short id fragment keeps redacted email/username unique across
-        // multiple erasures (both columns are unique-indexed).
-        $frag = substr(str_replace('-', '', (string) $guard->id), 0, 12);
 
-        DB::transaction(function () use ($guard, $now, $frag) {
+        DB::transaction(function () use ($guard, $now) {
+            // Preserve all identifying data — only take the guard off the active
+            // roster and stamp the removal time. employment_status = inactive
+            // stops any new scheduling; erased_at hides them from lists/pickers.
             $guard->update([
-                'first_name' => 'Redacted',
-                'last_name' => 'Guard',
-                'email' => "erased-{$frag}@redacted.invalid",
-                'phone' => null,
-                'username' => "erased-{$frag}",
-                'sia_licence_number' => null,
-                // Destroy authentication + device secrets so the record can never
-                // be used to sign in or be traced to a device again.
-                'password' => bcrypt(Str::random(40)),
-                'hmac_secret' => null,
-                'device_identifier' => null,
-                'device_name' => null,
-                'push_token' => null,
-                'push_token_platform' => null,
                 'employment_status' => 'inactive',
                 'erased_at' => $now,
             ]);
 
-            // Invalidate every live session for this guard.
+            // Invalidate every live session. Combined with the inactive status
+            // (which GuardAuth re-checks each request) this signs the guard out
+            // and keeps them out — no need to destroy credentials, so a restore
+            // stays clean.
             DB::table('guard_sessions')
                 ->where('guard_id', $guard->id)
                 ->whereNull('invalidated_at')

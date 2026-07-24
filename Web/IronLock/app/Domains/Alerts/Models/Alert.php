@@ -48,6 +48,7 @@ class Alert extends Model
         'shift_id',
         'type',        // ZONE_EXIT | GUARD_UNRESPONSIVE | PHOTO_TIMEOUT | ...
         'severity',    // CRITICAL | WARNING
+        'is_offline',  // true = raised from an offline flush (retroactive), not live
         'status',      // OPEN | ACKNOWLEDGED
         'title',
         'description',
@@ -63,6 +64,7 @@ class Alert extends Model
     protected function casts(): array
     {
         return [
+            'is_offline' => 'boolean',
             'raised_at' => 'datetime',
             'acknowledged_at' => 'datetime',
             'created_at' => 'datetime',

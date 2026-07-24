@@ -27,7 +27,8 @@ class SiteController extends Controller
      */
     public function index(Request $request)
     {
-        $sites = Site::with(['creator', 'geofences'])
+        $sites = Site::notArchived()
+        ->with(['creator', 'geofences'])
         // Count shifts currently in progress per site — used to lock geofence
         // editing while a guard is on duty (the live geofence must not change
         // mid-shift). Mirrors the server-side guard in GeofenceController.
@@ -197,16 +198,28 @@ class SiteController extends Controller
     }
 
     /**
-     * Remove the specified site.
-     * Includes business rule validation for active shifts.
+     * Remove (archive) the specified site.
+     *
+     * This is a data-preserving soft-delete, NOT a hard delete: the row is kept
+     * (archived_at stamped) so historical shifts and their events/alerts/reports
+     * still resolve the real site. Archiving only hides the site from the admin
+     * list and the new-shift picker. Reversible (clear archived_at to restore).
      */
     public function destroy(string $id): JsonResponse
     {
         try {
             $site = Site::findOrFail($id);
 
+            if ($site->isArchived()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'This site has already been removed.'
+                ], 422);
+            }
+
             return DB::transaction(function () use ($site) {
-                // Business rule validation: Cannot delete sites with active shifts
+                // Cannot archive a site that still has shifts needing it live for
+                // monitoring — those must be completed or cancelled first.
                 $activeShifts = $site->shifts()
                     ->whereIn('status', ['scheduled', 'active'])
                     ->count();
@@ -214,31 +227,30 @@ class SiteController extends Controller
                 if ($activeShifts > 0) {
                     return response()->json([
                         'success' => false,
-                        'error' => "Cannot delete site with {$activeShifts} active or scheduled shifts. Please complete or cancel all shifts first."
+                        'error' => "Cannot remove site with {$activeShifts} active or scheduled shifts. Please complete or cancel all shifts first."
                     ], 422);
                 }
 
-                // Check for active geofences
-                $activeGeofences = $site->geofences()->where('is_active', true)->count();
-                if ($activeGeofences > 0) {
-                    return response()->json([
-                        'success' => false,
-                        'error' => "Cannot delete site with active geofences. Please deactivate all geofences first."
-                    ], 422);
-                }
-
-                $site->delete();
+                // Archive in place — the geofence stays attached to the (now
+                // hidden) site; no need to tear it down since the site can no
+                // longer be scheduled and can be restored intact later.
+                //
+                // Set by direct assignment (not ->update([...])): archived_at is
+                // deliberately kept out of $fillable so it can never be set from a
+                // request payload, and mass-assignment would silently drop it.
+                $site->archived_at = now();
+                $site->save();
 
                 return response()->json([
                     'success' => true,
-                    'message' => 'Site deleted successfully'
+                    'message' => 'Site removed successfully. Its records are preserved for historical shifts.'
                 ]);
             });
         } catch (\Exception $e) {
-            Log::error('Error deleting site', ['site_id' => $id, 'exception' => $e]);
+            Log::error('Error removing site', ['site_id' => $id, 'exception' => $e]);
             return response()->json([
                 'success' => false,
-                'error' => 'Unable to delete site. Please try again.'
+                'error' => 'Unable to remove site. Please try again.'
             ], 500);
         }
     }
@@ -286,6 +298,7 @@ class SiteController extends Controller
     {
         try {
             $sites = Site::active()
+                ->notArchived()
                 ->select('id', 'name', 'address')
                 ->orderBy('name')
                 ->get();

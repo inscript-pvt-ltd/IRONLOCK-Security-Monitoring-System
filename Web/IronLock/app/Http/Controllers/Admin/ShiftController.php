@@ -111,6 +111,34 @@ class ShiftController extends Controller
     }
 
     /**
+     * A guard can only be assigned to a shift while they are an active,
+     * non-erased account. Suspended/inactive guards and GDPR-erased tombstones
+     * must never be scheduled, reassigned onto, or kept on an edited shift.
+     *
+     * The front-end already hides these guards from the picker, but this is the
+     * authoritative safety net: it also catches the case where a guard already
+     * on a shift is later suspended/erased and the shift is then edited.
+     *
+     * @return string|null Human-readable reason the guard is not assignable, or
+     *                     null when the guard may be assigned.
+     */
+    private function guardAssignableError(Guard $guard): ?string
+    {
+        $name = trim($guard->first_name . ' ' . $guard->last_name);
+
+        if ($guard->isErased()) {
+            return "This guard account has been erased and cannot be assigned to shifts.";
+        }
+
+        if ($guard->employment_status !== 'active') {
+            $state = $guard->employment_status === 'suspended' ? 'suspended' : 'deactivated';
+            return "{$name} is {$state} and cannot be assigned to shifts.";
+        }
+
+        return null;
+    }
+
+    /**
      * Store a new shift with WTR validation.
      */
     public function store(Request $request): JsonResponse
@@ -137,6 +165,26 @@ class ShiftController extends Controller
         try {
             $guard = Guard::findOrFail($request->guard_id);
             $site = Site::findOrFail($request->site_id);
+
+            if ($blockReason = $this->guardAssignableError($guard)) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'error' => $blockReason,
+                    'guard_status_block' => true,
+                ], 422);
+            }
+
+            // A removed (archived) site can't take new shifts — it's hidden from
+            // the picker, but block it here too as the authoritative safety net.
+            if ($site->isArchived()) {
+                DB::rollBack();
+                return response()->json([
+                    'success' => false,
+                    'error' => 'The selected site has been removed and can no longer be used for shifts.',
+                    'site_status_block' => true,
+                ], 422);
+            }
 
             // Get active geofence for the site
             $geofence = Geofence::where('site_id', $site->id)
@@ -378,7 +426,15 @@ class ShiftController extends Controller
             // generated reports (REP-001/REP-002) read one implementation (Phase 8).
             $gpsSummary = $compliance->gpsCoverage($shift);
 
-            return view('admin.shifts.timeline', compact('shift', 'events', 'photoRequests', 'photoSummary', 'wakefulnessChecks', 'wakefulnessSummary', 'gpsSummary'));
+            // Scheduled offline checks the guard never fulfilled — marks that came
+            // due while the device was offline where neither the online dispatch
+            // nor an offline capture/challenge left any trace. Reconciled live from
+            // the provisioned schedule vs the materialised checks so they surface
+            // as a neutral "Missed" state in their own sections (a late flush that
+            // fills a mark clears it automatically — see missedScheduleMarks()).
+            $missedChecks = $compliance->missedScheduleMarks($shift);
+
+            return view('admin.shifts.timeline', compact('shift', 'events', 'photoRequests', 'photoSummary', 'wakefulnessChecks', 'wakefulnessSummary', 'gpsSummary', 'missedChecks'));
         } catch (ModelNotFoundException $e) {
             return redirect()
                 ->route('admin.shifts.index')
@@ -724,6 +780,23 @@ class ShiftController extends Controller
             $guard = Guard::findOrFail($request->guard_id);
             $site = Site::findOrFail($request->site_id);
 
+            if ($blockReason = $this->guardAssignableError($guard)) {
+                return response()->json([
+                    'success' => false,
+                    'error' => $blockReason,
+                    'guard_status_block' => true,
+                ], 422);
+            }
+
+            // A removed (archived) site can't be assigned to a shift.
+            if ($site->isArchived()) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'The selected site has been removed and can no longer be used for shifts.',
+                    'site_status_block' => true,
+                ], 422);
+            }
+
             // A reassigned site needs its own active geofence; without one the
             // shift could not be monitored, so block the change just like store().
             $geofence = Geofence::where('site_id', $site->id)
@@ -1024,6 +1097,17 @@ class ShiftController extends Controller
 
                     case 'reassign':
                         $newGuard = Guard::findOrFail($request->input('guard_id'));
+
+                        // A suspended/deactivated/erased guard can never take a
+                        // shift — block reassignment onto them just like store/edit.
+                        if ($blockReason = $this->guardAssignableError($newGuard)) {
+                            DB::rollBack();
+                            return response()->json([
+                                'success' => false,
+                                'error' => $blockReason,
+                                'guard_status_block' => true,
+                            ], 422);
+                        }
 
                         // The reassigned guard must be free for the slot.
                         $conflicts = $this->checkShiftConflicts(

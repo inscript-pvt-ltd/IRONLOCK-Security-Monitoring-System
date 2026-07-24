@@ -65,6 +65,18 @@
     @else
         <div class="empty">No wakefulness checks were issued.</div>
     @endif
+    @php $wfMissed = $missed_checks['wakefulness'] ?? []; @endphp
+    @if (count($wfMissed))
+        <div class="missed-note">Missed while offline — scheduled challenge{{ count($wfMissed) === 1 ? '' : 's' }} that came due while the guard's device was offline and never materialised on reconnect (neutral; not a failed response).</div>
+        <table class="grid">
+            <thead><tr><th>Scheduled Time</th><th>Result</th></tr></thead>
+            <tbody>
+                @foreach ($wfMissed as $m)
+                    <tr><td>{{ $ftime($m['time']) }}</td><td>Missed</td></tr>
+                @endforeach
+            </tbody>
+        </table>
+    @endif
 
     <h2 class="section">Photo Verification</h2>
     @if (count($photos))
@@ -95,6 +107,18 @@
         </table>
     @else
         <div class="empty">No photos were submitted.</div>
+    @endif
+    @php $phMissed = $missed_checks['photos'] ?? []; @endphp
+    @if (count($phMissed))
+        <div class="missed-note">Missed while offline — scheduled photo request{{ count($phMissed) === 1 ? '' : 's' }} that came due while the guard's device was offline and never materialised on reconnect (neutral; not a rejected image).</div>
+        <table class="grid">
+            <thead><tr><th>Scheduled Time</th><th>Result</th></tr></thead>
+            <tbody>
+                @foreach ($phMissed as $m)
+                    <tr><td>{{ $ftime($m['time']) }}</td><td>Missed</td></tr>
+                @endforeach
+            </tbody>
+        </table>
     @endif
 
     <h2 class="section">Security Validation</h2>

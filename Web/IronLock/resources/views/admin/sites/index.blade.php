@@ -93,6 +93,36 @@
 
     .site-item-actions {
         margin-left: 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    /* Delete (archive) bin icon — neutral by default, red on hover */
+    .btn-delete-sm {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 4px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--border-dark);
+        background: var(--bg-dark);
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all 0.2s ease;
+        line-height: 0;
+    }
+
+    .btn-delete-sm svg {
+        width: 13px;
+        height: 13px;
+        display: block;
+    }
+
+    .btn-delete-sm:hover {
+        background: rgba(220, 53, 69, 0.12);
+        border-color: #dc3545;
+        color: #dc3545;
     }
 
     /* Right Panel - Map Preview */
@@ -680,6 +710,15 @@
                         </div>
                         <div class="site-item-actions">
                             <button class="btn-sm btn-secondary-sm" onclick="event.stopPropagation(); openSiteDrawer('edit', '{{ $site->id }}')">Edit</button>
+                            <button class="btn-delete-sm" title="Remove site" aria-label="Remove site"
+                                onclick="event.stopPropagation(); deleteSite('{{ $site->id }}', '{{ addslashes($site->name) }}')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                    <line x1="10" y1="11" x2="10" y2="17"></line>
+                                    <line x1="14" y1="11" x2="14" y2="17"></line>
+                                </svg>
+                            </button>
                         </div>
                     </div>
                 @endforeach
@@ -1727,6 +1766,36 @@
         .catch(() => showToast('Error saving site', 'error'));
     }
 
+    // ── Remove (archive) site ───────────────────────────────────────────────────
+
+    // Soft-removes a site: it disappears from the list and the new-shift picker,
+    // but the row is preserved in the DB so historical shifts still show the real
+    // site. Hits the sites.destroy route (now an archive, not a hard delete).
+    function deleteSite(siteId, siteName) {
+        const label = siteName ? `"${siteName}"` : 'this site';
+        if (!confirm(`Remove ${label}?\n\nIt will be hidden from the sites list and can no longer be used for new shifts. Its records are preserved for historical shifts, and it can be restored later.`)) {
+            return;
+        }
+
+        fetch(`/admin/sites/${siteId}`, {
+            method: 'DELETE',
+            headers: {
+                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content'),
+                'Accept': 'application/json'
+            }
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                showToast(data.message || 'Site removed successfully');
+                setTimeout(() => location.reload(), 900);
+            } else {
+                showToast(data.error || 'Error removing site', 'error');
+            }
+        })
+        .catch(() => showToast('Error removing site', 'error'));
+    }
+
     // ── Toast ─────────────────────────────────────────────────────────────────
 
     function showToast(message, type = 'success') {
@@ -1751,6 +1820,7 @@
 
     // Expose to inline HTML handlers
     window.selectSite          = selectSite;
+    window.deleteSite          = deleteSite;
     window.openSiteDrawer      = openSiteDrawer;
     window.closeSiteDrawer     = closeSiteDrawer;
     window.activatePolygonTool = activatePolygonTool;

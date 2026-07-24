@@ -88,6 +88,7 @@
         .muted { color: #7A828E; }
         .totals { margin-top: 10px; font-size: 10px; }
         .empty { color: #7A828E; font-style: italic; padding: 8px 0; }
+        .missed-note { color: #8a5a00; background: #fdf6e6; border-left: 3px solid #b7791f; padding: 6px 9px; margin: 8px 0 6px; font-size: 9px; line-height: 1.5; }
     </style>
 </head>
 <body>

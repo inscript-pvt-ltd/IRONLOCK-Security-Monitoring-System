@@ -134,6 +134,16 @@ class ShiftWelfareReportBuilder extends ReportBuilder
             }
         }
 
+        // Scheduled checks the guard never fulfilled while provably offline —
+        // reported as neutral "Missed" (distinct from a FAILED/rejected result),
+        // one row each with the scheduled mark alone in the Time column.
+        foreach ($s['missed_checks']['wakefulness'] ?? [] as $i => $m) {
+            $add('Missed (Offline)', 'Wakefulness ' . ($i + 1), 'Missed', $m['time'] ?? null);
+        }
+        foreach ($s['missed_checks']['photos'] ?? [] as $i => $m) {
+            $add('Missed (Offline)', 'Photo ' . ($i + 1), 'Missed', $m['time'] ?? null);
+        }
+
         foreach ($s['alerts'] ?? [] as $a) {
             $add('Alert', ($a['name'] ?? '—') . ' (' . ($a['severity'] ?? '—') . ')', ucfirst(strtolower((string) ($a['status'] ?? '—'))), $a['trigger_time'] ?? null);
         }

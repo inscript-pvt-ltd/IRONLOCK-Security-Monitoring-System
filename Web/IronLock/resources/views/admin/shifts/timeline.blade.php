@@ -283,6 +283,14 @@
     .photo-badge.rejected,
     .photo-badge.anomaly,
     .photo-badge.timeout   { color: var(--error-red);      border-color: var(--error-red); }
+    .photo-badge.missed    { color: var(--warning-amber);  border-color: var(--warning-amber); }
+    /* Unverified scheduled checks (offline marks nothing ever fulfilled). A
+       neutral amber — not a failure (guard never answered wrong), but a gap. */
+    .missed-block { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--warning-amber);
+                    border-radius: 8px; background: rgba(245, 158, 11, 0.06); }
+    .missed-block-title { font-size: 12px; font-weight: 600; color: var(--warning-amber); }
+    .missed-block-sub { font-size: 11px; color: var(--text-muted); margin: 4px 0 8px; line-height: 1.4; }
+    .missed-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; }
     .photo-flag {
         display: block; color: var(--error-red); font-size: 9px; margin-top: 3px; word-break: break-word;
     }
@@ -316,6 +324,7 @@
     .attempt-info { flex: 1; min-width: 0; }
     .attempt-info-top { font-size: 11px; font-weight: bold; color: var(--text-primary); }
     .attempt-info-sub { font-size: 10px; color: var(--text-muted); margin-top: 3px; }
+    .attempt-slot-note { font-size: 9px; color: var(--text-muted); opacity: .75; margin-left: 4px; font-style: italic; }
 
     .attempt-thumbs { display: flex; gap: 4px; flex-shrink: 0; }
     .attempt-thumb {
@@ -479,6 +488,7 @@
     .wake-badge.confirmed { color: var(--success-green); border-color: var(--success-green); }
     .wake-badge.failed    { color: var(--error-red);     border-color: var(--error-red); }
     .wake-badge.pending   { color: var(--text-muted);    border-color: var(--border-dark); }
+    .wake-badge.missed    { color: var(--warning-amber); border-color: var(--warning-amber); }
 
     @media (max-width: 900px) {
         .detail-grid { flex-direction: column; }
@@ -691,6 +701,20 @@
                             }
                         }
 
+                        // SHIFT_ENDED: reason/note only carry meaning for a
+                        // supervisor-approved early end. A normal end (guard ended
+                        // after scheduled_end) always logs them as null, so the
+                        // generic renderer would print blank "Reason:" / "Note:"
+                        // lines. Drop empties so the card shows only real content
+                        // (an early end keeps its reason; an omitted note stays hidden).
+                        if ($event->event_type === 'SHIFT_ENDED') {
+                            foreach (['reason', 'note'] as $seKey) {
+                                if (empty($payload[$seKey])) {
+                                    unset($payload[$seKey]);
+                                }
+                            }
+                        }
+
                         // OFFLINE wakefulness (TOTP): the challenge fires on-device and
                         // the result MATERIALISES on reconnect, so the audit row's server
                         // time is the flush instant — minutes/hours after the code was
@@ -701,10 +725,19 @@
                             && (($payload['mode'] ?? null) === 'OFFLINE');
                         $wfFields = [];
                         if ($wfOffline) {
+                            // Curate the card per event type so the paired CHALLENGE
+                            // and CONFIRMED/FAILED rows never show identical values:
+                            //   • CHALLENGE  → only when the code was shown ("Challenged").
+                            //   • CONFIRMED/FAILED → the response ("Responded" + duration).
+                            // The response fields belong to the answer, not the ask, so
+                            // the challenge row would otherwise echo the same three lines.
+                            $wfIsResponse = in_array($event->event_type, ['WAKEFULNESS_CONFIRMED', 'WAKEFULNESS_FAILED'], true);
                             if (!empty($payload['scheduled_at'])) { $wfFields['Challenged'] = $payload['scheduled_at']; }
-                            if (!empty($payload['responded_at'])) { $wfFields['Responded'] = $payload['responded_at']; }
-                            if (isset($payload['response_time_seconds']) && $payload['response_time_seconds'] !== null && $payload['response_time_seconds'] !== '') {
-                                $wfFields['Response duration'] = $payload['response_time_seconds'] . 's';
+                            if ($wfIsResponse) {
+                                if (!empty($payload['responded_at'])) { $wfFields['Responded'] = $payload['responded_at']; }
+                                if (isset($payload['response_time_seconds']) && $payload['response_time_seconds'] !== null && $payload['response_time_seconds'] !== '') {
+                                    $wfFields['Response duration'] = $payload['response_time_seconds'] . 's';
+                                }
                             }
                             if (!empty($payload['reason'])) { $wfFields['Reason'] = $payload['reason']; }
                             if (!empty($payload['check_id'])) { $wfFields['Check Id'] = $payload['check_id']; }
@@ -829,6 +862,16 @@
                             // Offline tag parity with the wakefulness Mode column: an
                             // OFFLINE_POOL capture flushed on reconnect reads "Offline".
                             $capturedOffline = (bool) ($pr['captured_offline'] ?? false);
+                            // Offline captures re-anchor requested_at to the scheduled
+                            // slot; the real moment the guard took the photo is
+                            // submitted_at. Headline that exact capture time (slot kept
+                            // as a small secondary note) so it isn't buried behind the
+                            // slot. Online rows keep requested_at — capture is seconds
+                            // later, so the two are effectively the same time.
+                            $slotTs       = $pr['requested_at'] ?? null;
+                            $captureTs    = $pr['submitted_at'] ?? null;
+                            $offlineSplit = $capturedOffline && $captureTs && $slotTs && $captureTs !== $slotTs;
+                            $primaryTs    = $offlineSplit ? $captureTs : $slotTs;
                             $previewEvs = array_slice($pr['evidences'] ?? [], 0, 3);
                             $imgCount   = $pr['image_count'] ?? 0;
                             $moreCount  = max(0, $imgCount - 3);
@@ -865,7 +908,8 @@
                                 <div class="attempt-info-sub">
                                     {{ ucfirst($pr['request_type'] ?? 'manual') }}
                                     @if ($capturedOffline)<span class="photo-badge offline" style="font-size:8px;padding:1px 5px;margin-left:4px;">Offline</span>@endif
-                                    &nbsp;·&nbsp;<time class="tl-ts-full" data-ts="{{ $iso($pr['requested_at']) }}">{{ $fmt($pr['requested_at']) }}</time>
+                                    &nbsp;·&nbsp;<time class="tl-ts-full" data-ts="{{ $iso($primaryTs) }}">{{ $fmt($primaryTs) }}</time>
+                                    @if ($offlineSplit)<span class="attempt-slot-note">captured · scheduled <time class="tl-ts-hhmm" data-ts="{{ $iso($slotTs) }}">{{ \Illuminate\Support\Carbon::parse($slotTs)->setTimezone($tz)->format('g:i A') }}</time></span>@endif
                                     &nbsp;·&nbsp;<span class="photo-badge {{ $reqBadge }}" style="font-size:8px;padding:1px 5px;">{{ str_replace('_', ' ', $reqBadge) }}</span>
                                 </div>
                             </div>
@@ -893,6 +937,24 @@
                      server-generated values (route URLs, formatted data — no raw model
                      fields are exposed beyond what the page already renders). --}}
                 <script>window.photoAttempts = @json($photoRequests->values());</script>
+            @endif
+
+            {{-- Missed scheduled photo checks: provisioned marks that came due
+                 while the guard was offline and were never fulfilled by an online
+                 request OR an offline capture. Reconciled live (a late flush that
+                 fills a mark drops it from this list automatically). --}}
+            @php $missedPhotos = $missedChecks['photos'] ?? []; @endphp
+            @if (!empty($missedPhotos))
+                <div class="missed-block">
+                    <div class="missed-block-title">⚠ {{ count($missedPhotos) }} scheduled photo {{ count($missedPhotos) === 1 ? 'check' : 'checks' }} not fulfilled</div>
+                    <div class="missed-block-sub">These marks came due while the guard's device was offline and no photo was captured or flushed on reconnect.</div>
+                    @foreach ($missedPhotos as $mk)
+                        <div class="missed-row">
+                            <span class="photo-badge missed" style="font-size:9px; padding:1px 6px;">Missed</span>
+                            <time class="tl-ts-full" data-ts="{{ $iso($mk) }}">{{ $fmt($mk) }}</time>
+                        </div>
+                    @endforeach
+                </div>
             @endif
         </div>
 
@@ -952,6 +1014,24 @@
                     </tbody>
                 </table>
             @endif
+
+            {{-- Missed scheduled wakefulness checks: provisioned challenge marks
+                 that came due while the guard was offline and were never answered
+                 by an online challenge OR flushed as an offline TOTP response.
+                 Neutral "Missed" (the check never ran) — not a FAILED code. --}}
+            @php $missedWake = $missedChecks['wakefulness'] ?? []; @endphp
+            @if (!empty($missedWake))
+                <div class="missed-block">
+                    <div class="missed-block-title">⚠ {{ count($missedWake) }} scheduled wakefulness {{ count($missedWake) === 1 ? 'check' : 'checks' }} not fulfilled</div>
+                    <div class="missed-block-sub">These challenges came due while the guard's device was offline and no response was recorded or flushed on reconnect.</div>
+                    @foreach ($missedWake as $mk)
+                        <div class="missed-row">
+                            <span class="wake-badge missed">Missed</span>
+                            <time class="tl-ts-full" data-ts="{{ $iso($mk) }}">{{ $fmt($mk) }}</time>
+                        </div>
+                    @endforeach
+                </div>
+            @endif
         </div>
     </div>
 
@@ -974,6 +1054,26 @@
             <div class="sum-row" title="{{ $gpsHint }}">
                 <span class="sum-label">GPS coverage</span>
                 <span class="sum-val">{{ $gpsCov === null ? '—' : number_format((float) $gpsCov, 1) . '%' }}</span>
+            </div>
+            @php
+                // Total time the guard's device was offline during the shift —
+                // the sum of COMMS_GAP durations already computed for GPS coverage
+                // (gpsCoverage deducts exactly this). Surfaced here so the offline
+                // gap is visible at a glance, not only implied by the coverage %.
+                $gpsGapSec = $gpsSummary['gap_seconds'] ?? null;
+                $gpsGapCount = (int) ($gpsSummary['gap_count'] ?? 0);
+            @endphp
+            <div class="sum-row" title="Total time the guard's device spent offline (buffered comms gaps), summed across the shift. This time is excluded from GPS coverage.">
+                <span class="sum-label">Time offline</span>
+                <span class="sum-val">
+                    @if ($gpsCov === null || $gpsGapSec === null)
+                        —
+                    @elseif ($gpsGapSec <= 0)
+                        None
+                    @else
+                        {{ $gapHuman($gpsGapSec) }}@if ($gpsGapCount > 0) <span style="color: var(--text-muted);">· {{ $gpsGapCount }} {{ $gpsGapCount === 1 ? 'gap' : 'gaps' }}</span>@endif
+                    @endif
+                </span>
             </div>
         </div>
 
@@ -1361,11 +1461,22 @@
 
         document.getElementById('collection-title').textContent =
             ordinal + ' Attempt — ' + count + (count === 1 ? ' Image' : ' Images');
-        document.getElementById('collection-sub').textContent =
-            (pr.request_type
-                ? pr.request_type.charAt(0).toUpperCase() + pr.request_type.slice(1)
-                : 'Manual')
-            + ' · submitted ' + fmtFull(pr.submitted_at || pr.requested_at);
+        // requested_at is the slot the check was due (the time shown in the
+        // attempt list); submitted_at is the true on-device capture. For offline
+        // captures these can differ by minutes — the offline nonce has no live
+        // response window, so a photo taken well after its slot is still valid.
+        // Label both when they differ so the card never contradicts the list.
+        var reqType = pr.request_type
+            ? pr.request_type.charAt(0).toUpperCase() + pr.request_type.slice(1)
+            : 'Manual';
+        var capturedAt = pr.submitted_at || pr.requested_at;
+        var subLine = reqType;
+        if (pr.submitted_at && pr.requested_at && pr.submitted_at !== pr.requested_at) {
+            subLine += ' · requested ' + fmtFull(pr.requested_at) + ' · captured ' + fmtFull(pr.submitted_at);
+        } else {
+            subLine += ' · captured ' + fmtFull(capturedAt);
+        }
+        document.getElementById('collection-sub').textContent = subLine;
 
         var grid = document.getElementById('collection-grid');
         grid.innerHTML = '';

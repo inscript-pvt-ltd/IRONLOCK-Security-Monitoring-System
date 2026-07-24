@@ -55,6 +55,12 @@ class Guard extends Authenticatable
         'erased_at',
         'status',
         'created_by',
+        // Written server-side by AuthService::issueGuardSession() on each guard
+        // login. Set only from trusted service code (never a request payload), so
+        // it is safe to mass-assign — and WITHOUT it here the ->update() call was
+        // silently dropped by mass-assignment protection, leaving last_login_at
+        // perpetually null → the guard drawer always showed "Never".
+        'last_login_at',
     ];
 
     /**

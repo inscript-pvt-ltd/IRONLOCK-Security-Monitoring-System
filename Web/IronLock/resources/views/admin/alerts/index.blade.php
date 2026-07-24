@@ -38,6 +38,20 @@
     .sev-badge.critical { background: var(--critical-red); color: #fff; }
     .sev-badge.warning  { background: var(--warning-amber); color: #1a1206; }
 
+    /* ── Offline chip — marks alerts raised from an offline flush ──────────── */
+    .offline-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        margin-left: 4px;
+        font-size: 10px;
+        font-weight: bold;
+        border-radius: 4px;
+        white-space: nowrap;
+        background: rgba(120, 120, 160, 0.18);
+        color: var(--text-muted);
+        border: 1px solid rgba(120, 120, 160, 0.35);
+    }
+
     /* ── Status pills ─────────────────────────────────────────────────────── */
     .status-pill {
         padding: 2px 9px;
@@ -240,6 +254,12 @@
         <option value="ACKNOWLEDGED">Status: Acknowledged</option>
         <option value="">Status: All</option>
     </select>
+
+    <select class="filter-select" id="f-offline" onchange="onFilterChange()">
+        <option value="">Source: All</option>
+        <option value="offline">⚑ Offline flush</option>
+        <option value="online">Live</option>
+    </select>
 </div>
 
 <!-- Bulk acknowledge bar (ALT-008) — shown when ≥1 open alert is selected -->
@@ -316,7 +336,12 @@
             site_id: document.getElementById('f-site').value,
             guard_id: document.getElementById('f-guard').value,
             status: document.getElementById('f-status').value,
+            offline: document.getElementById('f-offline').value,
         };
+    }
+
+    function offlineChip(isOffline) {
+        return isOffline ? ' <span class="offline-chip" title="Raised from an offline flush on reconnect">⚑ Offline</span>' : '';
     }
 
     function sevBadge(sev) {
@@ -351,7 +376,7 @@
             return `<tr class="${rowCls}" onclick="openAlert('${r.id}', false)">
                 ${checkboxCell}
                 <td>${sevBadge(r.severity)}</td>
-                <td>${escapeHtml(r.type)}</td>
+                <td>${escapeHtml(r.type)}${offlineChip(r.is_offline)}</td>
                 <td>${escapeHtml(r.guard_name)}</td>
                 <td>${escapeHtml(r.site_name)}</td>
                 <td style="color:var(--text-muted);">${escapeHtml(r.age)}</td>
@@ -626,6 +651,7 @@
         setSel('f-site', qp.get('site_id'));
         setSel('f-guard', qp.get('guard_id'));
         setSel('f-type', qp.get('type'));
+        setSel('f-offline', qp.get('offline'));
     })();
 
     // Initial load, then poll every 15s (matches the dashboard cadence).

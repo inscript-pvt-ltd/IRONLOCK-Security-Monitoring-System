@@ -57,6 +57,11 @@
         .wf-badge.warn,.wf-badge.dash{border-style:dashed}
         .wf-badge.bad{border-color:#8a2a2a;color:#8a2a2a}
         .wf-badge.muted{color:#999;border-color:#cfcfcf}
+        .wf-badge.missed{border-color:#b7791f;color:#8a5a00;background:#fdf6e6}
+        .wf-missed{margin-top:18px;padding:14px 16px;border:1px solid #ecd9a8;border-left:3px solid #b7791f;border-radius:3px;background:#fdfaf2}
+        .wf-missed-head{font-size:12px;font-weight:700;color:#8a5a00;letter-spacing:.02em}
+        .wf-missed-sub{font-size:11px;color:#8a7a55;margin:4px 0 10px;line-height:1.5}
+        .wf-missed .wf-table{margin:0}
         .wf-sec{border-bottom:1px solid #e6e6e6}
         .wf-sechead{list-style:none;cursor:pointer;display:flex;align-items:center;gap:12px;padding:18px 36px;user-select:none}
         .wf-sechead::-webkit-details-marker{display:none}
