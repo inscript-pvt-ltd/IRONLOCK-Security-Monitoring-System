@@ -42,6 +42,8 @@ class Guard extends Authenticatable
         'email',
         'password',
         'phone',
+        'address',
+        'photo_path',
         'sia_licence_number',
         'sia_licence_expiry',
         'sia_licence_type',

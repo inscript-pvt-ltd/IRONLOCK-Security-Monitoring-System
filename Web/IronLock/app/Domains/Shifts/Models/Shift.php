@@ -507,8 +507,17 @@ class Shift extends Model
      */
     public function buildWakefulnessSchedule(Carbon $from): array
     {
-        $minGap = (int) config('ironlock.wakefulness_min_gap_minutes', 30);
-        $maxGap = (int) config('ironlock.wakefulness_max_gap_minutes', 45);
+        // Per-site switch (Settings page). When wakefulness is disabled for this
+        // shift's site the schedule is empty — which disables the check on BOTH
+        // paths: the online dispatcher skips an empty schedule, and the mobile
+        // start payload sends [] so the app fires nothing offline either.
+        $site = $this->site;
+        if ($site && ! $site->wakefulness_enabled) {
+            return [];
+        }
+
+        $minGap = $site ? $site->wakefulnessMinGapMinutes() : (int) config('ironlock.wakefulness_min_gap_minutes', 30);
+        $maxGap = $site ? $site->wakefulnessMaxGapMinutes() : (int) config('ironlock.wakefulness_max_gap_minutes', 45);
         if ($maxGap < $minGap) {
             $maxGap = $minGap;
         }
@@ -545,8 +554,16 @@ class Shift extends Model
      */
     public function buildPhotoSchedule(Carbon $from): array
     {
-        $minGap = (int) config('ironlock.photo_min_gap_minutes', 50);
-        $maxGap = (int) config('ironlock.photo_max_gap_minutes', 70);
+        // Per-site switch (Settings page). When photo verification is disabled
+        // for this shift's site the schedule is empty — disabling the check on
+        // BOTH the online dispatcher and the app's offline camera trigger.
+        $site = $this->site;
+        if ($site && ! $site->photo_verification_enabled) {
+            return [];
+        }
+
+        $minGap = $site ? $site->photoMinGapMinutes() : (int) config('ironlock.photo_min_gap_minutes', 50);
+        $maxGap = $site ? $site->photoMaxGapMinutes() : (int) config('ironlock.photo_max_gap_minutes', 70);
         if ($maxGap < $minGap) {
             $maxGap = $minGap;
         }

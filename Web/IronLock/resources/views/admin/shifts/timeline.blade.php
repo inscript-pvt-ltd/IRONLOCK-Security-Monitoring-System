@@ -236,6 +236,11 @@
     /* ── Photo verification ─────────────────────────── */
     .panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
     .panel-head .panel-title { margin-bottom: 0; flex: 1; }
+    /* Guard profile photo in the Shift Details card header (top-right). */
+    .shift-guard-photo {
+        width: 46px; height: 46px; object-fit: cover; border-radius: 6px;
+        border: 1px solid var(--border-dark); flex-shrink: 0; background: var(--bg-dark);
+    }
     .btn-request-photo {
         font-size: 11px; font-weight: bold; padding: 6px 14px; border-radius: 4px;
         cursor: pointer; background: transparent; border: 1px solid var(--premium-gold);
@@ -1037,7 +1042,14 @@
 
     <div class="detail-side">
         <div class="panel">
-            <div class="panel-title">Shift Details</div>
+            <div class="panel-head">
+                <div class="panel-title">Shift Details</div>
+                @if ($guard && $guard->photo_path)
+                    {{-- Guard's profile photo, top-right of the card. Streamed
+                         through the admin-authed route; shown only when set. --}}
+                    <img class="shift-guard-photo" src="{{ route('admin.guards.photo', $guard->id) }}" alt="{{ $guardName }}" loading="lazy">
+                @endif
+            </div>
             <div class="sum-row"><span class="sum-label">Reference</span><span class="sum-val">#{{ $shift->reference ?? '—' }}</span></div>
             <div class="sum-row"><span class="sum-label">Guard</span><span class="sum-val">{{ $guardName }}</span></div>
             <div class="sum-row"><span class="sum-label">Site</span><span class="sum-val">{{ $shift->site->name ?? '—' }}</span></div>

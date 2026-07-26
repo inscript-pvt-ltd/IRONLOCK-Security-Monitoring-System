@@ -116,6 +116,13 @@
         padding: 7px 9px; margin-bottom: 14px;
     }
 
+    /* Guard profile photo (only rendered when the guard has one). */
+    .gp-photo {
+        width: 100%; max-height: 180px; object-fit: cover;
+        border-radius: 6px; border: 1px solid var(--border-dark);
+        margin-bottom: 14px; display: block; background: var(--bg-dark);
+    }
+
     .gp-field { margin-bottom: 11px; }
     .gp-label { display: block; font-size: 9px; font-weight: bold; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 3px; }
     .gp-value { font-size: 12px; color: var(--text-primary); line-height: 1.4; }
@@ -367,8 +374,15 @@
             : '';
         const lastPingLabel = g.comms_interrupted ? 'Last synced' : 'Last GPS ping';
 
+        // Profile photo — only when the guard has one uploaded (payload carries a
+        // URL only in that case). The field simply doesn't appear otherwise.
+        const photoField = g.photo_url
+            ? `<img class="gp-photo" src="${escapeHtml(g.photo_url)}" alt="${escapeHtml(g.guard_name)}" loading="lazy">`
+            : '';
+
         document.querySelector('#guard-panel .gp-title span').textContent = g.guard_name;
         document.getElementById('guard-panel-body').innerHTML = `
+            ${photoField}
             <div class="gp-status ${s.cls}">${s.txt}</div>
             ${offlineNotice}
             <div class="gp-field"><span class="gp-label">Site</span><div class="gp-value">${escapeHtml(g.site_name || '—')}</div></div>

@@ -691,7 +691,7 @@
             <span>Backup</span>
         </a>
 
-        <a href="#" class="nav-item">
+        <a href="{{ route('admin.settings.index') }}" class="nav-item {{ request()->routeIs('admin.settings.*') ? 'active' : '' }}">
             {{-- Settings — gear --}}
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"></circle>
@@ -1138,5 +1138,7 @@
         })();
     </script>
     @yield('scripts')
+
+    @include('admin.partials.mobile-block')
 </body>
 </html>

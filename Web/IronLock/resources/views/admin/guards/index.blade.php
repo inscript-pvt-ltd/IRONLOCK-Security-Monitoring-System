@@ -181,6 +181,42 @@
         border-color: var(--premium-gold);
     }
 
+    /* Guard photo thumbnail — shown in the edit form (current photo) and the
+       read-only info view when the guard has an uploaded image. */
+    .guard-photo-preview {
+        width: 100%;
+        max-height: 180px;
+        object-fit: cover;
+        border-radius: 6px;
+        border: 1px solid var(--border-dark);
+        margin-bottom: 10px;
+        background: var(--bg-dark);
+    }
+
+    /* Read-only info view: a small rounded avatar the admin can click to open
+       the full image in a new tab. */
+    .guard-photo-info {
+        display: block;
+        line-height: 0;
+        text-align: center;
+        margin: 0 auto 12px;
+    }
+    .guard-photo-info img {
+        width: 84px;
+        height: 84px;
+        object-fit: cover;
+        border-radius: 50%;
+        border: 1px solid var(--border-dark);
+        background: var(--bg-dark);
+        cursor: pointer;
+        transition: opacity 0.15s ease;
+    }
+    .guard-photo-info img:hover { opacity: 0.85; }
+
+    /* File input sits a touch lower so it doesn't hug the preview above it. */
+    input[type="file"].drawer-input { padding: 7px 10px; }
+    textarea.drawer-input { resize: vertical; min-height: 38px; }
+
     /* Render native date pickers in dark mode so the calendar icon shows as a
        light glyph (visible on the dark field) and the picker popup matches the
        theme. Applies to SIA Expiry and Hire Date alike. */
@@ -686,12 +722,6 @@
         </div>
 
         <div class="drawer-field">
-            <label class="drawer-label">Username</label>
-            <input type="text" class="drawer-input" id="username" name="username" required>
-            <span class="field-error" id="error_username"></span>
-        </div>
-
-        <div class="drawer-field">
             <label class="drawer-label">Email</label>
             <input type="email" class="drawer-input" id="email" name="email" required>
             <span class="field-error" id="error_email"></span>
@@ -729,13 +759,20 @@
 
         <div class="drawer-field">
             <label class="drawer-label">SIA License Type</label>
-            <select class="drawer-input" id="sia_licence_type" name="sia_licence_type">
+            {{-- The visible <select> and the "Other" text box are unnamed so they
+                 are never submitted; JS mirrors the effective value into the
+                 hidden #sia_licence_type field, which is the only one the server
+                 reads (free text — presets OR a custom type). --}}
+            <select class="drawer-input" id="sia_licence_type_select" onchange="onSiaTypeChange()">
                 <option value="">Select type</option>
                 <option value="Door Supervision">Door Supervision</option>
                 <option value="Security Guarding">Security Guarding</option>
                 <option value="Public Space Surveillance">Public Space Surveillance</option>
                 <option value="Key Holding">Key Holding</option>
+                <option value="__other__">Other…</option>
             </select>
+            <input type="text" class="drawer-input" id="sia_licence_type_other" placeholder="Enter licence type" style="display: none; margin-top: 8px;" oninput="syncSiaTypeOther()">
+            <input type="hidden" id="sia_licence_type" name="sia_licence_type">
             <span class="field-error" id="error_sia_licence_type"></span>
         </div>
 
@@ -743,6 +780,21 @@
             <label class="drawer-label">Phone</label>
             <input type="tel" class="drawer-input" id="phone" name="phone" required>
             <span class="field-error" id="error_phone"></span>
+        </div>
+
+        <div class="drawer-field">
+            <label class="drawer-label">Address <span style="color: var(--text-muted); font-weight: normal;">(optional)</span></label>
+            <textarea class="drawer-input" id="address" name="address" rows="2" placeholder="Street, city, postcode"></textarea>
+            <span class="field-error" id="error_address"></span>
+        </div>
+
+        <div class="drawer-field">
+            <label class="drawer-label">Photo <span style="color: var(--text-muted); font-weight: normal;">(optional)</span></label>
+            {{-- Current photo preview (edit mode, guard already has one). --}}
+            <img id="photoPreview" class="guard-photo-preview" src="" alt="Guard photo" style="display: none;">
+            <input type="file" class="drawer-input" id="photo" name="photo" accept="image/jpeg,image/png,image/webp" onchange="previewGuardPhoto(this)">
+            <span class="field-error" id="error_photo"></span>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">JPEG, PNG or WebP · up to 5 MB. Leave blank to keep the current photo.</div>
         </div>
 
         <div class="drawer-field">
@@ -770,6 +822,10 @@
 
     <!-- Info View (shown when viewing details) -->
     <div id="guardInfoView" style="display: none;">
+        <a id="info_photo_link" class="guard-photo-info" href="#" target="_blank" rel="noopener" title="Open photo in a new tab" style="display: none;">
+            <img id="info_photo" src="" alt="Guard photo">
+        </a>
+
         <div class="info-field">
             <label class="info-label">Employee Code</label>
             <div class="info-value" id="info_employee_code">-</div>
@@ -781,11 +837,6 @@
         </div>
 
         <div class="info-field">
-            <label class="info-label">Username</label>
-            <div class="info-value" id="info_username">-</div>
-        </div>
-
-        <div class="info-field">
             <label class="info-label">Email</label>
             <div class="info-value" id="info_email">-</div>
         </div>
@@ -793,6 +844,11 @@
         <div class="info-field">
             <label class="info-label">Phone</label>
             <div class="info-value" id="info_phone">-</div>
+        </div>
+
+        <div class="info-field">
+            <label class="info-label">Address</label>
+            <div class="info-value" id="info_address">-</div>
         </div>
 
         <div class="info-field">
@@ -1018,6 +1074,99 @@
         if (btn) btn.classList.remove('copied');
     }
 
+    // The four preset SIA licence types. Anything else is a custom ("Other")
+    // value the admin typed — the server accepts the type as free text.
+    const SIA_PRESETS = ['Door Supervision', 'Security Guarding', 'Public Space Surveillance', 'Key Holding'];
+
+    // Reflect the SIA-type widgets into the single hidden field the form submits.
+    function setSiaType(value) {
+        const select = document.getElementById('sia_licence_type_select');
+        const other = document.getElementById('sia_licence_type_other');
+        const hidden = document.getElementById('sia_licence_type');
+        hidden.value = value || '';
+        if (value && !SIA_PRESETS.includes(value)) {
+            select.value = '__other__';
+            other.value = value;
+            other.style.display = 'block';
+        } else {
+            select.value = value || '';
+            other.value = '';
+            other.style.display = 'none';
+        }
+    }
+
+    // Select changed: toggle the free-text box and keep the hidden field in sync.
+    function onSiaTypeChange() {
+        const select = document.getElementById('sia_licence_type_select');
+        const other = document.getElementById('sia_licence_type_other');
+        const hidden = document.getElementById('sia_licence_type');
+        if (select.value === '__other__') {
+            other.style.display = 'block';
+            hidden.value = other.value.trim();
+            other.focus();
+        } else {
+            other.style.display = 'none';
+            other.value = '';
+            hidden.value = select.value;
+        }
+        clearFieldError('sia_licence_type');
+    }
+
+    // Free-text box edited: mirror it into the hidden submitted field.
+    function syncSiaTypeOther() {
+        document.getElementById('sia_licence_type').value =
+            document.getElementById('sia_licence_type_other').value.trim();
+        clearFieldError('sia_licence_type');
+    }
+
+    // Show a local preview of a freshly-picked photo (before upload).
+    function previewGuardPhoto(input) {
+        const preview = document.getElementById('photoPreview');
+        const file = input.files && input.files[0];
+        if (!file) return;
+        preview.src = URL.createObjectURL(file);
+        preview.style.display = 'block';
+        clearFieldError('photo');
+    }
+
+    // Populate the edit form from a guard payload (shared by editGuard and
+    // editCurrentGuard). Clears any pending file pick and shows the current
+    // photo, if any.
+    function populateGuardForm(guard) {
+        document.getElementById('first_name').value = guard.first_name || '';
+        document.getElementById('last_name').value = guard.last_name || '';
+        document.getElementById('email').value = guard.email || '';
+        document.getElementById('phone').value = guard.phone || '';
+        document.getElementById('address').value = guard.address || '';
+        document.getElementById('sia_licence_number').value = guard.sia_licence_number || '';
+        document.getElementById('sia_licence_expiry').value = guard.sia_licence_expiry || '';
+        document.getElementById('hire_date').value = guard.hire_date || '';
+        document.getElementById('employment_status').value = guard.employment_status || '';
+        setSiaType(guard.sia_licence_type || '');
+
+        const preview = document.getElementById('photoPreview');
+        const fileInput = document.getElementById('photo');
+        if (fileInput) fileInput.value = '';
+        if (guard.photo_url) {
+            preview.src = guard.photo_url;
+            preview.style.display = 'block';
+        } else {
+            preview.removeAttribute('src');
+            preview.style.display = 'none';
+        }
+    }
+
+    // Reset the non-standard widgets (SIA "Other", photo preview) for add mode —
+    // form.reset() handles the plain fields but not the img preview.
+    function resetGuardExtras() {
+        setSiaType('');
+        const preview = document.getElementById('photoPreview');
+        preview.removeAttribute('src');
+        preview.style.display = 'none';
+        const fileInput = document.getElementById('photo');
+        if (fileInput) fileInput.value = '';
+    }
+
     function openGuardDrawer(mode, guardId = null) {
         const drawer = document.getElementById('guardDrawer');
         const overlay = document.querySelector('.drawer-overlay');
@@ -1041,6 +1190,7 @@
         if (mode === 'add') {
             title.textContent = 'Add Guard';
             form.reset();
+            resetGuardExtras();
             currentGuardId = null;
             currentGuardData = null;
             document.getElementById('guardId').value = '';
@@ -1096,10 +1246,24 @@
                 // Populate info view
                 document.getElementById('info_employee_code').textContent = guard.employee_code || 'Not Set';
                 document.getElementById('info_full_name').textContent = `${guard.first_name} ${guard.last_name}`;
-                document.getElementById('info_username').textContent = guard.username || 'Not Set';
                 document.getElementById('info_email').textContent = guard.email || 'Not Set';
                 document.getElementById('info_phone').textContent = guard.phone || 'Not Set';
+                document.getElementById('info_address').textContent = guard.address || 'Not Set';
                 document.getElementById('info_sia_licence').textContent = guard.sia_licence_number || 'Not Set';
+
+                // Photo (info view) — shown only when the guard has one. The
+                // avatar links out to the full image in a new tab.
+                const infoPhoto = document.getElementById('info_photo');
+                const infoPhotoLink = document.getElementById('info_photo_link');
+                if (guard.photo_url) {
+                    infoPhoto.src = guard.photo_url;
+                    infoPhotoLink.href = guard.photo_url;
+                    infoPhotoLink.style.display = 'block';
+                } else {
+                    infoPhoto.removeAttribute('src');
+                    infoPhotoLink.removeAttribute('href');
+                    infoPhotoLink.style.display = 'none';
+                }
 
                 // Format SIA expiry date
                 if (guard.sia_licence_expiry) {
@@ -1214,17 +1378,7 @@
             const title = document.getElementById('drawerTitle');
 
             // Populate form with stored guard data
-            const guard = currentGuardData;
-            document.getElementById('first_name').value = guard.first_name || '';
-            document.getElementById('last_name').value = guard.last_name || '';
-            document.getElementById('username').value = guard.username || '';
-            document.getElementById('email').value = guard.email || '';
-            document.getElementById('phone').value = guard.phone || '';
-            document.getElementById('sia_licence_number').value = guard.sia_licence_number || '';
-            document.getElementById('sia_licence_expiry').value = guard.sia_licence_expiry || '';
-            document.getElementById('sia_licence_type').value = guard.sia_licence_type || '';
-            document.getElementById('hire_date').value = guard.hire_date || '';
-            document.getElementById('employment_status').value = guard.employment_status || '';
+            populateGuardForm(currentGuardData);
 
             // Set up for editing
             document.getElementById('guardId').value = currentGuardId;
@@ -1268,17 +1422,7 @@
                 currentGuardData = data.guard;
 
                 // Populate form with guard data
-                const guard = data.guard;
-                document.getElementById('first_name').value = guard.first_name || '';
-                document.getElementById('last_name').value = guard.last_name || '';
-                document.getElementById('username').value = guard.username || '';
-                document.getElementById('email').value = guard.email || '';
-                document.getElementById('phone').value = guard.phone || '';
-                document.getElementById('sia_licence_number').value = guard.sia_licence_number || '';
-                document.getElementById('sia_licence_expiry').value = guard.sia_licence_expiry || '';
-                document.getElementById('sia_licence_type').value = guard.sia_licence_type || '';
-                document.getElementById('hire_date').value = guard.hire_date || '';
-                document.getElementById('employment_status').value = guard.employment_status || '';
+                populateGuardForm(data.guard);
 
                 openGuardDrawer('edit', guardId);
             } else {
@@ -1405,7 +1549,7 @@
 
     // Add event listeners to clear errors on input
     document.addEventListener('DOMContentLoaded', function() {
-        const formInputs = document.querySelectorAll('#guardForm input, #guardForm select');
+        const formInputs = document.querySelectorAll('#guardForm input, #guardForm select, #guardForm textarea');
         formInputs.forEach(input => {
             input.addEventListener('input', function() {
                 clearFieldError(this.name);

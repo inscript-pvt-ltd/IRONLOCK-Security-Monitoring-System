@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class GuardController extends Controller
@@ -105,10 +107,10 @@ class GuardController extends Controller
                     'employee_code' => $this->generateEmployeeCode(),
                     'first_name' => $request->first_name,
                     'last_name' => $request->last_name,
-                    'username' => $request->username,
                     'email' => $request->email,
                     'password' => Hash::make($request->password),
                     'phone' => $request->phone,
+                    'address' => $request->address,
                     'sia_licence_number' => $request->sia_licence_number,
                     'sia_licence_expiry' => $request->sia_licence_expiry,
                     'sia_licence_type' => $request->sia_licence_type,
@@ -118,8 +120,14 @@ class GuardController extends Controller
                     'created_by' => $this->currentAdminId(),
                 ]);
 
-                // Log audit trail
-                $this->logGuardAction('created', $guard, $request->all());
+                // Optional profile photo — stored only once we have the guard's
+                // generated employee_code (part of the deterministic filename).
+                if ($request->hasFile('photo')) {
+                    $guard->update(['photo_path' => $this->storeGuardPhoto($request, $guard)]);
+                }
+
+                // Log audit trail (exclude the binary photo upload).
+                $this->logGuardAction('created', $guard, $request->except('photo'));
 
                 return $guard;
             });
@@ -164,9 +172,10 @@ class GuardController extends Controller
                     'employee_code' => $guard->employee_code,
                     'first_name' => $guard->first_name,
                     'last_name' => $guard->last_name,
-                    'username' => $guard->username,
                     'email' => $guard->email,
                     'phone' => $guard->phone,
+                    'address' => $guard->address,
+                    'photo_url' => $guard->photo_path ? route('admin.guards.photo', $guard->id) : null,
                     'sia_licence_number' => $guard->sia_licence_number,
                     'sia_licence_expiry' => $guard->sia_licence_expiry?->format('Y-m-d'),
                     'sia_licence_type' => $guard->sia_licence_type,
@@ -215,6 +224,47 @@ class GuardController extends Controller
             ],
             'shifts' => $shifts,
         ]);
+    }
+
+    /**
+     * Stream a guard's profile photo to an authenticated admin. The file lives
+     * on the private `photos` disk (guards/…) and is never publicly served —
+     * this route, behind the admin auth middleware, is the only way to view it,
+     * mirroring how evidence photos are served (ShiftController::viewPhoto).
+     */
+    public function photo(Guard $guard)
+    {
+        if (empty($guard->photo_path) || !Storage::disk('photos')->exists($guard->photo_path)) {
+            abort(404);
+        }
+
+        return Storage::disk('photos')->response($guard->photo_path);
+    }
+
+    /**
+     * Store (or replace) a guard's uploaded profile photo on the private
+     * `photos` disk and return its relative path.
+     *
+     * The filename is deterministic — slug(name) + employee_code — so a later
+     * edit that re-uploads writes to the same conceptual slot. Any previously
+     * stored file is deleted first, which also collects a stale name should the
+     * guard have been renamed (a new slug) since the last upload. The caller
+     * only invokes this when a file is actually present.
+     */
+    private function storeGuardPhoto(Request $request, Guard $guard): string
+    {
+        // Remove the prior file first so a replacement never leaves an orphan,
+        // even when the slug changes because the guard was renamed.
+        if (!empty($guard->photo_path)) {
+            Storage::disk('photos')->delete($guard->photo_path);
+        }
+
+        $file = $request->file('photo');
+        $ext = strtolower($file->getClientOriginalExtension() ?: $file->extension() ?: 'jpg');
+        $base = Str::slug(trim($request->first_name . ' ' . $request->last_name)) ?: 'guard';
+        $name = $base . '_' . $guard->employee_code . '.' . $ext;
+
+        return $file->storeAs('guards', $name, 'photos');
     }
 
     /**
@@ -298,9 +348,9 @@ class GuardController extends Controller
         $updateData = [
             'first_name' => $request->first_name,
             'last_name' => $request->last_name,
-            'username' => $request->username,
             'email' => $request->email,
             'phone' => $request->phone,
+            'address' => $request->address,
             'sia_licence_number' => $request->sia_licence_number,
             'sia_licence_expiry' => $request->sia_licence_expiry,
             'sia_licence_type' => $request->sia_licence_type,
@@ -313,12 +363,20 @@ class GuardController extends Controller
             $updateData['password'] = Hash::make($request->password);
         }
 
+        // Replace the profile photo only when a new file is supplied — the old
+        // file is removed first so a replacement reuses the same slot and no
+        // orphan lingers even if the guard's name changed. Absent a new file the
+        // existing photo_path is left exactly as-is.
+        if ($request->hasFile('photo')) {
+            $updateData['photo_path'] = $this->storeGuardPhoto($request, $guard);
+        }
+
         $guard->update($updateData);
 
         // Log audit trail
         $this->logGuardAction('updated', $guard, [
             'original' => $originalData,
-            'updated' => $request->all()
+            'updated' => $request->except('photo')
         ]);
 
         if ($request->expectsJson()) {
@@ -376,13 +434,6 @@ class GuardController extends Controller
         $rules = [
             'first_name' => 'required|string|max:255',
             'last_name' => 'required|string|max:255',
-            'username' => [
-                'required',
-                'string',
-                'max:255',
-                'regex:/^[a-zA-Z0-9._-]+$/',
-                Rule::unique('guards')->ignore($guardId)
-            ],
             'email' => [
                 'required',
                 'email',
@@ -390,6 +441,10 @@ class GuardController extends Controller
                 Rule::unique('guards')->ignore($guardId)
             ],
             'phone' => 'required|string|max:20',
+            // Optional postal address.
+            'address' => 'nullable|string|max:500',
+            // Optional profile photo (JPEG/PNG/WebP, up to 5 MB).
+            'photo' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:5120',
             'sia_licence_number' => [
                 'required',
                 'string',
@@ -398,7 +453,9 @@ class GuardController extends Controller
                 Rule::unique('guards')->ignore($guardId)
             ],
             'sia_licence_expiry' => 'required|date|after:today',
-            'sia_licence_type' => 'required|in:Door Supervision,Security Guarding,Public Space Surveillance,Key Holding',
+            // Free text so the admin can pick a preset OR enter a custom licence
+            // type ("Other"). Kept required and length-bounded.
+            'sia_licence_type' => 'required|string|max:100',
             'hire_date' => 'required|date|before_or_equal:today',
             'employment_status' => 'required|in:active,inactive,suspended',
         ];
@@ -412,7 +469,6 @@ class GuardController extends Controller
 
         return Validator::make($request->all(), $rules, [
             'sia_licence_number.regex' => 'SIA licence number must be 8 digits',
-            'username.regex' => 'Username can only contain letters, numbers, dots, underscores and hyphens',
             'sia_licence_expiry.after' => 'SIA licence must not be expired',
             'password.regex' => 'Password must contain numbers only (0-9).',
         ]);

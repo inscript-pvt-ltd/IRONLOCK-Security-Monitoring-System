@@ -122,7 +122,9 @@ class BackupService
         $start = Carbon::createFromFormat('Y-m-d', $monthKey . '-01')->startOfMonth();
         $end = $start->copy()->endOfMonth();
         $isCurrent = $monthKey === Carbon::now()->utc()->format('Y-m');
-        $filename = $start->format('F') . '_IronLock.zip';
+        // Download filename includes the year so archives from different years are
+        // distinguishable once downloaded (e.g. "June_2026_IronLock.zip").
+        $filename = $start->format('F_Y') . '_IronLock.zip';
 
         if (($this->monthCounts()[$monthKey] ?? 0) === 0) {
             return null; // nothing to archive
@@ -219,8 +221,10 @@ class BackupService
     private function buildZip(string $monthKey, string $targetAbsolutePath): int
     {
         $prefix = str_replace('-', '/', $monthKey) . '/'; // YYYY/MM/
-        $monthName = Carbon::createFromFormat('Y-m-d', $monthKey . '-01')->format('F');
-        $root = $monthName . '_IronLock';
+        // Root folder inside the ZIP carries the year too, matching the download
+        // filename (e.g. "June_2026_IronLock/…").
+        $monthLabel = Carbon::createFromFormat('Y-m-d', $monthKey . '-01')->format('F_Y');
+        $root = $monthLabel . '_IronLock';
 
         $rows = PhotoEvidence::whereNotNull('file_path')
             ->where('file_path', 'like', $prefix . '%')
