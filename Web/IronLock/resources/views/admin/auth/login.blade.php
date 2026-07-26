@@ -405,5 +405,7 @@
             });
         });
     </script>
+
+    @include('admin.partials.mobile-block')
 </body>
 </html>

@@ -229,6 +229,9 @@ class DashboardController extends Controller
             return [
                 'guard_id' => $shift->guard_id,
                 'guard_name' => $guard ? trim($guard->first_name . ' ' . $guard->last_name) : 'Unknown',
+                // Only present when the guard has an uploaded profile photo — the
+                // Live Map side panel renders the image field conditionally on it.
+                'photo_url' => ($guard && $guard->photo_path) ? route('admin.guards.photo', $guard->id) : null,
                 'shift_id' => $shift->id,
                 'shift_reference' => $shift->reference,
                 'shift_started_at' => $shift->actual_start?->toISOString(),

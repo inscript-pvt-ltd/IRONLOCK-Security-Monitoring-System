@@ -60,6 +60,12 @@ class Site extends Model
         'latitude',
         'longitude',
         'grace_period_minutes',
+        'photo_verification_enabled',
+        'wakefulness_enabled',
+        'photo_min_gap_minutes',
+        'photo_max_gap_minutes',
+        'wakefulness_min_gap_minutes',
+        'wakefulness_max_gap_minutes',
         'status',
         'contact_person',
         'contact_phone',
@@ -76,10 +82,42 @@ class Site extends Model
             'latitude' => 'decimal:8',
             'longitude' => 'decimal:8',
             'grace_period_minutes' => 'integer',
+            'photo_verification_enabled' => 'boolean',
+            'wakefulness_enabled' => 'boolean',
+            'photo_min_gap_minutes' => 'integer',
+            'photo_max_gap_minutes' => 'integer',
+            'wakefulness_min_gap_minutes' => 'integer',
+            'wakefulness_max_gap_minutes' => 'integer',
             'archived_at' => 'datetime',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Effective verification gaps (minutes). A NULL column means "inherit the
+     * global default" from config, so these accessors are the single place the
+     * fallback is resolved — the schedule builders and the Settings UI both read
+     * through them.
+     */
+    public function photoMinGapMinutes(): int
+    {
+        return (int) ($this->photo_min_gap_minutes ?? config('ironlock.photo_min_gap_minutes', 50));
+    }
+
+    public function photoMaxGapMinutes(): int
+    {
+        return (int) ($this->photo_max_gap_minutes ?? config('ironlock.photo_max_gap_minutes', 70));
+    }
+
+    public function wakefulnessMinGapMinutes(): int
+    {
+        return (int) ($this->wakefulness_min_gap_minutes ?? config('ironlock.wakefulness_min_gap_minutes', 30));
+    }
+
+    public function wakefulnessMaxGapMinutes(): int
+    {
+        return (int) ($this->wakefulness_max_gap_minutes ?? config('ironlock.wakefulness_max_gap_minutes', 45));
     }
 
     /**

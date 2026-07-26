@@ -67,6 +67,7 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::get('guards/list', [App\Http\Controllers\Admin\GuardController::class, 'list'])->name('guards.list'); // Must be before parameterized routes
         Route::post('guards', [App\Http\Controllers\Admin\GuardController::class, 'store'])->name('guards.store');
         Route::get('guards/{guard}/shifts', [App\Http\Controllers\Admin\GuardController::class, 'recentShifts'])->name('guards.shifts'); // AJAX: completed shifts for drawer
+        Route::get('guards/{guard}/photo', [App\Http\Controllers\Admin\GuardController::class, 'photo'])->name('guards.photo'); // Streams the private profile image (authed admins only)
         Route::get('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'show'])->name('guards.show'); // AJAX endpoint
         Route::put('guards/{guard}', [App\Http\Controllers\Admin\GuardController::class, 'update'])->name('guards.update');
         Route::patch('guards/{guard}/toggle-status', [App\Http\Controllers\Admin\GuardController::class, 'toggleStatus'])->name('guards.toggle-status');
@@ -83,6 +84,10 @@ Route::prefix('admin')->name('admin.')->group(function () {
         Route::put('sites/{site}', [App\Http\Controllers\Admin\SiteController::class, 'update'])->name('sites.update');
         Route::post('sites/{site}/toggle-status', [App\Http\Controllers\Admin\SiteController::class, 'toggleStatus'])->name('sites.toggle-status');
         Route::delete('sites/{site}', [App\Http\Controllers\Admin\SiteController::class, 'destroy'])->name('sites.destroy');
+
+        // Settings — per-site verification toggles + schedule frequency.
+        Route::get('settings', [App\Http\Controllers\Admin\SettingsController::class, 'index'])->name('settings.index');
+        Route::put('settings', [App\Http\Controllers\Admin\SettingsController::class, 'update'])->name('settings.update');
 
         // Geofence Management routes - Phase 3: Polygon Boundaries
         Route::get('sites/{site}/geofences', [App\Http\Controllers\Admin\GeofenceController::class, 'index'])->name('geofences.index');
