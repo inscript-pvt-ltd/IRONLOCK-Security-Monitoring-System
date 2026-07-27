@@ -119,6 +119,14 @@ return [
     |
     | - totp_period_seconds / totp_digits: the offline TOTP parameters. The
     |   window reference recorded on each check is floor(unix_time / period).
+    |   BOTH ARE CLAMPED, not trusted: `(int) env(...)` yields 0 for a blank or
+    |   non-numeric .env entry (the env() default only applies when the key is
+    |   absent entirely), and totp_digits = 0 makes every str_pad() in the
+    |   wakefulness path a no-op — the server would emit 1-4 character challenge
+    |   codes instead of 4, and the app would derive `binary % 10**0` = "0" for
+    |   every offline window. These values are also handed to the device in the
+    |   shift-start payload, so a bad one desyncs both sides at once. Out-of-range
+    |   input falls back to the documented default rather than propagating.
     |
     | Comms-interruption (a guard with no recent GPS ping) makes the dispatcher
     | skip online challenges and the sweep suppress the CRITICAL alert — a
@@ -136,9 +144,21 @@ return [
 
     'wakefulness_deadline_grace_seconds' => (int) env('IRONLOCK_WAKE_GRACE_SECONDS', 5),
 
-    'totp_period_seconds' => (int) env('IRONLOCK_TOTP_PERIOD', 30),
+    'totp_period_seconds' => (static function (): int {
+        $period = (int) env('IRONLOCK_TOTP_PERIOD', 30);
 
-    'totp_digits' => (int) env('IRONLOCK_TOTP_DIGITS', 4),
+        return ($period >= 10 && $period <= 300) ? $period : 30;
+    })(),
+
+    // 4 is the shipped contract (the app's UI, the push body and the
+    // wakefulness_checks.challenge_code column all assume it). 8 is the widest
+    // the column holds; anything outside 4-8 is a misconfiguration, not an
+    // intent, so it resolves to 4.
+    'totp_digits' => (static function (): int {
+        $digits = (int) env('IRONLOCK_TOTP_DIGITS', 4);
+
+        return ($digits >= 4 && $digits <= 8) ? $digits : 4;
+    })(),
 
     /*
     |--------------------------------------------------------------------------

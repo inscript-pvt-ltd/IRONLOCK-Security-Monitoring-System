@@ -92,6 +92,9 @@
                         <td>{{ ucfirst($p['status']) }}</td>
                         <td>{{ count($p['images']) }}</td>
                     </tr>
+                    @if (!empty($p['rejection_reason']))
+                        <tr><td colspan="6" style="font-size:8px;color:#8a2a2a;">Photo received but rejected — {{ $p['rejection_reason'] }}</td></tr>
+                    @endif
                     @if (!empty($p['liveness']))
                         <tr><td colspan="6" class="muted" style="font-size:8px;">Liveness proof: {{ $p['liveness'] }}</td></tr>
                     @endif

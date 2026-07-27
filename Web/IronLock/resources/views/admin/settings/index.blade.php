@@ -13,6 +13,14 @@
         max-width: 760px;
     }
 
+    /* Secondary note explaining the 20-minute floor on the gap fields. */
+    .settings-intro-note {
+        margin-top: -8px;
+        padding-left: 10px;
+        border-left: 2px solid var(--border-dark);
+        color: var(--text-muted);
+    }
+
     .settings-table-wrap { overflow-x: auto; }
 
     .settings-table {
@@ -164,6 +172,13 @@
     (shown as the placeholder). A change takes effect on shifts that start
     afterwards; a shift already in progress keeps its provisioned schedule.
 </p>
+<p class="settings-intro settings-intro-note">
+    Gaps must be <strong>20 minutes or more</strong>. A check that comes due while
+    the guard's device is offline can only be answered once they open the app, so
+    it typically lands several minutes after its scheduled slot — with shorter gaps
+    that delay spills into the following check and the shift's compliance record
+    stops reflecting what actually happened.
+</p>
 
 @php
     // Any site with a shift in progress right now? Drives the banner below.
@@ -242,13 +257,13 @@
                                 </label>
                             </td>
                             <td @class(['gap-cell-error' => $errors->has("$base.photo_min_gap_minutes")])>
-                                <input type="number" min="1" max="1440" class="gap-input" data-gap="photo-{{ $site->id }}"
+                                <input type="number" min="20" max="1440" class="gap-input" data-gap="photo-{{ $site->id }}"
                                        name="site[{{ $site->id }}][photo_min_gap_minutes]"
                                        value="{{ old("$base.photo_min_gap_minutes", $site->photo_min_gap_minutes) }}"
                                        placeholder="{{ $defaults['photo_min'] }}" {{ $photoOn ? '' : 'disabled' }}>
                             </td>
                             <td @class(['gap-cell-error' => $errors->has("$base.photo_max_gap_minutes")])>
-                                <input type="number" min="1" max="1440" class="gap-input" data-gap="photo-{{ $site->id }}"
+                                <input type="number" min="20" max="1440" class="gap-input" data-gap="photo-{{ $site->id }}"
                                        name="site[{{ $site->id }}][photo_max_gap_minutes]"
                                        value="{{ old("$base.photo_max_gap_minutes", $site->photo_max_gap_minutes) }}"
                                        placeholder="{{ $defaults['photo_max'] }}" {{ $photoOn ? '' : 'disabled' }}>
@@ -265,13 +280,13 @@
                                 </label>
                             </td>
                             <td @class(['gap-cell-error' => $errors->has("$base.wakefulness_min_gap_minutes")])>
-                                <input type="number" min="1" max="1440" class="gap-input" data-gap="wake-{{ $site->id }}"
+                                <input type="number" min="20" max="1440" class="gap-input" data-gap="wake-{{ $site->id }}"
                                        name="site[{{ $site->id }}][wakefulness_min_gap_minutes]"
                                        value="{{ old("$base.wakefulness_min_gap_minutes", $site->wakefulness_min_gap_minutes) }}"
                                        placeholder="{{ $defaults['wake_min'] }}" {{ $wakeOn ? '' : 'disabled' }}>
                             </td>
                             <td @class(['gap-cell-error' => $errors->has("$base.wakefulness_max_gap_minutes")])>
-                                <input type="number" min="1" max="1440" class="gap-input" data-gap="wake-{{ $site->id }}"
+                                <input type="number" min="20" max="1440" class="gap-input" data-gap="wake-{{ $site->id }}"
                                        name="site[{{ $site->id }}][wakefulness_max_gap_minutes]"
                                        value="{{ old("$base.wakefulness_max_gap_minutes", $site->wakefulness_max_gap_minutes) }}"
                                        placeholder="{{ $defaults['wake_max'] }}" {{ $wakeOn ? '' : 'disabled' }}>

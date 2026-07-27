@@ -25,6 +25,21 @@ use Illuminate\Support\Facades\Validator;
 class SettingsController extends Controller
 {
     /**
+     * Smallest gap an admin may configure between two checks of the same type.
+     *
+     * This is an OFFLINE-delivery limit, not an arbitrary one. Per the Flutter
+     * dev's 2026-07-27 reply: an offline check cannot fire in the background —
+     * it needs the guard to foreground the app or tap the local notification, so
+     * the capture lands 7–10 min after the mark in practice and the app skips
+     * any mark older than its 15-minute fire window. Below ~20 min a late
+     * capture spills into the next slot (PhotoVerificationService matches the
+     * latest mark <= capture + 90s), so checks get attributed to the wrong slot
+     * and the rest are recorded as missed — the compliance record would be
+     * fiction. See FLUTTER_HANDOFF_PER_SITE_VERIFICATION_SETTINGS.md §5.
+     */
+    private const MIN_GAP_MINUTES = 20;
+
+    /**
      * Show the settings table (one row per active/inactive, non-archived site).
      */
     public function index()
@@ -83,33 +98,62 @@ class SettingsController extends Controller
             $attributes["site.$id.wakefulness_max_gap_minutes"] = "wakefulness max gap ({$site->name})";
         }
 
+        $min = self::MIN_GAP_MINUTES;
+        $gapRule = "nullable|integer|min:$min|max:1440";
+
         $validator = Validator::make($request->all(), [
             'site' => 'array',
             'site.*' => 'array',
-            'site.*.photo_min_gap_minutes' => 'nullable|integer|min:1|max:1440',
-            'site.*.photo_max_gap_minutes' => 'nullable|integer|min:1|max:1440',
-            'site.*.wakefulness_min_gap_minutes' => 'nullable|integer|min:1|max:1440',
-            'site.*.wakefulness_max_gap_minutes' => 'nullable|integer|min:1|max:1440',
-        ], [], $attributes);
+            'site.*.photo_min_gap_minutes' => $gapRule,
+            'site.*.photo_max_gap_minutes' => $gapRule,
+            'site.*.wakefulness_min_gap_minutes' => $gapRule,
+            'site.*.wakefulness_max_gap_minutes' => $gapRule,
+        ], [
+            // Explain the floor rather than just stating it — an admin who wants
+            // 5-minute checks needs to know why they cannot have them.
+            'site.*.photo_min_gap_minutes.min' => "The :attribute must be at least {$min} minutes — shorter gaps cannot be delivered reliably while a guard is offline.",
+            'site.*.photo_max_gap_minutes.min' => "The :attribute must be at least {$min} minutes — shorter gaps cannot be delivered reliably while a guard is offline.",
+            'site.*.wakefulness_min_gap_minutes.min' => "The :attribute must be at least {$min} minutes — shorter gaps cannot be delivered reliably while a guard is offline.",
+            'site.*.wakefulness_max_gap_minutes.min' => "The :attribute must be at least {$min} minutes — shorter gaps cannot be delivered reliably while a guard is offline.",
+        ], $attributes);
 
-        // min must not exceed max for either pair (only when both are provided).
+        // min must not exceed max for either pair. Compared on the EFFECTIVE
+        // values, not just when both fields are filled in: a blank field inherits
+        // the global config default, so "max = 25, min blank" really means
+        // 50..25 — which the schedule builder would silently flatten to 50..50
+        // rather than reject. Catch it here instead.
         $validator->after(function ($validator) use ($rows, $sites) {
+            $pairs = [
+                ['photo', 'photo_min_gap_minutes', 'photo_max_gap_minutes', 'Photo'],
+                ['wakefulness', 'wakefulness_min_gap_minutes', 'wakefulness_max_gap_minutes', 'Wakefulness'],
+            ];
+
             foreach ($rows as $id => $row) {
                 if (! is_array($row) || ! isset($sites[$id])) {
                     continue;
                 }
                 $name = $sites[$id]->name;
 
-                $pMin = $row['photo_min_gap_minutes'] ?? null;
-                $pMax = $row['photo_max_gap_minutes'] ?? null;
-                if ($pMin !== null && $pMax !== null && (int) $pMin > (int) $pMax) {
-                    $validator->errors()->add("site.$id.photo_min_gap_minutes", "Photo min gap cannot exceed max for {$name}.");
-                }
+                foreach ($pairs as [$prefix, $minKey, $maxKey, $label]) {
+                    $rawMin = $row[$minKey] ?? null;
+                    $rawMax = $row[$maxKey] ?? null;
 
-                $wMin = $row['wakefulness_min_gap_minutes'] ?? null;
-                $wMax = $row['wakefulness_max_gap_minutes'] ?? null;
-                if ($wMin !== null && $wMax !== null && (int) $wMin > (int) $wMax) {
-                    $validator->errors()->add("site.$id.wakefulness_min_gap_minutes", "Wakefulness min gap cannot exceed max for {$name}.");
+                    $effMin = $this->effectiveGap($rawMin, "ironlock.{$prefix}_min_gap_minutes");
+                    $effMax = $this->effectiveGap($rawMax, "ironlock.{$prefix}_max_gap_minutes");
+
+                    if ($effMin <= $effMax) {
+                        continue;
+                    }
+
+                    // Point at whichever field the admin actually typed, and spell
+                    // out the inherited number so a half-filled pair makes sense.
+                    if ($rawMin !== null && $rawMin !== '' && $rawMax !== null && $rawMax !== '') {
+                        $validator->errors()->add("site.$id.$minKey", "{$label} min gap cannot exceed max for {$name}.");
+                    } elseif ($rawMax !== null && $rawMax !== '') {
+                        $validator->errors()->add("site.$id.$maxKey", "{$label} max gap ({$effMax}) is below the inherited min gap ({$effMin}) for {$name} — set the min gap too, or raise the max.");
+                    } else {
+                        $validator->errors()->add("site.$id.$minKey", "{$label} min gap ({$effMin}) is above the inherited max gap ({$effMax}) for {$name} — set the max gap too, or lower the min.");
+                    }
                 }
             }
         });
@@ -165,6 +209,20 @@ class SettingsController extends Controller
         ]);
 
         return back()->with('success', 'Verification settings saved.');
+    }
+
+    /**
+     * The gap that will actually be used: the submitted value, or the global
+     * config default when the field was left blank (which is what a NULL column
+     * resolves to in Site::photoMinGapMinutes() and friends).
+     */
+    private function effectiveGap(mixed $value, string $configKey): int
+    {
+        if ($value === null || $value === '' || ! is_numeric($value)) {
+            return (int) config($configKey);
+        }
+
+        return (int) $value;
     }
 
     /**

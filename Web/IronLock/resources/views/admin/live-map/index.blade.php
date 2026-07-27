@@ -116,11 +116,15 @@
         padding: 7px 9px; margin-bottom: 14px;
     }
 
-    /* Guard profile photo (only rendered when the guard has one). */
+    /* Guard profile photo (only rendered when the guard has one) — a small
+       centred avatar rather than a full-width banner: the panel's job is the
+       status/welfare read-out, so the photo identifies the guard without
+       pushing the fields below the fold. Fixed square + object-fit keeps any
+       aspect ratio circular without distortion. */
     .gp-photo {
-        width: 100%; max-height: 180px; object-fit: cover;
-        border-radius: 6px; border: 1px solid var(--border-dark);
-        margin-bottom: 14px; display: block; background: var(--bg-dark);
+        width: 88px; height: 88px; object-fit: cover;
+        border-radius: 50%; border: 2px solid var(--border-dark);
+        margin: 0 auto 14px; display: block; background: var(--bg-dark);
     }
 
     .gp-field { margin-bottom: 11px; }
