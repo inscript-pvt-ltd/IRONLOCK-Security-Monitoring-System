@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,6 +15,15 @@ import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // TEMP DIAGNOSTIC (debug only): Flutter collapses repeated identical errors to
+  // a one-liner, hiding the stack for a recurring assertion. Print the full stack
+  // on EVERY error so we can pinpoint the "defunct element / modify provider while
+  // building" source. Remove once diagnosed.
+  if (kDebugMode) {
+    FlutterError.onError = (details) {
+      FlutterError.dumpErrorToConsole(details, forceReport: true);
+    };
+  }
   // Initialise local notifications (timezone DB + plugin) early; permission is
   // requested contextually when a shift starts.
   NotificationService.init();

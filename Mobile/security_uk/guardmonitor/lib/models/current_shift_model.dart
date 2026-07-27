@@ -1,3 +1,5 @@
+import '../utils/server_time.dart';
+
 class ShiftSiteModel {
   const ShiftSiteModel({
     required this.id,
@@ -8,6 +10,12 @@ class ShiftSiteModel {
   final String id;
   final String name;
   final int? gracePeriodMinutes;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        if (gracePeriodMinutes != null) 'grace_period_minutes': gracePeriodMinutes,
+      };
 
   factory ShiftSiteModel.fromJson(Map<String, dynamic> json) {
     return ShiftSiteModel(
@@ -28,6 +36,12 @@ class ShiftGeofenceModel {
   final String id;
   final String name;
   final List<List<double>> coordinates;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'coordinates': coordinates,
+      };
 
   factory ShiftGeofenceModel.fromJson(Map<String, dynamic> json) {
     return ShiftGeofenceModel(
@@ -103,30 +117,69 @@ class CurrentShiftModel {
       ? '#$reference'
       : '#SH-${id.replaceAll('-', '').substring(0, 6).toUpperCase()}';
 
+  /// Serialises the shift for on-device persistence, so a cold start after a
+  /// swipe-kill can show the full shift card (site name, schedule, overdue
+  /// banner) WITHOUT waiting on `GET /shifts/current` — which can be null for an
+  /// active shift, or simply unreachable offline. Emits datetimes as UTC `Z`
+  /// strings so [fromJson] (`parseServerUtc(...).toLocal()`) round-trips them to
+  /// the exact same local instant. Keys mirror the server payload so the one
+  /// [fromJson] reads both.
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        if (reference != null) 'reference': reference,
+        'status': status,
+        'scheduled_start': scheduledStart.toUtc().toIso8601String(),
+        'scheduled_end': scheduledEnd.toUtc().toIso8601String(),
+        if (actualStart != null)
+          'actual_start': actualStart!.toUtc().toIso8601String(),
+        if (actualEnd != null) 'actual_end': actualEnd!.toUtc().toIso8601String(),
+        'can_start': canStart,
+        'can_end': canEnd,
+        'can_request_early_end': canRequestEarlyEnd,
+        if (role != null) 'role': role,
+        if (notes != null) 'notes': notes,
+        if (site != null) 'site': site!.toJson(),
+        if (geofence != null) 'geofence': geofence!.toJson(),
+        if (durationHours != null) 'duration_hours': durationHours,
+        if (endType != null) 'end_type': endType,
+        if (earlyEndStatus != null)
+          'early_end_request': {
+            'status': earlyEndStatus,
+            if (earlyEndReason != null) 'reason': earlyEndReason,
+            if (earlyEndNote != null) 'note': earlyEndNote,
+          },
+      };
+
   factory CurrentShiftModel.fromJson(Map<String, dynamic> json) {
     return CurrentShiftModel(
       id: json['id'] as String,
       reference: json['reference'] as String?,
       status: json['status'] as String,
-      scheduledStart: DateTime.parse(json['scheduled_start'] as String).toLocal(),
-      scheduledEnd: DateTime.parse(json['scheduled_end'] as String).toLocal(),
-      actualStart: json['actual_start'] != null
-          ? DateTime.parse(json['actual_start'] as String).toLocal()
-          : null,
-      actualEnd: json['actual_end'] != null
-          ? DateTime.parse(json['actual_end'] as String).toLocal()
-          : null,
+      // Parse as UTC then localise. `parseServerUtc` handles a zone-less server
+      // string (interpreted as UTC) so wall-clock times can't drift by the
+      // device offset (M5). A null/unparseable required time is surfaced as a
+      // clear FormatException the caller logs — rather than an obscure cast error
+      // — and `CurrentShiftNotifier.fetch` swallows it, keeping the cached shift
+      // (M4).
+      scheduledStart: (parseServerUtc(json['scheduled_start'] as String?) ??
+              (throw const FormatException('shift.scheduled_start missing/invalid')))
+          .toLocal(),
+      scheduledEnd: (parseServerUtc(json['scheduled_end'] as String?) ??
+              (throw const FormatException('shift.scheduled_end missing/invalid')))
+          .toLocal(),
+      actualStart: parseServerUtc(json['actual_start'] as String?)?.toLocal(),
+      actualEnd: parseServerUtc(json['actual_end'] as String?)?.toLocal(),
       canStart: json['can_start'] as bool? ?? false,
       canEnd: json['can_end'] as bool? ?? false,
       canRequestEarlyEnd: json['can_request_early_end'] as bool? ?? false,
       role: json['role'] as String?,
       notes: json['notes'] as String?,
-      site: json['site'] != null
-          ? ShiftSiteModel.fromJson(json['site'] as Map<String, dynamic>)
-          : null,
-      geofence: json['geofence'] != null
-          ? ShiftGeofenceModel.fromJson(json['geofence'] as Map<String, dynamic>)
-          : null,
+      // Parse the nested site/geofence defensively: a malformed sub-object (e.g. a
+      // geofence with null/odd `coordinates`) must NOT throw out of the whole
+      // shift parse — otherwise one bad field drops the ENTIRE shift on every 20s
+      // poll and strands the guard on a disabled START button with no explanation.
+      site: _parseNested(json['site'], ShiftSiteModel.fromJson),
+      geofence: _parseNested(json['geofence'], ShiftGeofenceModel.fromJson),
       durationHours: (json['duration_hours'] as num?)?.toDouble(),
       endType: json['end_type'] as String?,
       earlyEndStatus: _earlyEnd(json)?['status'] as String?,
@@ -140,6 +193,21 @@ class CurrentShiftModel {
   static Map<String, dynamic>? _earlyEnd(Map<String, dynamic> json) {
     final raw = json['early_end_request'];
     return raw is Map<String, dynamic> ? raw : null;
+  }
+
+  /// Parses an optional nested object with [parse], returning null when it's
+  /// absent, the wrong shape, or [parse] itself throws on a malformed sub-field —
+  /// so a bad site/geofence degrades to null instead of dropping the whole shift.
+  static T? _parseNested<T>(
+    dynamic raw,
+    T Function(Map<String, dynamic>) parse,
+  ) {
+    if (raw is! Map<String, dynamic>) return null;
+    try {
+      return parse(raw);
+    } catch (_) {
+      return null;
+    }
   }
 
   CurrentShiftModel copyWith({

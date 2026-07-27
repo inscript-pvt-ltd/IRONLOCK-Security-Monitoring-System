@@ -1,17 +1,25 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/api_config.dart';
 import '../data/offline_queue_db.dart';
 import 'api_client.dart';
 
-/// Manages the pre-fetched pool of single-use `OFFLINE_POOL` nonces (15-min TTL)
-/// that lets a photo be captured + HMAC-signed while offline. The pool is topped
-/// up opportunistically **while online** (shift start, after each online photo)
-/// and drawn from when a capture happens with no connectivity.
+/// Manages the pre-fetched pool of single-use `OFFLINE_POOL` nonces that lets a
+/// photo be captured + HMAC-signed while offline. The pool is topped up
+/// opportunistically **while online** (shift start, after each online photo) and
+/// drawn from when a capture happens with no connectivity.
+///
+/// Each nonce carries its **own** server-issued `expires_at` (stored per-row) and
+/// that is the authoritative validity deadline — as of the 2026-07-23 backend fix
+/// a pool nonce prefetched during a shift stays valid until end-of-shift (+grace),
+/// so one prefetch at start covers every 50–70-min photo mark. (The old fixed
+/// 15-min TTL predated Option A's mark spacing and always expired first.)
 ///
 /// Backed by the encrypted [OfflineQueueDb] `NoncePool` table — draws are atomic
-/// (single-use) and expiry is enforced on every read.
+/// (single-use) and expiry is enforced on every read against each nonce's
+/// `expires_at`.
 class NoncePoolService {
   NoncePoolService(this._dio, this._db);
 
@@ -34,7 +42,11 @@ class NoncePoolService {
   }) async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     await _db.purgeExpiredNonces(nowMs);
-    if (await _db.availableNonceCount(shiftId, nowMs) >= threshold) return;
+    final depth = await _db.availableNonceCount(shiftId, nowMs);
+    if (depth >= threshold) {
+      if (kDebugMode) debugPrint('[nonce] pool ok (depth=$depth) — no refill');
+      return;
+    }
 
     try {
       final res = await _dio.post<Map<String, dynamic>>(
@@ -43,8 +55,16 @@ class NoncePoolService {
       );
       final companions = parsePrefetch(res.data, shiftId);
       if (companions.isNotEmpty) await _db.insertNonces(companions);
-    } catch (_) {
-      // Offline / shift not active — keep whatever pool we already hold.
+      if (kDebugMode) {
+        debugPrint('[nonce] prefetch → parsed ${companions.length} nonce(s) '
+            '(was depth=$depth). If 0, the response shape did not match '
+            '{data:{nonces:[{nonce_value,expires_at}]}}.');
+      }
+    } catch (e) {
+      // Offline / shift not active / endpoint error — keep the existing pool.
+      // Logged so a silently-failing prefetch (wrong shape, 4xx) is visible
+      // instead of masquerading as an empty pool.
+      if (kDebugMode) debugPrint('[nonce] prefetch FAILED (depth stays $depth): $e');
     }
   }
 

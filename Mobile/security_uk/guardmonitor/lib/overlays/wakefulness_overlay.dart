@@ -25,10 +25,15 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
   late final AnimationController _shakeCtrl;
   late final Animation<double> _shake;
   late final AnimationController _fadeCtrl;
+  // Captured in initState so dispose() can reset the FSM WITHOUT touching `ref`
+  // — using `ref` in dispose throws once the element is unmounted during tree
+  // teardown (the notifier lives app-scoped, so the reference stays valid).
+  late final WakefulnessNotifier _notifier;
 
   @override
   void initState() {
     super.initState();
+    _notifier = ref.read(wakefulnessProvider.notifier);
     WidgetsBinding.instance.addObserver(this);
     _shakeCtrl = AnimationController(
       vsync: this,
@@ -92,7 +97,7 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
     if (key == 'DEL') {
       ref.read(wakefulnessProvider.notifier).deleteDigit();
     } else if (key == 'OK') {
-      if (s.entry.length == 4) _submit();
+      if (s.entry.length == kWakefulnessDigits) _submit();
     } else {
       ref.read(wakefulnessProvider.notifier).addDigit(key);
     }
@@ -122,7 +127,10 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
     if (!mounted) return;
     _fadeCtrl.reverse().then((_) {
       if (mounted) Navigator.of(context).pop();
-      ref.read(wakefulnessProvider.notifier).reset();
+      // Don't reset the FSM here — popping runs during a frame, so mutating the
+      // provider now throws "modified a provider while the widget tree was
+      // building" and cascades rebuilds into the defunct overlay. dispose()
+      // handles the reset (deferred off-frame via microtask) after the pop.
     });
   }
 
@@ -133,9 +141,12 @@ class _WakefulnessOverlayState extends ConsumerState<WakefulnessOverlay>
     _shakeCtrl.dispose();
     _fadeCtrl.dispose();
     // Guarantee return to idle even when the overlay is torn down without going
-    // through _close() (navigation, error, app lifecycle). Calling reset() twice
-    // (here and in _close()) is safe — it's idempotent.
-    ref.read(wakefulnessProvider.notifier).reset();
+    // through _close() (navigation, error, app lifecycle). Idempotent. Use the
+    // captured [_notifier] (not `ref` — throws once unmounted) AND defer it off
+    // the current frame: dispose runs during tree finalization, and mutating a
+    // provider then throws "modified a provider while the widget tree was
+    // building". The microtask runs after the frame, when it's safe.
+    Future.microtask(_notifier.reset);
     super.dispose();
   }
 
@@ -305,6 +316,7 @@ class _CodeDisplay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      width: double.infinity,
       padding: EdgeInsets.symmetric(
         horizontal: context.s(24),
         vertical: context.s(20),
@@ -322,17 +334,25 @@ class _CodeDisplay extends StatelessWidget {
           BoxShadow(color: Color(0x1AD4AF37), blurRadius: 1, offset: Offset(0, -1)),
         ],
       ),
-      child: Text(
-        code.split('').join('   '),
-        style: TextStyle(
-          fontSize: context.sp(40),
-          fontWeight: FontWeight.w800,
-          color: const Color(0xFFD4AF37),
-          letterSpacing: 8,
+      // FittedBox(scaleDown) guarantees ALL digits stay on-screen: the code is
+      // rendered very wide (big font + per-char spacing), so on a narrow device
+      // an un-fitted Text with overflow.visible would spill past the edge and be
+      // clipped by the parent — dropping the outer (usually leading-zero) digit
+      // and showing what looks like a 3-digit code. Scaling to fit removes that
+      // whole failure mode: 4 digits always render, just smaller if space is tight.
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Text(
+          code.split('').join('   '),
+          style: TextStyle(
+            fontSize: context.sp(40),
+            fontWeight: FontWeight.w800,
+            color: const Color(0xFFD4AF37),
+            letterSpacing: 8,
+          ),
+          textAlign: TextAlign.center,
+          maxLines: 1,
         ),
-        textAlign: TextAlign.center,
-        maxLines: 1,
-        overflow: TextOverflow.visible,
       ),
     );
   }
@@ -471,7 +491,7 @@ class _PinDots extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(4, (i) {
+      children: List.generate(kWakefulnessDigits, (i) {
         final isFilled = i < filled;
         return Container(
           width: 16,
@@ -535,7 +555,7 @@ class _Keypad extends StatelessWidget {
                     label: key,
                     onTap: enabled ? () => onKey(key) : null,
                     isOk: key == 'OK',
-                    okEnabled: key == 'OK' && entryLength == 4,
+                    okEnabled: key == 'OK' && entryLength == kWakefulnessDigits,
                   ),
                 ),
               );
@@ -671,7 +691,7 @@ class _FooterMessage extends StatelessWidget {
       );
     }
     return Text(
-      'Tap OK after entering all 4 digits',
+      'Tap OK after entering all $kWakefulnessDigits digits',
       style: AppType.caption,
     );
   }

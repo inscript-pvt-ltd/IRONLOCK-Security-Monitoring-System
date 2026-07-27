@@ -80,6 +80,22 @@ void main() {
       expect(prov.dueMark(_utc('2026-06-30T12:16:00Z'), {}), isNull);
     });
 
+    test('fire window is FIXED — a shift-spanning nonce TTL does NOT widen it',
+        () {
+      // Regression guard for the 2026-07-23 backend change: pool nonces now stay
+      // valid all shift, so the server reports offline_nonce_ttl_minutes as ~shift
+      // length (e.g. 500). The fire window must stay decoupled at 15 min, else a
+      // capture could fire hours late and miss the mark the server matches on.
+      final wideTtl = PhotoProvisioning(
+        schedule: [_utc('2026-06-30T12:00:00Z')],
+        offlineNonceTtlMinutes: 500,
+      );
+      expect(wideTtl.dueMark(_utc('2026-06-30T12:05:00Z'), {}),
+          _utc('2026-06-30T12:00:00Z')); // inside 15 min → fires
+      expect(wideTtl.dueMark(_utc('2026-06-30T12:16:00Z'), {}),
+          isNull); // 16 min late → skipped despite the 500-min nonce TTL
+    });
+
     test('already-fired marks are skipped → next due one returned', () {
       final fired = {prov.keyFor(_utc('2026-06-30T12:00:00Z'))};
       // At 13:05 the first is long lapsed + fired; the second is now due.

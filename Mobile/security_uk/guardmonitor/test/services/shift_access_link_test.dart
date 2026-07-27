@@ -97,17 +97,56 @@ void main() {
       }
     });
 
-    test('LOGIN_WINDOW_CLOSED expired flags windowExpired + keeps server msg', () {
+    test('LOGIN_WINDOW_CLOSED expired flags windowExpired + own copy (not server msg)',
+        () {
       final ex = ShiftAccessException.fromDio(
           _dioWith('LOGIN_WINDOW_CLOSED', details: {'reason': 'expired'}));
       expect(ex.windowExpired, isTrue);
-      expect(ex.message, contains('server message'));
+      // We render our own copy, NOT the server message (which may be wrong-zone).
+      expect(ex.message, isNot(contains('server message')));
+      expect(ex.message, contains('closed'));
     });
 
     test('LOGIN_WINDOW_CLOSED too_early does NOT flag windowExpired', () {
       final ex = ShiftAccessException.fromDio(
           _dioWith('LOGIN_WINDOW_CLOSED', details: {'reason': 'too_early'}));
       expect(ex.windowExpired, isFalse);
+    });
+
+    test('LOGIN_WINDOW_CLOSED too_early localizes the details timestamps', () {
+      // 05:40Z / 05:55Z → formatted in the DEVICE zone, never raw UTC.
+      final ex = ShiftAccessException.fromDio(
+          _dioWith('LOGIN_WINDOW_CLOSED', details: {
+        'reason': 'too_early',
+        'window_opens_at': '2026-07-23T05:40:00.000000Z',
+        'next_shift_start': '2026-07-23T05:55:00.000000Z',
+      }));
+      // Build the same expectation from .toLocal() so the test is zone-agnostic
+      // (passes wherever CI runs), and prove it's NOT the raw server message.
+      String hhmm(String iso) {
+        final l = DateTime.parse(iso).toLocal();
+        return '${l.hour.toString().padLeft(2, '0')}:'
+            '${l.minute.toString().padLeft(2, '0')}';
+      }
+      expect(ex.message, isNot(contains('server message')));
+      expect(
+          ex.message,
+          'You can sign in from ${hhmm('2026-07-23T05:40:00Z')} — '
+          '15 minutes before your ${hhmm('2026-07-23T05:55:00Z')} shift.');
+    });
+
+    test('LOGIN_WINDOW_CLOSED too_early with missing timestamps → server fallback',
+        () {
+      final ex = ShiftAccessException.fromDio(
+          _dioWith('LOGIN_WINDOW_CLOSED', details: {'reason': 'too_early'}));
+      expect(ex.message, contains('server message'));
+    });
+
+    test('LOGIN_WINDOW_CLOSED no_shift → own copy', () {
+      final ex = ShiftAccessException.fromDio(
+          _dioWith('LOGIN_WINDOW_CLOSED', details: {'reason': 'no_shift'}));
+      expect(ex.windowExpired, isFalse);
+      expect(ex.message, isNot(contains('server message')));
     });
 
     test('unknown code falls back to the server message', () {

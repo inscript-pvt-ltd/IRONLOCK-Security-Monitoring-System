@@ -28,13 +28,18 @@ class GuardProfileModel {
   String get fullName => '$firstName $lastName';
 
   factory GuardProfileModel.fromJson(Map<String, dynamic> json) {
+    // Default every required string rather than hard-casting: an incomplete guard
+    // record (a null last_name, a missing username) must NOT throw here — this
+    // parses the login/redeem response, and a throw would fail the whole sign-in
+    // with a cryptic TypeError instead of just showing a blank field.
+    String s(String key) => json[key] as String? ?? '';
     return GuardProfileModel(
-      id: json['id'] as String,
-      employeeCode: json['employee_code'] as String,
-      firstName: json['first_name'] as String,
-      lastName: json['last_name'] as String,
-      username: json['username'] as String,
-      email: json['email'] as String,
+      id: s('id'),
+      employeeCode: s('employee_code'),
+      firstName: s('first_name'),
+      lastName: s('last_name'),
+      username: s('username'),
+      email: s('email'),
       employmentStatus: json['employment_status'] as String? ?? 'active',
       phone: json['phone'] as String?,
       siaLicenceNumber: json['sia_licence_number'] as String?,

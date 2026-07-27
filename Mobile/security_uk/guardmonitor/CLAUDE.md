@@ -187,8 +187,11 @@ status: `docs/PHASE_7_IMPLEMENTATION_PLAN.md`; **what's left: `docs/PHASE_7_REMA
 - **Queue** — `OfflineQueueDb` (Drift over SQLCipher). Cipher key in secure storage
   (`db_cipher_key`), wiped on sign-out; a stale/undecryptable file is dropped on open.
 - **Flush** — `SyncFlushService` (`syncFlushServiceProvider`), started/stopped by the auth listener
-  in `main.dart`; single-flight, flushes on the offline→online edge + app-resume + backlog on start.
-  Order **wakefulness → GPS → photos**, oldest first. Per-item outcome runs through
+  in `main.dart`; single-flight, flushes on the offline→online edge + app-resume + backlog on start
+  + an important-enqueue kick + a 60s heartbeat backstop.
+  Order **wakefulness → photos → GPS**, oldest first (compliance-critical before bulk telemetry, so
+  proof photos/welfare answers reach the dashboard first instead of queueing behind the GPS trail).
+  Per-item outcome runs through
   `classifyFlush` (`sync_retry.dart`); retryable → backoff-bump, terminal 4xx → drop, capped at 12.
 - **GPS** — a ping the live POST can't deliver is enqueued (see `gps_service.dart`), flushed as one
   `pings[]` batch (chunked ≤200).

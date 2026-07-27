@@ -12,12 +12,7 @@ class _FakeWakefulness extends WakefulnessService {
   final bool throwIt;
 
   @override
-  Future<bool> respond(
-    String checkId,
-    String code, {
-    int? windowReference,
-    bool isOffline = false,
-  }) async {
+  Future<bool> respond(String checkId, String code) async {
     if (throwIt) throw Exception('network down');
     return verdict;
   }
@@ -80,6 +75,38 @@ void main() {
       enter(n, '9999');
       await n.submit();
       expect(c.read(wakefulnessProvider).status, WakefulnessStatus.failed);
+    });
+  });
+
+  group('code must be exactly 4 digits (M2)', () {
+    test('a dropped leading zero is restored to 4 and is passable', () async {
+      // Server/transport sent "472" for a true "0472" — pad and accept.
+      final c = containerWith(_FakeWakefulness(verdict: true));
+      addTearDown(c.dispose);
+      final n = c.read(wakefulnessProvider.notifier);
+      n.trigger('chk-1', '472');
+      expect(c.read(wakefulnessProvider).status, WakefulnessStatus.challenge);
+      expect(c.read(wakefulnessProvider).code, '0472');
+      enter(n, '0472');
+      await n.submit();
+      expect(c.read(wakefulnessProvider).status, WakefulnessStatus.success);
+    });
+
+    test('a code longer than 4 digits raises no challenge (stays idle)', () {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(wakefulnessProvider.notifier);
+      n.trigger('chk-1', '12345');
+      expect(c.read(wakefulnessProvider).status, WakefulnessStatus.idle,
+          reason: 'a >4-digit code is malformed — never raise an unpassable one');
+    });
+
+    test('triggerLocal also rejects a >4-digit code', () {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(wakefulnessProvider.notifier);
+      n.triggerLocal('totp-1', '123456', windowReference: 1);
+      expect(c.read(wakefulnessProvider).status, WakefulnessStatus.idle);
     });
   });
 

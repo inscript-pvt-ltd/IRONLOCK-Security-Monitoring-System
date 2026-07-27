@@ -18,10 +18,14 @@ import 'wakefulness_service.dart';
 /// when connectivity returns. This is the Phase 7 flush engine.
 ///
 /// Responsibilities:
-/// - **Trigger:** on a false→true connectivity transition (and on demand), run a
-///   flush. Also safe to call periodically — an empty queue is a cheap no-op.
-/// - **Order:** wakefulness → GPS → photos, oldest first. The server tolerates
-///   any order (PHASE_7_SYNC_INTEGRITY.md §3); this is for our own coherence.
+/// - **Trigger:** on a false→true connectivity transition, on an important
+///   enqueue (see below), on a periodic heartbeat, and on demand. An empty queue
+///   is always a cheap no-op, so over-triggering is harmless.
+/// - **Order:** wakefulness → photos → GPS, oldest first. The server tolerates
+///   any order (PHASE_7_SYNC_INTEGRITY.md §3); we deliberately flush the
+///   compliance-critical events (welfare answers, then proof photos) **before**
+///   the high-volume GPS trail so they reach the dashboard first on reconnect
+///   instead of queueing behind a long breadcrumb backlog.
 /// - **Single-flight:** overlapping triggers (connectivity flaps) coalesce onto
 ///   one in-progress flush instead of racing.
 /// - **Retry:** each item's outcome runs through [classifyFlush] — success/drop
@@ -45,7 +49,31 @@ class SyncFlushService {
   /// avoid a request timeout (backend guidance: 100–200).
   static const int _gpsBatchSize = 200;
 
+  /// Tags every reconnect-drain GPS POST with `backfill:true` so the server
+  /// forces its reconnect/replay classification for **all** chunks of a
+  /// multi-request backlog — not just the first. Without it, applying chunk #1
+  /// refreshes the server's last-seen row, so chunk #2 of a >200-ping backlog is
+  /// misread as a live tick and can retroactively page a supervisor (backend
+  /// reply 2026-07-23 §5). Every `_flushGps` batch is a backfill by definition:
+  /// live pings post directly from `GpsService` and only reach the queue after a
+  /// failed live delivery.
+  ///
+  /// ⚠️ Held OFF until the backend confirms the server honours the field. It
+  /// ignores it today, so sending changes nothing — Jerry asked us not to send
+  /// until it's live. Flip to `true` + redeploy on his go-live confirmation; no
+  /// other change is needed.
+  static const bool sendGpsBackfillFlag = false;
+
+  /// Backstop cadence: while signed in, attempt a flush every [_heartbeatInterval]
+  /// even with no connectivity edge. Covers the case where the online flag never
+  /// flips but individual requests are failing (congested tower / server blip) —
+  /// without it, an item enqueued during such a "soft" failure could sit until the
+  /// next app-resume. An empty queue makes this a no-op.
+  static const Duration _heartbeatInterval = Duration(seconds: 60);
+
   StreamSubscription<bool>? _sub;
+  StreamSubscription<void>? _enqueueSub;
+  Timer? _heartbeat;
   bool _wasOnline = true;
   Future<void>? _inFlight;
 
@@ -62,16 +90,31 @@ class SyncFlushService {
       _wasOnline = online;
       if (reconnected) unawaited(flush());
     });
+    // Enqueue-kick: the moment a compliance-critical capture (welfare answer /
+    // proof photo) is buffered, try to drain it immediately instead of waiting
+    // for the next connectivity edge. single-flight coalesces this onto any run
+    // already in progress, and a genuinely offline attempt just fails fast and
+    // re-queues, so it's safe to fire on every important enqueue.
+    _enqueueSub?.cancel();
+    _enqueueSub = _db.onImportantEnqueue.listen((_) => unawaited(flush()));
+    // Heartbeat backstop (see _heartbeatInterval).
+    _heartbeat?.cancel();
+    _heartbeat = Timer.periodic(_heartbeatInterval, (_) => unawaited(flush()));
     // Drain any backlog left from a previous session (e.g. the app was killed
     // mid-shift with queued pings, then relaunched already online — no
     // offline→online edge would otherwise fire). Cheap no-op if empty.
     unawaited(flush());
   }
 
-  /// Stops watching connectivity. Call on sign-out.
+  /// Stops watching connectivity + enqueue signals + the heartbeat. Call on
+  /// sign-out.
   void stop() {
     _sub?.cancel();
     _sub = null;
+    _enqueueSub?.cancel();
+    _enqueueSub = null;
+    _heartbeat?.cancel();
+    _heartbeat = null;
   }
 
   /// Drains the queue once. Concurrent calls share the single in-flight run
@@ -81,14 +124,41 @@ class SyncFlushService {
     return _inFlight ??= _runCycle().whenComplete(() => _inFlight = null);
   }
 
+  /// True when a flush error means the **server never answered** (offline,
+  /// connection dropped, timeout) rather than actively responding. Such a failure
+  /// must NOT count against a row's retry budget — being offline is "not yet", not
+  /// a reason to give up on a compliance-critical capture. A real server response
+  /// (5xx) has `response != null` and still counts.
+  static bool _noServerResponse(Object? error) =>
+      error is DioException && error.response == null;
+
   Future<void> _runCycle() async {
     try {
-      final shiftId = _currentShiftId();
-      await _flushWakefulness();
-      if (shiftId != null) {
-        await _flushGps(shiftId);
-        await _flushPhotos(shiftId);
+      // Don't even attempt while the device reports offline: an offline "failure"
+      // isn't a real failure, and hammering the queue offline used to erode each
+      // row's retry budget. Wait for a real connection, then push (the reconnect
+      // edge fires this). Belt-and-braces with the per-item "no response = no
+      // strike" handling below, which covers a connected-but-server-unreachable
+      // case that the OS connectivity flag can't see.
+      if (!_wasOnline) {
+        if (kDebugMode) debugPrint('[sync] skip — device offline, will push on reconnect');
+        return;
       }
+      final shiftId = _currentShiftId();
+      if (kDebugMode) {
+        final wake = await _db.dueWakefulness(DateTime.now().millisecondsSinceEpoch);
+        debugPrint('[sync] flush start → base=${ApiConfig.baseUrl} '
+            'shift=$shiftId wakefulnessDue=${wake.length}');
+      }
+      // Compliance-critical first (welfare answers, then proof photos), bulk GPS
+      // last — so a long GPS backlog can't delay the events supervisors watch.
+      // All three flush by each row's OWN shiftId (not the live shift), so a
+      // backlog still drains after the shift ends mid-flush (H1). `shiftId` above
+      // is used only for the debug line.
+      await _flushWakefulness();
+      await _flushPhotos();
+      await _flushGps();
+      if (kDebugMode) debugPrint('[sync] flush done');
     } catch (error, stack) {
       // A flush must be best-effort: swallow anything unexpected so the app and
       // the connectivity listener keep running. Per-item failures are handled
@@ -103,11 +173,30 @@ class SyncFlushService {
 
   // ---- GPS -----------------------------------------------------------------
 
-  Future<void> _flushGps(String shiftId) async {
+  Future<void> _flushGps() async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final due = await _db.dueGps(shiftId, nowMs);
+    // ALL shifts, not just the live one — a backlog must still drain after its
+    // shift ended (H1). Grouped by each row's own shiftId (the /locations POST is
+    // per-shift). LinkedHashMap preserves the oldest-first order within a shift.
+    final due = await _db.dueGpsAll(nowMs);
     if (due.isEmpty) return;
+    final byShift = <String, List<GpsQueueData>>{};
+    for (final r in due) {
+      (byShift[r.shiftId] ??= <GpsQueueData>[]).add(r);
+    }
+    for (final entry in byShift.entries) {
+      if (await _flushGpsForShift(entry.key, entry.value, nowMs)) return;
+    }
+  }
 
+  /// Flushes one shift's due GPS rows in ≤200-ping batches. Returns true if the
+  /// caller should STOP the whole cycle (a transient failure = network down, so
+  /// other shifts would just fail too); false when this shift drained cleanly.
+  Future<bool> _flushGpsForShift(
+    String shiftId,
+    List<GpsQueueData> due,
+    int nowMs,
+  ) async {
     // Drop rows that have exhausted their retries before they can wedge a batch.
     final exhausted =
         due.where((r) => r.attempts >= kMaxFlushAttempts).map((r) => r.id).toList();
@@ -131,28 +220,46 @@ class SyncFlushService {
       try {
         await _dio.post<Map<String, dynamic>>(
           ApiConfig.shiftLocations(shiftId),
-          data: {'pings': pings},
+          data: {
+            'pings': pings,
+            // A reconnect-drain replay, not a live tick — see sendGpsBackfillFlag.
+            if (sendGpsBackfillFlag) 'backfill': true,
+          },
         );
       } catch (e) {
         error = e;
       }
 
       final decision = classifyFlush(error);
+      if (kDebugMode) {
+        debugPrint('[sync] gps → POST ${ApiConfig.shiftLocations(shiftId)} '
+            'batch=${batch.length} → ${decision.action.name}'
+            '${error == null ? '' : ' ($error)'}');
+      }
       switch (decision.action) {
         case FlushAction.success:
         case FlushAction.drop:
           await _db.deleteGps(ids);
         case FlushAction.retry:
-          // Gate the whole batch behind the backoff of its most-tried row.
-          final maxAttempts =
-              batch.map((r) => r.attempts).reduce((a, b) => a > b ? a : b);
-          final next = nowMs + backoffDelay(maxAttempts).inMilliseconds;
-          await _db.bumpGpsAttempts(ids, next);
-          // Stop this cycle on a transient failure — the network is down again;
-          // later batches would just fail too. The next reconnect retries.
-          return;
+          if (_noServerResponse(error)) {
+            // Offline / no response = "not yet", not a strike. Gate to now so a
+            // reconnect flushes immediately, WITHOUT burning the retry budget.
+            await _db.gateGps(ids, nowMs);
+          } else {
+            // A real server 5xx counts — gate behind the backoff of the batch's
+            // most-tried row.
+            final maxAttempts =
+                batch.map((r) => r.attempts).reduce((a, b) => a > b ? a : b);
+            final next = nowMs + backoffDelay(maxAttempts).inMilliseconds;
+            await _db.bumpGpsAttempts(ids, next);
+          }
+          // Stop the whole cycle on a transient failure — the network is down
+          // again; later batches (and other shifts) would just fail too. The
+          // next reconnect retries.
+          return true;
       }
     }
+    return false; // this shift drained cleanly — continue with the next.
   }
 
   // ---- Wakefulness ---------------------------------------------------------
@@ -168,31 +275,52 @@ class SyncFlushService {
       Object? error;
       try {
         await _wakefulness.submitOffline(
-          checkId: row.checkId,
+          shiftId: row.shiftId,
           code: row.code,
           windowReference: row.windowReference,
           respondedAt: row.respondedAt,
+          scheduledAt: row.scheduledAt,
         );
       } catch (e) {
         error = e;
       }
-      switch (classifyFlush(error).action) {
+      final decision = classifyFlush(error);
+      if (kDebugMode) {
+        debugPrint('[sync] wakefulness → POST '
+            '${ApiConfig.wakefulnessOffline(row.shiftId)} '
+            'window=${row.windowReference} → ${decision.action.name}'
+            '${error == null ? '' : ' ($error)'}');
+      }
+      switch (decision.action) {
         case FlushAction.success:
         case FlushAction.drop:
           await _db.deleteWakefulness(row.id);
         case FlushAction.retry:
-          final next = nowMs + backoffDelay(row.attempts).inMilliseconds;
-          await _db.bumpWakefulness(row.id, next);
+          if (_noServerResponse(error)) {
+            // Offline / no response — keep the answer, gate to now, DON'T strike.
+            await _db.gateWakefulness(row.id, nowMs);
+          } else {
+            final next = nowMs + backoffDelay(row.attempts).inMilliseconds;
+            await _db.bumpWakefulness(row.id, next);
+          }
+          // Transient failure — the network is down again; remaining rows would
+          // just burn a timeout each. Stop; the next reconnect retries. (Mirrors
+          // _flushGps; a per-row 4xx is a `drop`, not a `retry`, so it doesn't
+          // stop the loop.)
+          return;
       }
     }
   }
 
   // ---- Photos --------------------------------------------------------------
 
-  Future<void> _flushPhotos(String shiftId) async {
+  Future<void> _flushPhotos() async {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final due = await _db.duePhotos(shiftId, nowMs);
+    // ALL shifts — proof photos must still drain after their shift ends (H1).
+    // Each row carries its own shiftId, so the per-shift POST just uses it.
+    final due = await _db.duePhotosAll(nowMs);
     for (final row in due) {
+      final shiftId = row.shiftId;
       if (row.attempts >= kMaxFlushAttempts) {
         await _discardPhoto(row);
         continue;
@@ -218,13 +346,27 @@ class SyncFlushService {
         error = e;
       }
 
-      switch (classifyFlush(error).action) {
+      final decision = classifyFlush(error);
+      if (kDebugMode) {
+        debugPrint('[sync] photo → POST ${ApiConfig.shiftPhotos(shiftId)} '
+            'nonce=${row.nonceValue} → ${decision.action.name}'
+            '${error == null ? '' : ' ($error)'}');
+      }
+      switch (decision.action) {
         case FlushAction.success:
         case FlushAction.drop:
           await _discardPhoto(row); // also deletes the durable files
         case FlushAction.retry:
-          final next = nowMs + backoffDelay(row.attempts).inMilliseconds;
-          await _db.bumpPhoto(row.id, next);
+          if (_noServerResponse(error)) {
+            // Offline / no response — keep the photo, gate to now, DON'T strike.
+            await _db.gatePhoto(row.id, nowMs);
+          } else {
+            final next = nowMs + backoffDelay(row.attempts).inMilliseconds;
+            await _db.bumpPhoto(row.id, next);
+          }
+          // Transient failure — stop the cycle (network down); next reconnect
+          // retries. A per-row 422 rejection is a `drop`, not a `retry`.
+          return;
       }
     }
   }

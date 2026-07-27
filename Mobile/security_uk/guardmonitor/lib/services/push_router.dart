@@ -5,9 +5,10 @@
 ///
 /// FCM data values are always strings, so everything here parses from strings.
 ///
-/// Confirmed payloads (backend, 2026-06-24 — see docs/FCM_SETUP.md):
-///   WAKEFULNESS_CHALLENGE: { type, check_id, shift_id, code, response_seconds }
-///   PHOTO_REQUEST:         { type, request_id, shift_id, nonce_value }
+/// Confirmed payloads (backend — see docs/FCM_SETUP.md):
+///   WAKEFULNESS_CHALLENGE: { type, check_id, shift_id, code, response_seconds,
+///                            issued_at }   // issued_at added 2026-07-23
+///   PHOTO_REQUEST:         { type, request_id, shift_id, nonce_value, issued_at }
 ///   PHOTO_REVIEWED:        { type, request_id, shift_id, decision, note }
 library;
 

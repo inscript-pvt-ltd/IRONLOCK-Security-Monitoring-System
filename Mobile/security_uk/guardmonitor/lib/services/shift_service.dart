@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/api_config.dart';
 import '../models/api_response.dart';
 import '../models/current_shift_model.dart';
+import '../utils/server_time.dart';
 import 'api_client.dart';
 
 class ShiftService {
@@ -126,10 +127,11 @@ class ShiftService {
 
   /// Parses an ISO-8601 timestamp defensively — returns null for anything
   /// that isn't a parseable string (epoch ints, nulls, malformed values),
-  /// rather than throwing.
+  /// rather than throwing. Uses [parseServerUtc] so a zone-less server value is
+  /// read as UTC before localising, not as device-local (M5).
   DateTime? _parseTime(dynamic value) {
     if (value is! String) return null;
-    return DateTime.tryParse(value)?.toLocal();
+    return parseServerUtc(value)?.toLocal();
   }
 }
 

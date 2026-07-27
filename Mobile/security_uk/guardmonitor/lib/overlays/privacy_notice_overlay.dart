@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/app_providers.dart';
+import '../screens/legal/legal_screen.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_typography.dart';
@@ -119,7 +120,22 @@ class _PrivacyNoticeOverlayState extends ConsumerState<PrivacyNoticeOverlay>
                     ),
                   ),
 
-                  const SizedBox(height: AppSpacing.xl),
+                  const SizedBox(height: AppSpacing.base),
+                  Center(
+                    child: TextButton(
+                      onPressed: () => LegalScreen.open(context),
+                      child: Text(
+                        'Read the full Privacy Policy & Terms',
+                        style: AppType.label.copyWith(
+                          color: AppColors.gold,
+                          decoration: TextDecoration.underline,
+                          decorationColor: AppColors.gold,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: AppSpacing.base),
                   AppButton(
                     label: 'I Understand — Continue',
                     onPressed: _accept,

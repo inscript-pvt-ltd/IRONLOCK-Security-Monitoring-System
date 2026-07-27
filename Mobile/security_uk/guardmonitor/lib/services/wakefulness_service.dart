@@ -9,24 +9,15 @@ class WakefulnessService {
   final Dio _dio;
 
   /// Returns `true` if the code was correct (`PASSED`), `false` otherwise.
-  /// For an offline (locally-computed TOTP) challenge, pass [windowReference]
-  /// and set [isOffline] so the server can validate a code generated for an
-  /// earlier time step.
-  Future<bool> respond(
-    String checkId,
-    String code, {
-    int? windowReference,
-    bool isOffline = false,
-  }) async {
+  /// Online-only: [checkId] must be a real server check id from a push or the
+  /// pending poll. A schedule-fired (TOTP) challenge has no such id — flush it
+  /// via [submitOffline] instead.
+  Future<bool> respond(String checkId, String code) async {
     // Stamp the response time once, before any retry, so a retried POST still
     // reports when the guard actually answered — not when the retry fired.
     final body = {
       'code': code,
       'responded_at': DateTime.now().toUtc().toIso8601String(),
-      if (isOffline) ...{
-        'is_offline': true,
-        'window_reference': ?windowReference,
-      },
     };
 
     DioException? lastError;
@@ -58,25 +49,32 @@ class WakefulnessService {
     throw lastError!;
   }
 
-  /// Single-attempt offline replay used by the Phase 7 flush engine for a queued
-  /// answer. Posts the stored answer verbatim (the trusted [windowReference] and
-  /// the original [respondedAt]) and returns normally on success. Unlike
-  /// [respond] it does **not** swallow 4xx or retry internally — it rethrows the
-  /// `DioException` so the queue's own retry table ([classifyFlush]) can tell
-  /// `ALREADY_RESOLVED` (success) from a terminal rejection, and owns backoff.
+  /// Flushes a wakefulness answer that fired on-device from the TOTP schedule —
+  /// it has **no** server `check_id`, so it goes to
+  /// `POST /shifts/{shiftId}/wakefulness/offline`, keyed on the absolute
+  /// [windowReference]. The server re-derives the TOTP for that window and
+  /// records the check (pass or fail). Idempotent per (shift, window_reference):
+  /// a re-flush returns `reason: "ALREADY_RESOLVED"` on a 200.
+  ///
+  /// Used both by the immediate (online) path and by the Phase 7 flush engine on
+  /// reconnect. Unlike [respond] it does **not** swallow 4xx or retry internally
+  /// — it rethrows the `DioException` so the queue's own retry table
+  /// ([classifyFlush]) can tell a terminal rejection from a transient blip and
+  /// owns backoff. Any 200 (including `ALREADY_RESOLVED`) is "done".
   Future<void> submitOffline({
-    required String checkId,
+    required String shiftId,
     required String code,
     required int windowReference,
     required String respondedAt,
+    String? scheduledAt,
   }) async {
     await _dio.post<Map<String, dynamic>>(
-      ApiConfig.wakefulnessRespond(checkId),
+      ApiConfig.wakefulnessOffline(shiftId),
       data: {
-        'code': code,
-        'is_offline': true,
         'window_reference': windowReference,
+        'code': code,
         'responded_at': respondedAt,
+        'scheduled_at': ?scheduledAt,
       },
     );
   }

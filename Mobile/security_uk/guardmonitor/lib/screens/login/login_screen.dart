@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/api_response.dart';
 import '../../providers/app_providers.dart';
+import '../legal/legal_screen.dart';
 import '../../services/secure_storage_service.dart';
+import '../../services/shift_access_link.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_spacing.dart';
@@ -76,9 +78,15 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       final apiError = ApiError.fromDioException(e);
       setState(() {
         _loading = false;
-        _error = apiError.code == 'ACCOUNT_LOCKED'
-            ? '⚠ Account locked. Please contact your supervisor.'
-            : '⚠ ${apiError.message}';
+        _error = switch (apiError.code) {
+          'ACCOUNT_LOCKED' =>
+            '⚠ Account locked. Please contact your supervisor.',
+          // Localize the window-closed copy on-device — the server message can
+          // carry a wrong-zone wall-clock time (backend note 2026-07-23).
+          'LOGIN_WINDOW_CLOSED' =>
+            '⚠ ${ShiftAccessException.loginWindowMessage(apiError)}',
+          _ => '⚠ ${apiError.message}',
+        };
         _windowExpired = apiError.code == 'LOGIN_WINDOW_CLOSED' &&
             apiError.details?['reason'] == 'expired';
       });
@@ -258,18 +266,43 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     );
   }
 
-  Widget _buildMinimalLoader() {
+  Widget _buildMinimalLoader() => const _SpinningLoader();
+}
+
+/// The gold arc loader, actually spinning. Was previously painted against an
+/// `AlwaysStoppedAnimation(0)`, so the "Signing in…" arc sat frozen — it now
+/// rotates via a repeating controller.
+class _SpinningLoader extends StatefulWidget {
+  const _SpinningLoader();
+
+  @override
+  State<_SpinningLoader> createState() => _SpinningLoaderState();
+}
+
+class _SpinningLoaderState extends State<_SpinningLoader>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return SizedBox(
       width: 32,
       height: 32,
-      child: AnimatedBuilder(
-        animation: AlwaysStoppedAnimation(0),
-        builder: (context, child) {
-          return CustomPaint(
-            painter: _LoaderPainter(),
-            size: const Size(32, 32),
-          );
-        },
+      child: RotationTransition(
+        turns: _controller,
+        child: CustomPaint(
+          painter: _LoaderPainter(),
+          size: const Size(32, 32),
+        ),
       ),
     );
   }
@@ -330,17 +363,33 @@ class _MessageBox extends StatelessWidget {
 class _Footer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
+    final linkStyle = AppType.micro.copyWith(
+      color: AppColors.muted,
+      decoration: TextDecoration.underline,
+      decorationColor: AppColors.muted,
+    );
     return Column(
       children: [
-        Text(
-          'Privacy Notice · Ironlock Civil Engineering & Security',
-          style: AppType.micro.copyWith(color: AppColors.faint),
-          textAlign: TextAlign.center,
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            GestureDetector(
+              onTap: () => LegalScreen.open(context, initial: LegalDoc.privacy),
+              child: Text('Privacy Policy', style: linkStyle),
+            ),
+            Text('  ·  ',
+                style: AppType.micro.copyWith(color: AppColors.faint)),
+            GestureDetector(
+              onTap: () => LegalScreen.open(context, initial: LegalDoc.terms),
+              child: Text('Terms', style: linkStyle),
+            ),
+          ],
         ),
         const SizedBox(height: 4),
         Text(
-          'v4.0 · UK',
+          'Ironlock Civil Engineering & Security · v4.0 · UK',
           style: AppType.micro.copyWith(color: AppColors.faint),
+          textAlign: TextAlign.center,
         ),
       ],
     );
