@@ -334,4 +334,42 @@ return [
         'evidence_days' => (int) env('IRONLOCK_RETENTION_EVIDENCE_DAYS', 0),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | TEMPORARY — Play Store review bypass (REMOVE AFTER APP APPROVAL)
+    |--------------------------------------------------------------------------
+    |
+    | Google's Play Store reviewer may open the app at any unpredictable
+    | moment during review, so ONE designated guard account (matched by
+    | email, never by a global setting) is allowed a longer shift than the
+    | normal 16-hour WTR maximum and a login window wider than the normal
+    | ±15 minutes. Every other guard's shifts and login window are governed
+    | by the unmodified rules — this block only ever affects the single
+    | account named by `guard_email` below.
+    |
+    | Full mechanism, setup command, and the safe-removal checklist:
+    | Details/Important/PLAY_STORE_REVIEW_BYPASS.md
+    |
+    | - enabled: master switch. False (the default) makes the whole feature
+    |   inert even if guard_email is set — flip to true only while the
+    |   review is actually in progress, back to false the moment it's not.
+    |
+    | - guard_email: the one guard account the duration exception applies
+    |   to (case-insensitive match). The wider login window itself is NOT
+    |   driven by this config — it's a per-shift `checkin_override_until`
+    |   set by the setup command, so it never touches the shared
+    |   check_in_window_minutes value every other guard's login relies on.
+    |
+    | - max_duration_hours: the WTR ceiling for guard_email only, in place
+    |   of the normal 16-hour hard block. Everyone else still gets exactly
+    |   16 hours, unoverridable.
+    |
+    */
+
+    'review_bypass' => [
+        'enabled' => (bool) env('IRONLOCK_REVIEW_BYPASS_ENABLED', false),
+        'guard_email' => env('IRONLOCK_REVIEW_BYPASS_GUARD_EMAIL'),
+        'max_duration_hours' => (int) env('IRONLOCK_REVIEW_BYPASS_MAX_HOURS', 72),
+    ],
+
 ];
