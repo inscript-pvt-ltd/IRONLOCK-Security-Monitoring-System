@@ -210,6 +210,150 @@ actually wired up today.
 > Append a new entry here at the end of every session. Keep each entry short: what
 > changed, why, and what's left open. Most recent entry at the top.
 
+### 2026-07-24 (cont.) — Swipe-kill cold-start bugs: photo "out of nowhere" + missing site name
+
+- **What:** reported after removing the app from recents then reopening — details don't show,
+  refreshing fires a photo verification unprompted, site name blank. Same class as the
+  wakefulness fixes: state lost on cold start.
+- **Photo out of nowhere:** `PhotoScheduleNotifier._fired` was in-memory only (same bug as
+  wakefulness, for photos) → a restored schedule re-fired an already-handled mark. Now persisted
+  (`SecureStorageService.*PhotoFired`), restored before the first `checkSchedule`.
+- **Missing site name / details:** site name + schedule come from `currentShiftProvider`
+  (`CurrentShiftModel`), which was never persisted → null offline / on the null-for-active
+  backend bug. Added `toJson()` to the shift models (UTC round-trip); `CurrentShiftNotifier`
+  snapshots on every mutation and `restoreSnapshot()` rebuilds it on cold start before the
+  server fetch.
+- **190 tests pass** (was 186) · analyze clean. Not committed.
+
+### 2026-07-24 (cont.) — Cleared carried-over open items from HANDOFF (3 app fixes + 1 backend ask)
+
+- **What:** swept HANDOFF for still-open items and fixed the actionable app-side ones.
+- **Captive-portal / dead-Wi-Fi (was deferred):** added a server-**reachability** signal
+  (`serverReachableProvider` + Dio interceptor in `api_client.dart`); the offline welfare/photo
+  scheduler now gates on interface-online **AND** server-reachable, so a "connected but unreachable"
+  phone keeps prompting instead of going silent. Correct Online/Offline tagging preserved.
+- **Nonce pool prime on resume/restore:** `_primeOfflineBuffers` now also runs on the
+  `resumeFromServer` and `restoreFromDisk` paths (was start-only).
+- **Fired-marks dedup persisted:** survives an app-kill so a restored shift can't re-challenge /
+  double-count an already-answered welfare mark (`SecureStorageService.*WakefulnessFired`).
+- **Cosmetic:** login "Signing in…" arc now actually spins; "Use Photo→Try Again" flash was already
+  fixed in code.
+- **Backend ask:** `docs/BACKEND_ASKS_2026-07-24_LATE_OFFLINE_WINDOW.md` — accept late offline window
+  replays (matters more now that a guard can be effectively-offline longer).
+- **186 tests pass** (was 181) · analyze clean. Not committed. iOS Apple-account items untouched.
+
+### 2026-07-24 — Full manual code audit + fixes (1 high, 5 medium, 8 low)
+
+- **What:** deep file-by-file audit of the whole app → `guardmonitor/docs/CODE_AUDIT_2026-07-24.md`,
+  then fixed the findings.
+- **H1 (data loss):** offline **GPS + photos stranded when a shift ended** with a backlog (flush was
+  gated on the live shift). Now shift-independent — `dueGpsAll`/`duePhotosAll` + group by each row's
+  own `shiftId`. Regression tests added.
+- **Medium:** M1 `totalPending()` → COUNT(); M2 wakefulness code enforced exactly-4 (pad short, reject
+  >4 → no challenge); M3 offline-photo enqueue rolls back nonce+files on failure; M4/M5 new
+  `parseServerUtc` (zone-less→UTC) across shift model/services + safer shift parse.
+- **Low:** L3 sort schedule; L4 isolate-stable notification ids; L5 iOS 64-cap budget (per-type 31);
+  L6 shift-end exact alarm; L7 location gate only during active shift; L8 bound seen-review set.
+- **Backend asks** (non-blocking, all fixed defensively app-side): `docs/BACKEND_ASKS_2026-07-24.md`
+  — UTC `Z` on all datetimes, no partial shift with null `scheduled_*`, 4-char zero-padded codes.
+- **176 tests pass** (was 168) · analyze clean. Not committed. **Open:** L1/L2 (defunct-element crash)
+  need one on-device confirmation before removing the `main.dart` temp diagnostic.
+
+### 2026-07-22 — Fix: expired photo request re-opened into a dead-capture loop
+
+- **Symptom:** missed a photo verification → pull-to-refresh → "request expired, new request in
+  30s" → after 30s the camera reopened → capture failed "timed out / try again", looping.
+- **Cause:** (1) the server keeps a missed request `pending`, so the poll re-opened it every cycle;
+  (2) `PhotoNotifier.tick()` auto-reset the expired state to a fresh idle 90s window, re-opening a
+  live camera for a request whose nonce was already dead → `NONCE_EXPIRED` on upload.
+- **Fix:** home_screen tracks `_seenPhotoRequestIds` (a request opened once — done or missed — never
+  re-opens; a new id still does). `tick()` no longer resets expired→idle; added
+  `PhotoNotifier.reset()`. PhotoScreen auto-closes ~3s after expiry (instead of reopening) and
+  resets the provider on dispose. Removed the false "new request in Ns" copy.
+- **157 tests pass** · analyze clean. Not committed.
+
+### 2026-07-22 — On-screen sync indicator (verify offline flush untethered)
+
+- **Why:** offline can't be tested in debug — killing Wi-Fi drops the laptop VM-Service tether
+  and the debug app dies. Verification must work on a standalone (release) build with no logs.
+- Added `OfflineQueueDb.totalPending()` + `pendingSyncProvider` (refreshed by the home poll +
+  pull-to-refresh). Home shows a `_SyncStatusChip`: offline → "N saved offline"; online →
+  "Syncing N…" (spinner); on drain-to-zero a "Offline data synced" snackbar. Lets the
+  offline→reconnect flush be watched **on-device, no laptop**.
+- Also added **debug-only** `[sync] … → POST <endpoint> → success/retry/drop` logs in
+  `SyncFlushService` for tethered debug runs (shows each POST hitting the branded host).
+- Verify untethered: `flutter run --release --dart-define-from-file=config/prod.json` once over
+  cable → unplug → Airplane-mode toggle → watch the chip/snackbar (+ dashboard "Offline" tag).
+- **157 tests pass** · analyze clean. Not committed.
+
+### 2026-07-21 — Offline welfare/photo check notifications (were never scheduled)
+
+- **Bug:** no offline notifications for welfare/photo checks. The app never scheduled any —
+  offline checks only surfaced via the in-app 20s poll, which needs the app foregrounded.
+  Per the offline handoff §0, offline prompts must be **local notifications scheduled at shift
+  start** (a push can't reach an offline device).
+- **Fix:** `NotificationService` gained `scheduleWakefulnessChecks` / `schedulePhotoChecks`
+  (+ cancels) — one OS-scheduled notification per future schedule mark (exact alarm, inexact
+  fallback; best-effort, never throws). Wired into `WakefulnessScheduleNotifier` +
+  `PhotoScheduleNotifier` (`provisionFromJson` + `restore` schedule; `clear` cancels), and
+  cancelled in `AuthNotifier.signOut`. The OS fires these even backgrounded/killed/offline;
+  tapping opens the app → the existing scheduler raises the due check.
+- Tradeoffs: exact-alarm perm not declared (Play policy) so timing is inexact — add
+  `USE_EXACT_ALARM` if precise welfare timing is needed. When online **and** FCM delivering, the
+  server push + local notif can double-notify (in-app challenge still deduped by `check_id`).
+- **157 tests pass** · `flutter analyze` clean. Not committed. Open: on-device verify a reminder
+  fires while backgrounded/offline and opens the right check.
+
+### 2026-07-21 — Field fixes: wakefulness digit entry, location-off gate, pull-to-refresh
+
+Three device-reported issues.
+- **🐞 Wakefulness code showed as 4 digits in the notification but only 3 were enterable.**
+  Cause: a server push whose `data.code` dropped a leading zero (`472` where the tray text
+  is `0472`), against a fixed 4-cell pin — the guard could never fill the 4th cell. Codes
+  are **always exactly 4 digits** (online + offline), so the fix **normalises every incoming
+  code to 4** on ingest: `WakefulnessNotifier._normalizeCode` strips non-digits and
+  zero-pads to `kWakefulnessDigits` (4), applied in `trigger()` and `triggerLocal()`. The pin
+  stays fixed at 4 — a 3-digit code is **never** shown or accepted; it's displayed and matched
+  as `0472`. Files: `wakefulness_provider.dart`, `wakefulness_overlay.dart` (fixed-4 pin).
+  *Backend ask: send `data.code` already zero-padded to 4 so it matches the notification body.*
+- **📍 Location turned off mid-shift left the app usable but blind.** Added
+  `locationServiceEnabledProvider` (`gps_service.dart`) fed by
+  `Geolocator.getServiceStatusStream()` + an `isLocationServiceEnabled()` seed, refreshed
+  each 20s poll (catches a backgrounded toggle). When off, a non-dismissible
+  `LocationRequiredOverlay` (new) covers the home screen with an "Open Location Settings"
+  button and auto-clears when location returns. Distinct from the existing
+  permission-denied banner (this is the OS master toggle).
+- **🔄 Pull-to-refresh** on the home screen (both active + pre-shift scrolls) via
+  `RefreshIndicator` → `_pollBackend` (`AlwaysScrollableScrollPhysics`), so a guard can
+  force a shift/check/location refresh instead of waiting for the 20s tick.
+- **154 tests pass** (was 151; +3 code-length regression tests) · `flutter analyze` clean.
+  Not committed. Open: on-device verify the location gate (Control Center toggle) and the
+  short-code entry.
+
+### 2026-07-21 — Offline wakefulness flush endpoint + wakefulness/pending poll
+
+- Implemented the two deltas from `docs/FLUTTER_HANDOFF_WAKEFULNESS_OFFLINE_AND_UX.md`
+  (2026-07-06). Reviewed the updated API guide first: early-end approval, checked_in/
+  missed, photo schedule, reviews, push routing were **already done** — only these two
+  wakefulness items were missing.
+- **🔴 Fixed a data-loss bug:** schedule-fired (TOTP) offline answers have no server
+  `check_id`, but the app was POSTing a synthetic id to `/wakefulness/{id}/respond` →
+  404 → dropped. Now routed to the new **`POST /shifts/{id}/wakefulness/offline`**
+  (`{window_reference, code, scheduled_at?, responded_at?}`, idempotent per
+  (shift, window)). Schedule-fired answers submit immediately when online, enqueue when
+  offline; real push challenges keep `/respond`.
+- Files: `api_config.dart` (2 new endpoints), `wakefulness_service.dart` (`submitOffline`
+  rewritten, `respond` cleaned online-only), `wakefulness_provider.dart` (`_report`
+  routing + `scheduledAt`), `offline_queue_db.dart` (`WakefulnessQueue` +shiftId/scheduledAt,
+  schema 1→2 destructive migration, .g.dart regenerated), `sync_flush_service.dart`.
+- **🟠 New `GET /shifts/{id}/wakefulness/pending` poll** in `home_screen._pollBackend`
+  (tolerant `extractPendingWakefulness` parser → `/received` → raise sheet) — the push-miss
+  fallback that makes the in-app prompt reliable, notably iOS without APNs.
+- **151 tests pass** (was 143; +8) · `flutter analyze` clean. Not committed.
+- Open: on-device verification (offline answer → reconnect → "Offline" on the timeline;
+  pending-poll raising the sheet on iOS). Mock backend doesn't serve the two new endpoints
+  yet (poll swallows the 404 — harmless locally).
+
 ### 2026-06-22 — Low-severity audit fixes, round 2 (deferred items)
 
 - Worked through the 9 previously-deferred Lows one by one:

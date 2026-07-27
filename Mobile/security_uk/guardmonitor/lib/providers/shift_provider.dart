@@ -1,9 +1,16 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/current_shift_model.dart';
 import '../services/gps_service.dart';
+import '../services/nonce_pool_service.dart';
 import '../services/notification_service.dart';
+import '../services/secure_storage_service.dart';
 import '../services/shift_service.dart';
+import '../services/time_anchor_service.dart';
 import 'photo_schedule_provider.dart';
 import 'ui_providers.dart';
 import 'wakefulness_provider.dart';
@@ -22,8 +29,13 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       // shift — doing so would disable the END button and break auto-resume.
       if (result == null && ref.read(shiftProvider).active) return;
       state = _withPreservedPendingLock(result);
-    } catch (_) {
-      // Not critical — guard can still see the cached state; next poll/resume retries.
+      _persistSnapshot();
+    } catch (e) {
+      // Not critical — the cached shift state is kept (a malformed poll can't
+      // blank an in-progress shift); next poll/resume retries. Logged so a
+      // parse failure (e.g. a null/zone-less scheduled time — M4/M5) is visible
+      // instead of silently swallowed.
+      if (kDebugMode) debugPrint('[shift] fetch parse/transport error: $e');
     }
   }
 
@@ -65,6 +77,28 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
     ref.read(wakefulnessScheduleProvider.notifier)
         .provisionFromJson(result.wakefulness);
     ref.read(photoScheduleProvider.notifier).provisionFromJson(result.photos);
+    // Phase 7: seed the offline nonce pool + NTP anchor NOW, at start — not only
+    // on the 20s poll's refill. A guard who drops offline in the first seconds of
+    // a shift (before the first poll) would otherwise have an empty pool and be
+    // unable to queue an offline verification photo ("reconnect and try again").
+    // Detached + fully guarded: priming the offline buffer must never block or
+    // fail starting a shift (the await is inside the try so an async throw — e.g.
+    // no DB/secure-storage in a unit test — is swallowed too).
+    Future<void>(() async {
+      try {
+        // Only prefetch offline-photo nonces when photo verification is actually
+        // ON for this shift (per-site setting → non-empty photos.schedule, so the
+        // provider is armed). An empty schedule means photos are off — a prefetch
+        // would be a wasted round-trip + wasted storage. `provisionFromJson` above
+        // has already set the state synchronously by now. Manual/online photo
+        // requests use the request's own nonce (not the pool), so skipping the
+        // prefetch never blocks a supervisor-triggered capture.
+        if (ref.read(photoScheduleProvider) != null) {
+          await ref.read(noncePoolServiceProvider).refillIfLow(current.id);
+        }
+        await ref.read(timeAnchorServiceProvider).ensureFresh();
+      } catch (_) {}
+    }).ignore();
     final updated = CurrentShiftModel(
       id: current.id,
       reference: current.reference,
@@ -81,6 +115,7 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       notes: current.notes,
     );
     state = updated;
+    _persistSnapshot(); // now active — snapshot so a cold start shows the shift
     return updated;
   }
 
@@ -120,6 +155,7 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       notes: current.notes,
     );
     state = updated;
+    _persistSnapshot(); // completed → clears the snapshot
     return updated;
   }
 
@@ -145,9 +181,47 @@ class CurrentShiftNotifier extends Notifier<CurrentShiftModel?> {
       earlyEndReason: reason,
       earlyEndNote: note,
     );
+    _persistSnapshot();
   }
 
-  void clear() => state = null;
+  void clear() {
+    state = null;
+    _persistSnapshot(); // clears the persisted snapshot
+  }
+
+  /// Mirrors the current-shift object to disk while it's live (or clears it once
+  /// the shift closes / goes null), so a cold start can render the full shift
+  /// card — site name, schedule, overdue banner — offline. Fire-and-forget: a
+  /// storage failure (or no platform in a unit test) must never propagate out of
+  /// a shift mutation.
+  void _persistSnapshot() {
+    final s = state;
+    final live = s != null &&
+        s.status != 'completed' &&
+        s.status != 'cancelled' &&
+        s.status != 'missed';
+    final future = live
+        ? SecureStorageService.saveCurrentShift(jsonEncode(s.toJson()))
+        : SecureStorageService.clearCurrentShift();
+    unawaited(future.catchError((Object _) {}));
+  }
+
+  /// Restores the persisted current-shift snapshot on a cold start (BEFORE the
+  /// server fetch), so the shift card shows the site name + schedule immediately
+  /// even when `GET /shifts/current` is null-for-active or the device is offline.
+  /// A later successful fetch overwrites it; a null/failed fetch keeps it (see
+  /// [fetch]'s null-guard). No-op if a shift is already loaded in memory.
+  Future<void> restoreSnapshot() async {
+    if (state != null) return;
+    final raw = await SecureStorageService.getCurrentShift();
+    if (raw == null) return;
+    try {
+      state =
+          CurrentShiftModel.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      // Malformed/partial snapshot — ignore; the server fetch will populate it.
+    }
+  }
 }
 
 final currentShiftProvider =
@@ -196,6 +270,35 @@ class ShiftState {
       photosPassed: photosPassed ?? this.photosPassed,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'active': active,
+        'start_time': startTime?.toUtc().toIso8601String(),
+        'id': id,
+        'shift_ref': shiftRef,
+        'welfare_total': welfareChecksTotal,
+        'welfare_passed': welfareChecksPassed,
+        'photos_total': photosTotal,
+        'photos_passed': photosPassed,
+      };
+
+  /// Rebuilds a persisted shift. Returns null unless it's a genuinely **active**
+  /// shift with an id — an inactive/blank blob is nothing to restore.
+  static ShiftState? fromJson(Map<String, dynamic> json) {
+    final id = json['id'] as String?;
+    if (json['active'] != true || id == null) return null;
+    final startRaw = json['start_time'];
+    return ShiftState(
+      active: true,
+      startTime: startRaw is String ? DateTime.tryParse(startRaw)?.toLocal() : null,
+      id: id,
+      shiftRef: json['shift_ref'] as String?,
+      welfareChecksTotal: (json['welfare_total'] as num?)?.toInt() ?? 0,
+      welfareChecksPassed: (json['welfare_passed'] as num?)?.toInt() ?? 0,
+      photosTotal: (json['photos_total'] as num?)?.toInt() ?? 0,
+      photosPassed: (json['photos_passed'] as num?)?.toInt() ?? 0,
+    );
+  }
 }
 
 class ShiftNotifier extends Notifier<ShiftState> {
@@ -229,6 +332,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
       id: shiftId,
       shiftRef: updated?.displayRef ?? fallback?.displayRef ?? state.shiftRef,
     );
+    _persist();
     if (shiftId != null) {
       ref.read(gpsServiceProvider).startCapture(shiftId).then(
             (tracking) =>
@@ -283,6 +387,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
     ref.read(wakefulnessProvider.notifier).clearHistory();
     ref.read(locationDeniedProvider.notifier).set(false);
     state = const ShiftState();
+    _persist(); // clears the persisted shift so a cold start won't restore it
   }
 
   /// The server closed the shift on its side while the app still showed it
@@ -302,6 +407,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
     ref.read(wakefulnessProvider.notifier).clearHistory();
     ref.read(locationDeniedProvider.notifier).set(false);
     state = const ShiftState();
+    _persist(); // clears the persisted shift (server closed it)
   }
 
   /// Called when the server reports a shift as active but local state shows
@@ -315,10 +421,12 @@ class ShiftNotifier extends Notifier<ShiftState> {
       id: shift.id,
       shiftRef: shift.displayRef,
     );
+    _persist();
     ref.read(gpsServiceProvider).startCapture(shift.id).then(
           (tracking) =>
               ref.read(locationDeniedProvider.notifier).set(!tracking),
         );
+    _primeOfflineBuffers(shift.id);
     // Re-arm the wakefulness TOTP schedule + offline-photo schedule from secure
     // storage (the start response isn't replayed on resume).
     ref.read(wakefulnessScheduleProvider.notifier).restore();
@@ -331,6 +439,21 @@ class ShiftNotifier extends Notifier<ShiftState> {
     );
   }
 
+  /// Seeds the offline nonce pool + NTP anchor for [shiftId] so a guard who
+  /// drops offline right after resuming/restoring a shift can still capture and
+  /// sign a verification photo (a photo has no offline-durable credential like
+  /// wakefulness's TOTP seed — without a pooled nonce it can't be queued).
+  /// `start()` primes these too; resume/restore paths were the gap. Detached +
+  /// fully guarded so priming the buffer can never block or fail the shift.
+  void _primeOfflineBuffers(String shiftId) {
+    Future<void>(() async {
+      try {
+        await ref.read(noncePoolServiceProvider).refillIfLow(shiftId);
+        await ref.read(timeAnchorServiceProvider).ensureFresh();
+      } catch (_) {}
+    }).ignore();
+  }
+
   void recordWelfareCheck({required bool passed}) {
     state = state.copyWith(
       welfareChecksTotal: state.welfareChecksTotal + 1,
@@ -338,6 +461,7 @@ class ShiftNotifier extends Notifier<ShiftState> {
           ? state.welfareChecksPassed + 1
           : state.welfareChecksPassed,
     );
+    _persist();
   }
 
   void recordPhoto({required bool passed}) {
@@ -345,6 +469,50 @@ class ShiftNotifier extends Notifier<ShiftState> {
       photosTotal: state.photosTotal + 1,
       photosPassed: passed ? state.photosPassed + 1 : state.photosPassed,
     );
+    _persist();
+  }
+
+  /// Mirrors the current shift to disk (or clears it when inactive) so a cold
+  /// start after a swipe-kill can restore it without the server. Fire-and-forget;
+  /// a storage failure must never break the shift flow.
+  void _persist() {
+    // Best-effort — a storage failure (or no platform in a unit test) must never
+    // propagate out of a shift mutation.
+    final future = state.active
+        ? SecureStorageService.saveShiftState(jsonEncode(state.toJson()))
+        : SecureStorageService.clearShiftState();
+    unawaited(future.catchError((Object _) {}));
+  }
+
+  /// Restores an active shift saved on the device (after the app was swipe-killed
+  /// and cold-started), independent of `GET /shifts/current` — which can be null
+  /// for an active shift, or simply unreachable when offline. Restarts GPS,
+  /// re-arms the wakefulness/photo schedules + the end reminder, exactly like
+  /// [resumeFromServer]. A later server poll can still CLOSE it via
+  /// [reconcileServerClosed] if it was ended/cancelled while the app was dead.
+  Future<void> restoreFromDisk() async {
+    if (state.active) return; // already have a live shift in memory
+    final raw = await SecureStorageService.getShiftState();
+    if (raw == null) return;
+    ShiftState? restored;
+    try {
+      restored = ShiftState.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      return;
+    }
+    if (restored == null) return;
+    state = restored;
+    final id = restored.id;
+    if (id != null) {
+      ref.read(gpsServiceProvider).startCapture(id).then(
+            (tracking) =>
+                ref.read(locationDeniedProvider.notifier).set(!tracking),
+          );
+      _primeOfflineBuffers(id);
+    }
+    ref.read(wakefulnessScheduleProvider.notifier).restore();
+    ref.read(photoScheduleProvider.notifier).restore();
+    if (kDebugMode) debugPrint('[shift] restored active shift from disk (id=$id)');
   }
 }
 

@@ -1,3 +1,4 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guardmonitor/providers/photo_provider.dart';
 
@@ -56,6 +57,33 @@ void main() {
     test('default window is the 90s contract value', () {
       expect(kPhotoWindowSeconds, 90);
       expect(photoSecondsRemaining(now: now), 90);
+    });
+  });
+
+  // An OFFLINE scheduled capture used to open with no countdown, so the overlay
+  // could sit open forever if the guard never captured. It now runs the same
+  // fixed 90s window and expires — closing the screen.
+  group('offline scheduled capture window', () {
+    late ProviderContainer c;
+    setUp(() => c = ProviderContainer());
+    tearDown(() => c.dispose());
+
+    test('opens with a full 90s window', () {
+      c.read(photoProvider.notifier).openScheduled();
+      final s = c.read(photoProvider);
+      expect(s.status, PhotoStatus.idle);
+      expect(s.secondsRemaining, 90);
+      expect(s.windowSeconds, 90);
+    });
+
+    test('ticks down to expiry (overlay can no longer linger forever)', () {
+      final n = c.read(photoProvider.notifier);
+      n.openScheduled();
+      for (var i = 0; i < 90; i++) {
+        n.tick();
+      }
+      expect(c.read(photoProvider).status, PhotoStatus.expired);
+      expect(c.read(photoProvider).secondsRemaining, 0);
     });
   });
 }

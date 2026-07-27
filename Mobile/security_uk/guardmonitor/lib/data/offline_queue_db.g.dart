@@ -625,6 +625,17 @@ class $WakefulnessQueueTable extends WakefulnessQueue
       'PRIMARY KEY AUTOINCREMENT',
     ),
   );
+  static const VerificationMeta _shiftIdMeta = const VerificationMeta(
+    'shiftId',
+  );
+  @override
+  late final GeneratedColumn<String> shiftId = GeneratedColumn<String>(
+    'shift_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
   static const VerificationMeta _checkIdMeta = const VerificationMeta(
     'checkId',
   );
@@ -655,6 +666,17 @@ class $WakefulnessQueueTable extends WakefulnessQueue
     false,
     type: DriftSqlType.int,
     requiredDuringInsert: true,
+  );
+  static const VerificationMeta _scheduledAtMeta = const VerificationMeta(
+    'scheduledAt',
+  );
+  @override
+  late final GeneratedColumn<String> scheduledAt = GeneratedColumn<String>(
+    'scheduled_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
   );
   static const VerificationMeta _respondedAtMeta = const VerificationMeta(
     'respondedAt',
@@ -705,9 +727,11 @@ class $WakefulnessQueueTable extends WakefulnessQueue
   @override
   List<GeneratedColumn> get $columns => [
     id,
+    shiftId,
     checkId,
     code,
     windowReference,
+    scheduledAt,
     respondedAt,
     attempts,
     nextAttempt,
@@ -727,6 +751,14 @@ class $WakefulnessQueueTable extends WakefulnessQueue
     final data = instance.toColumns(true);
     if (data.containsKey('id')) {
       context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('shift_id')) {
+      context.handle(
+        _shiftIdMeta,
+        shiftId.isAcceptableOrUnknown(data['shift_id']!, _shiftIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_shiftIdMeta);
     }
     if (data.containsKey('check_id')) {
       context.handle(
@@ -754,6 +786,15 @@ class $WakefulnessQueueTable extends WakefulnessQueue
       );
     } else if (isInserting) {
       context.missing(_windowReferenceMeta);
+    }
+    if (data.containsKey('scheduled_at')) {
+      context.handle(
+        _scheduledAtMeta,
+        scheduledAt.isAcceptableOrUnknown(
+          data['scheduled_at']!,
+          _scheduledAtMeta,
+        ),
+      );
     }
     if (data.containsKey('responded_at')) {
       context.handle(
@@ -802,6 +843,10 @@ class $WakefulnessQueueTable extends WakefulnessQueue
         DriftSqlType.int,
         data['${effectivePrefix}id'],
       )!,
+      shiftId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}shift_id'],
+      )!,
       checkId: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}check_id'],
@@ -814,6 +859,10 @@ class $WakefulnessQueueTable extends WakefulnessQueue
         DriftSqlType.int,
         data['${effectivePrefix}window_reference'],
       )!,
+      scheduledAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}scheduled_at'],
+      ),
       respondedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}responded_at'],
@@ -842,18 +891,22 @@ class $WakefulnessQueueTable extends WakefulnessQueue
 class WakefulnessQueueData extends DataClass
     implements Insertable<WakefulnessQueueData> {
   final int id;
+  final String shiftId;
   final String checkId;
   final String code;
   final int windowReference;
+  final String? scheduledAt;
   final String respondedAt;
   final int attempts;
   final int nextAttempt;
   final int createdAt;
   const WakefulnessQueueData({
     required this.id,
+    required this.shiftId,
     required this.checkId,
     required this.code,
     required this.windowReference,
+    this.scheduledAt,
     required this.respondedAt,
     required this.attempts,
     required this.nextAttempt,
@@ -863,9 +916,13 @@ class WakefulnessQueueData extends DataClass
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['id'] = Variable<int>(id);
+    map['shift_id'] = Variable<String>(shiftId);
     map['check_id'] = Variable<String>(checkId);
     map['code'] = Variable<String>(code);
     map['window_reference'] = Variable<int>(windowReference);
+    if (!nullToAbsent || scheduledAt != null) {
+      map['scheduled_at'] = Variable<String>(scheduledAt);
+    }
     map['responded_at'] = Variable<String>(respondedAt);
     map['attempts'] = Variable<int>(attempts);
     map['next_attempt'] = Variable<int>(nextAttempt);
@@ -876,9 +933,13 @@ class WakefulnessQueueData extends DataClass
   WakefulnessQueueCompanion toCompanion(bool nullToAbsent) {
     return WakefulnessQueueCompanion(
       id: Value(id),
+      shiftId: Value(shiftId),
       checkId: Value(checkId),
       code: Value(code),
       windowReference: Value(windowReference),
+      scheduledAt: scheduledAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(scheduledAt),
       respondedAt: Value(respondedAt),
       attempts: Value(attempts),
       nextAttempt: Value(nextAttempt),
@@ -893,9 +954,11 @@ class WakefulnessQueueData extends DataClass
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return WakefulnessQueueData(
       id: serializer.fromJson<int>(json['id']),
+      shiftId: serializer.fromJson<String>(json['shiftId']),
       checkId: serializer.fromJson<String>(json['checkId']),
       code: serializer.fromJson<String>(json['code']),
       windowReference: serializer.fromJson<int>(json['windowReference']),
+      scheduledAt: serializer.fromJson<String?>(json['scheduledAt']),
       respondedAt: serializer.fromJson<String>(json['respondedAt']),
       attempts: serializer.fromJson<int>(json['attempts']),
       nextAttempt: serializer.fromJson<int>(json['nextAttempt']),
@@ -907,9 +970,11 @@ class WakefulnessQueueData extends DataClass
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
       'id': serializer.toJson<int>(id),
+      'shiftId': serializer.toJson<String>(shiftId),
       'checkId': serializer.toJson<String>(checkId),
       'code': serializer.toJson<String>(code),
       'windowReference': serializer.toJson<int>(windowReference),
+      'scheduledAt': serializer.toJson<String?>(scheduledAt),
       'respondedAt': serializer.toJson<String>(respondedAt),
       'attempts': serializer.toJson<int>(attempts),
       'nextAttempt': serializer.toJson<int>(nextAttempt),
@@ -919,18 +984,22 @@ class WakefulnessQueueData extends DataClass
 
   WakefulnessQueueData copyWith({
     int? id,
+    String? shiftId,
     String? checkId,
     String? code,
     int? windowReference,
+    Value<String?> scheduledAt = const Value.absent(),
     String? respondedAt,
     int? attempts,
     int? nextAttempt,
     int? createdAt,
   }) => WakefulnessQueueData(
     id: id ?? this.id,
+    shiftId: shiftId ?? this.shiftId,
     checkId: checkId ?? this.checkId,
     code: code ?? this.code,
     windowReference: windowReference ?? this.windowReference,
+    scheduledAt: scheduledAt.present ? scheduledAt.value : this.scheduledAt,
     respondedAt: respondedAt ?? this.respondedAt,
     attempts: attempts ?? this.attempts,
     nextAttempt: nextAttempt ?? this.nextAttempt,
@@ -939,11 +1008,15 @@ class WakefulnessQueueData extends DataClass
   WakefulnessQueueData copyWithCompanion(WakefulnessQueueCompanion data) {
     return WakefulnessQueueData(
       id: data.id.present ? data.id.value : this.id,
+      shiftId: data.shiftId.present ? data.shiftId.value : this.shiftId,
       checkId: data.checkId.present ? data.checkId.value : this.checkId,
       code: data.code.present ? data.code.value : this.code,
       windowReference: data.windowReference.present
           ? data.windowReference.value
           : this.windowReference,
+      scheduledAt: data.scheduledAt.present
+          ? data.scheduledAt.value
+          : this.scheduledAt,
       respondedAt: data.respondedAt.present
           ? data.respondedAt.value
           : this.respondedAt,
@@ -959,9 +1032,11 @@ class WakefulnessQueueData extends DataClass
   String toString() {
     return (StringBuffer('WakefulnessQueueData(')
           ..write('id: $id, ')
+          ..write('shiftId: $shiftId, ')
           ..write('checkId: $checkId, ')
           ..write('code: $code, ')
           ..write('windowReference: $windowReference, ')
+          ..write('scheduledAt: $scheduledAt, ')
           ..write('respondedAt: $respondedAt, ')
           ..write('attempts: $attempts, ')
           ..write('nextAttempt: $nextAttempt, ')
@@ -973,9 +1048,11 @@ class WakefulnessQueueData extends DataClass
   @override
   int get hashCode => Object.hash(
     id,
+    shiftId,
     checkId,
     code,
     windowReference,
+    scheduledAt,
     respondedAt,
     attempts,
     nextAttempt,
@@ -986,9 +1063,11 @@ class WakefulnessQueueData extends DataClass
       identical(this, other) ||
       (other is WakefulnessQueueData &&
           other.id == this.id &&
+          other.shiftId == this.shiftId &&
           other.checkId == this.checkId &&
           other.code == this.code &&
           other.windowReference == this.windowReference &&
+          other.scheduledAt == this.scheduledAt &&
           other.respondedAt == this.respondedAt &&
           other.attempts == this.attempts &&
           other.nextAttempt == this.nextAttempt &&
@@ -997,18 +1076,22 @@ class WakefulnessQueueData extends DataClass
 
 class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
   final Value<int> id;
+  final Value<String> shiftId;
   final Value<String> checkId;
   final Value<String> code;
   final Value<int> windowReference;
+  final Value<String?> scheduledAt;
   final Value<String> respondedAt;
   final Value<int> attempts;
   final Value<int> nextAttempt;
   final Value<int> createdAt;
   const WakefulnessQueueCompanion({
     this.id = const Value.absent(),
+    this.shiftId = const Value.absent(),
     this.checkId = const Value.absent(),
     this.code = const Value.absent(),
     this.windowReference = const Value.absent(),
+    this.scheduledAt = const Value.absent(),
     this.respondedAt = const Value.absent(),
     this.attempts = const Value.absent(),
     this.nextAttempt = const Value.absent(),
@@ -1016,23 +1099,28 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
   });
   WakefulnessQueueCompanion.insert({
     this.id = const Value.absent(),
+    required String shiftId,
     required String checkId,
     required String code,
     required int windowReference,
+    this.scheduledAt = const Value.absent(),
     required String respondedAt,
     this.attempts = const Value.absent(),
     this.nextAttempt = const Value.absent(),
     required int createdAt,
-  }) : checkId = Value(checkId),
+  }) : shiftId = Value(shiftId),
+       checkId = Value(checkId),
        code = Value(code),
        windowReference = Value(windowReference),
        respondedAt = Value(respondedAt),
        createdAt = Value(createdAt);
   static Insertable<WakefulnessQueueData> custom({
     Expression<int>? id,
+    Expression<String>? shiftId,
     Expression<String>? checkId,
     Expression<String>? code,
     Expression<int>? windowReference,
+    Expression<String>? scheduledAt,
     Expression<String>? respondedAt,
     Expression<int>? attempts,
     Expression<int>? nextAttempt,
@@ -1040,9 +1128,11 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
+      if (shiftId != null) 'shift_id': shiftId,
       if (checkId != null) 'check_id': checkId,
       if (code != null) 'code': code,
       if (windowReference != null) 'window_reference': windowReference,
+      if (scheduledAt != null) 'scheduled_at': scheduledAt,
       if (respondedAt != null) 'responded_at': respondedAt,
       if (attempts != null) 'attempts': attempts,
       if (nextAttempt != null) 'next_attempt': nextAttempt,
@@ -1052,9 +1142,11 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
 
   WakefulnessQueueCompanion copyWith({
     Value<int>? id,
+    Value<String>? shiftId,
     Value<String>? checkId,
     Value<String>? code,
     Value<int>? windowReference,
+    Value<String?>? scheduledAt,
     Value<String>? respondedAt,
     Value<int>? attempts,
     Value<int>? nextAttempt,
@@ -1062,9 +1154,11 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
   }) {
     return WakefulnessQueueCompanion(
       id: id ?? this.id,
+      shiftId: shiftId ?? this.shiftId,
       checkId: checkId ?? this.checkId,
       code: code ?? this.code,
       windowReference: windowReference ?? this.windowReference,
+      scheduledAt: scheduledAt ?? this.scheduledAt,
       respondedAt: respondedAt ?? this.respondedAt,
       attempts: attempts ?? this.attempts,
       nextAttempt: nextAttempt ?? this.nextAttempt,
@@ -1078,6 +1172,9 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
     if (id.present) {
       map['id'] = Variable<int>(id.value);
     }
+    if (shiftId.present) {
+      map['shift_id'] = Variable<String>(shiftId.value);
+    }
     if (checkId.present) {
       map['check_id'] = Variable<String>(checkId.value);
     }
@@ -1086,6 +1183,9 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
     }
     if (windowReference.present) {
       map['window_reference'] = Variable<int>(windowReference.value);
+    }
+    if (scheduledAt.present) {
+      map['scheduled_at'] = Variable<String>(scheduledAt.value);
     }
     if (respondedAt.present) {
       map['responded_at'] = Variable<String>(respondedAt.value);
@@ -1106,9 +1206,11 @@ class WakefulnessQueueCompanion extends UpdateCompanion<WakefulnessQueueData> {
   String toString() {
     return (StringBuffer('WakefulnessQueueCompanion(')
           ..write('id: $id, ')
+          ..write('shiftId: $shiftId, ')
           ..write('checkId: $checkId, ')
           ..write('code: $code, ')
           ..write('windowReference: $windowReference, ')
+          ..write('scheduledAt: $scheduledAt, ')
           ..write('respondedAt: $respondedAt, ')
           ..write('attempts: $attempts, ')
           ..write('nextAttempt: $nextAttempt, ')
@@ -2513,9 +2615,11 @@ typedef $$GpsQueueTableProcessedTableManager =
 typedef $$WakefulnessQueueTableCreateCompanionBuilder =
     WakefulnessQueueCompanion Function({
       Value<int> id,
+      required String shiftId,
       required String checkId,
       required String code,
       required int windowReference,
+      Value<String?> scheduledAt,
       required String respondedAt,
       Value<int> attempts,
       Value<int> nextAttempt,
@@ -2524,9 +2628,11 @@ typedef $$WakefulnessQueueTableCreateCompanionBuilder =
 typedef $$WakefulnessQueueTableUpdateCompanionBuilder =
     WakefulnessQueueCompanion Function({
       Value<int> id,
+      Value<String> shiftId,
       Value<String> checkId,
       Value<String> code,
       Value<int> windowReference,
+      Value<String?> scheduledAt,
       Value<String> respondedAt,
       Value<int> attempts,
       Value<int> nextAttempt,
@@ -2547,6 +2653,11 @@ class $$WakefulnessQueueTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get shiftId => $composableBuilder(
+    column: $table.shiftId,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<String> get checkId => $composableBuilder(
     column: $table.checkId,
     builder: (column) => ColumnFilters(column),
@@ -2559,6 +2670,11 @@ class $$WakefulnessQueueTableFilterComposer
 
   ColumnFilters<int> get windowReference => $composableBuilder(
     column: $table.windowReference,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get scheduledAt => $composableBuilder(
+    column: $table.scheduledAt,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2597,6 +2713,11 @@ class $$WakefulnessQueueTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get shiftId => $composableBuilder(
+    column: $table.shiftId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get checkId => $composableBuilder(
     column: $table.checkId,
     builder: (column) => ColumnOrderings(column),
@@ -2609,6 +2730,11 @@ class $$WakefulnessQueueTableOrderingComposer
 
   ColumnOrderings<int> get windowReference => $composableBuilder(
     column: $table.windowReference,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get scheduledAt => $composableBuilder(
+    column: $table.scheduledAt,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -2645,6 +2771,9 @@ class $$WakefulnessQueueTableAnnotationComposer
   GeneratedColumn<int> get id =>
       $composableBuilder(column: $table.id, builder: (column) => column);
 
+  GeneratedColumn<String> get shiftId =>
+      $composableBuilder(column: $table.shiftId, builder: (column) => column);
+
   GeneratedColumn<String> get checkId =>
       $composableBuilder(column: $table.checkId, builder: (column) => column);
 
@@ -2653,6 +2782,11 @@ class $$WakefulnessQueueTableAnnotationComposer
 
   GeneratedColumn<int> get windowReference => $composableBuilder(
     column: $table.windowReference,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get scheduledAt => $composableBuilder(
+    column: $table.scheduledAt,
     builder: (column) => column,
   );
 
@@ -2711,18 +2845,22 @@ class $$WakefulnessQueueTableTableManager
           updateCompanionCallback:
               ({
                 Value<int> id = const Value.absent(),
+                Value<String> shiftId = const Value.absent(),
                 Value<String> checkId = const Value.absent(),
                 Value<String> code = const Value.absent(),
                 Value<int> windowReference = const Value.absent(),
+                Value<String?> scheduledAt = const Value.absent(),
                 Value<String> respondedAt = const Value.absent(),
                 Value<int> attempts = const Value.absent(),
                 Value<int> nextAttempt = const Value.absent(),
                 Value<int> createdAt = const Value.absent(),
               }) => WakefulnessQueueCompanion(
                 id: id,
+                shiftId: shiftId,
                 checkId: checkId,
                 code: code,
                 windowReference: windowReference,
+                scheduledAt: scheduledAt,
                 respondedAt: respondedAt,
                 attempts: attempts,
                 nextAttempt: nextAttempt,
@@ -2731,18 +2869,22 @@ class $$WakefulnessQueueTableTableManager
           createCompanionCallback:
               ({
                 Value<int> id = const Value.absent(),
+                required String shiftId,
                 required String checkId,
                 required String code,
                 required int windowReference,
+                Value<String?> scheduledAt = const Value.absent(),
                 required String respondedAt,
                 Value<int> attempts = const Value.absent(),
                 Value<int> nextAttempt = const Value.absent(),
                 required int createdAt,
               }) => WakefulnessQueueCompanion.insert(
                 id: id,
+                shiftId: shiftId,
                 checkId: checkId,
                 code: code,
                 windowReference: windowReference,
+                scheduledAt: scheduledAt,
                 respondedAt: respondedAt,
                 attempts: attempts,
                 nextAttempt: nextAttempt,

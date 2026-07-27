@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/api_config.dart';
 import '../models/api_response.dart';
@@ -12,21 +13,41 @@ class AuthService {
   final Dio _dio;
 
   Future<AuthTokenModel> login(String identifier, String password) async {
-    final response = await _dio.post<Map<String, dynamic>>(
-      ApiConfig.login,
-      data: {
-        'identifier': identifier.trim(),
-        'password': password,
-        'device': await DeviceInfoService.toJson(),
-      },
-    );
+    if (kDebugMode) {
+      debugPrint('[auth] POST ${ApiConfig.baseUrl}${ApiConfig.login} '
+          'identifier=${identifier.trim()}');
+    }
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        ApiConfig.login,
+        data: {
+          'identifier': identifier.trim(),
+          'password': password,
+          'device': await DeviceInfoService.toJson(),
+        },
+      );
+      if (kDebugMode) {
+        debugPrint('[auth] login OK → ${response.statusCode}');
+      }
 
-    final apiResponse = ApiResponse.fromJson(
-      response.data!,
-      (data) => AuthTokenModel.fromJson(data as Map<String, dynamic>),
-    );
+      final apiResponse = ApiResponse.fromJson(
+        response.data!,
+        (data) => AuthTokenModel.fromJson(data as Map<String, dynamic>),
+      );
 
-    return apiResponse.data!;
+      return apiResponse.data!;
+    } on DioException catch (e) {
+      // Surface the real reason in the console: a wrong window, bad creds, or a
+      // network/timeout to the prod host all look identical on screen otherwise.
+      if (kDebugMode) {
+        final code = (e.response?.data is Map)
+            ? ((e.response?.data['error'] as Map?)?['code'])
+            : null;
+        debugPrint('[auth] login FAILED → status=${e.response?.statusCode} '
+            'code=$code type=${e.type} ${e.response?.data ?? e.message}');
+      }
+      rethrow;
+    }
   }
 
   /// Redeems a Shift Access Link (SSO) one-time token. Public endpoint (no auth

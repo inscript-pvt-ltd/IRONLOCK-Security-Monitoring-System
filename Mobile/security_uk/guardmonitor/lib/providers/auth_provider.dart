@@ -12,8 +12,12 @@ import '../services/notification_service.dart';
 import '../services/push_messaging_service.dart';
 import '../services/push_service.dart';
 import '../services/secure_storage_service.dart';
+import 'alerts_provider.dart';
+import 'photo_provider.dart';
+import 'photo_review_provider.dart';
 import 'photo_schedule_provider.dart';
 import 'shift_provider.dart';
+import 'ui_providers.dart';
 import 'wakefulness_provider.dart';
 
 // ── Auth ──────────────────────────────────────────────────────────────────
@@ -49,6 +53,13 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
           ref.read(guardProfileProvider.notifier).setFromEmail(email);
         }
       }
+      // Restore an active shift saved on the device FIRST (before the server
+      // fetch), so a cold start after a swipe-kill shows the shift immediately —
+      // and a null-for-active / offline `GET /shifts/current` can't wipe it
+      // (fetch() preserves an already-active shift). The server can still CLOSE
+      // it via reconcileServerClosed if it was ended/cancelled while we were dead.
+      await ref.read(currentShiftProvider.notifier).restoreSnapshot();
+      await ref.read(shiftProvider.notifier).restoreFromDisk();
       ref.read(currentShiftProvider.notifier).fetch();
       return AuthState.signedIn;
     }
@@ -133,6 +144,11 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     // idempotent, so they're harmless when nothing is running.
     ref.read(gpsServiceProvider).stopCapture();
     await NotificationService.cancelShiftEnd();
+    // Also drop the scheduled offline welfare/photo check reminders — invalidating
+    // the schedule providers below disposes them without running clear(), so cancel
+    // here (idempotent; harmless when none are scheduled).
+    await NotificationService.cancelWakefulnessChecks();
+    await NotificationService.cancelPhotoChecks();
     // Stop pushes reaching this device for a now-signed-out guard: unmap the
     // token server-side (while it's still valid) then drop the local FCM token
     // so the next guard gets a fresh one (H5).
@@ -159,6 +175,19 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     // Reset the wakefulness FSM + its handled-check history so a different guard
     // signing in on this device starts clean.
     ref.invalidate(wakefulnessProvider);
+    // Reset the rest of the per-session UI/state providers too, so a different
+    // guard on the SAME device (shift handover) never inherits the previous
+    // guard's alerts, a stale pending/expired photo request, an old zone reading,
+    // or the already-seen-reviews set. These aren't invalidated automatically —
+    // the single app-root ProviderScope survives sign-out — so a leftover would
+    // surface to the next guard. (privacy/battery/device_id deliberately persist.)
+    ref.invalidate(alertsProvider);
+    ref.invalidate(pendingPhotoProvider);
+    ref.invalidate(photoProvider);
+    ref.invalidate(photoReviewProvider);
+    ref.invalidate(zoneProvider);
+    ref.invalidate(zoneUpdatedAtProvider);
+    ref.invalidate(activeTabProvider);
     state = const AsyncData(AuthState.signedOut);
   }
 }

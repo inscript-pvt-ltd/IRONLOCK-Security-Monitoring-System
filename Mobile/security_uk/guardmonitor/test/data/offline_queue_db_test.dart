@@ -73,7 +73,12 @@ void main() {
     await db.enqueueGps(GpsQueueCompanion.insert(
         shiftId: 's1', latitude: 1, longitude: 2, recordedAt: 'x', createdAt: 1));
     await db.enqueueWakefulness(WakefulnessQueueCompanion.insert(
-        checkId: 'c1', code: '1234', windowReference: 42, respondedAt: 'x', createdAt: 1));
+        shiftId: 's1',
+        checkId: 'c1',
+        code: '1234',
+        windowReference: 42,
+        respondedAt: 'x',
+        createdAt: 1));
     await db.clearAll();
     expect(await db.dueGps('s1', 9999999999999), isEmpty);
     expect(await db.dueWakefulness(9999999999999), isEmpty);

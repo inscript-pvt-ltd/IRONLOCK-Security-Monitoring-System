@@ -12,13 +12,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <!-- Local notifications (end-of-shift reminder) -->
+    <!-- Local notifications (end-of-shift reminder + OFFLINE welfare/photo check
+         reminders). Exact alarms are required so a welfare-check reminder fires at
+         its due time even in Doze — an inexact alarm gets batched until the device
+         next wakes (unlock / reconnect), which for a locked lone-worker phone can
+         be a long delay and defeats the whole point of the check.
+         SCHEDULE_EXACT_ALARM covers API 31–32 (runtime-granted, revocable);
+         USE_EXACT_ALARM covers API 33+ (install-granted). ⚠️ USE_EXACT_ALARM is
+         reviewed by Play — it's justified here as core lone-worker safety timing,
+         but confirm the store listing declares that use case. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <application
-        android:label="Guard Monitor"
+        android:label="IronLock"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config">
@@ -38,6 +48,15 @@
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
+              />
+            <!-- The shift-access SSO deep link (ironlock://shift-access/<token>) is
+                 handled by the app_links plugin (deep_link_service.dart). Disable
+                 Flutter's BUILT-IN deep linking so the engine doesn't also try to
+                 navigate the link's path as a route (with no router → crash).
+                 app_links still receives the intent independently. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"
               />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>

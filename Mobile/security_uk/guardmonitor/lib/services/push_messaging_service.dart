@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/api_config.dart';
 import '../providers/app_providers.dart';
 import '../providers/wakefulness_provider.dart';
+import 'notification_service.dart';
 import 'push_router.dart';
 import 'push_service.dart';
 import 'secure_storage_service.dart';
@@ -124,6 +125,24 @@ class PushMessaging {
         }
       },
       onWakefulness: (checkId, code, responseSeconds, issuedAt) {
+        // Stale-tap guard: a TAP delivery (opened-app / cold-start, i.e.
+        // `!confirmReceipt`) with no `issued_at` can't be dated, so `trigger()`
+        // would grant it a FULL fresh window — re-raising a long-dead challenge
+        // whose barrier then strands the screen. Skip it; a genuinely-live one is
+        // re-surfaced by the `/wakefulness/pending` poll with real timing. Fresh
+        // FOREGROUND arrivals (`confirmReceipt`) are unaffected.
+        //
+        // As of the 2026-07-23 backend fix the WAKEFULNESS_CHALLENGE push now
+        // carries `issued_at`, so a live tapped challenge is dated and opens
+        // instantly here. This guard is retained as defence-in-depth: it still
+        // drops a tap that arrives without `issued_at` (an old server build during
+        // the deploy rollout, or a malformed payload) rather than trusting it.
+        if (!confirmReceipt && issuedAt == null) {
+          if (kDebugMode) {
+            debugPrint('[fcm] skipped stale tapped wakefulness (no issued_at)');
+          }
+          return;
+        }
         // Don't stomp a challenge already on screen; the notifier also dedupes
         // by check_id so a push can't re-raise one the scheduler/an earlier push
         // already handled.
@@ -179,6 +198,11 @@ Future<void> _backgroundHandler(RemoteMessage message) async {
           requestId,
           DateTime.now().toUtc(),
         );
+        // Raise a visible local notification. A PHOTO_REQUEST is a data-only
+        // push, so on iOS the OS draws nothing on its own — without this the
+        // guard gets no prompt while backgrounded (the wakefulness path shows
+        // one; this brings photo to parity).
+        await NotificationService.showPhotoRequest(requestId: requestId);
       }
   }
 }

@@ -16,6 +16,7 @@ import 'package:guardmonitor/services/sync_flush_service.dart';
   List<List<dynamic>> posted,
   List<String> paths,
   List<Map<String, String>> forms,
+  List<Map<String, dynamic>> jsonBodies,
 }) _fakeDio({
   int? failStatus,
   String? failCode,
@@ -23,12 +24,16 @@ import 'package:guardmonitor/services/sync_flush_service.dart';
   final posted = <List<dynamic>>[];
   final paths = <String>[];
   final forms = <Map<String, String>>[];
+  final jsonBodies = <Map<String, dynamic>>[];
   final dio = Dio();
   dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
     paths.add(options.path);
     final data = options.data;
     if (data is Map && data['pings'] is List) {
       posted.add(data['pings'] as List);
+    }
+    if (data is Map<String, dynamic>) {
+      jsonBodies.add(data);
     }
     if (data is FormData) {
       forms.add({for (final e in data.fields) e.key: e.value});
@@ -57,7 +62,26 @@ import 'package:guardmonitor/services/sync_flush_service.dart';
       ));
     }
   }));
-  return (dio: dio, posted: posted, paths: paths, forms: forms);
+  return (
+    dio: dio,
+    posted: posted,
+    paths: paths,
+    forms: forms,
+    jsonBodies: jsonBodies,
+  );
+}
+
+/// A Dio that always fails with a **no-response** error (offline / connection
+/// dropped) — `response == null`, the shape the flush treats as "not yet".
+Dio _offlineDio() {
+  final dio = Dio();
+  dio.interceptors.add(InterceptorsWrapper(onRequest: (options, handler) {
+    handler.reject(DioException(
+      requestOptions: options,
+      type: DioExceptionType.connectionError,
+    ));
+  }));
+  return dio;
 }
 
 /// Writes a real temp JPEG and queues a 1-image offline photo row referencing it.
@@ -98,9 +122,11 @@ Future<void> _seedGps(OfflineQueueDb db, int n) async {
 
 Future<void> _seedWake(OfflineQueueDb db, {int createdAt = 0}) =>
     db.enqueueWakefulness(WakefulnessQueueCompanion.insert(
-      checkId: 'chk1',
+      shiftId: 's1',
+      checkId: 'totp-1782342',
       code: '4821',
       windowReference: 1782342,
+      scheduledAt: const Value('2026-06-30T10:00:00Z'),
       respondedAt: '2026-06-30T10:00:00Z',
       createdAt: createdAt,
     ));
@@ -167,22 +193,33 @@ void main() {
     expect(await db.dueGps('s1', _farFuture), isEmpty, reason: 'dropped');
   });
 
-  test('no active shift → GPS not flushed', () async {
+  test('flushes GPS even with no active shift (backlog from an ended shift) (H1)',
+      () async {
+    // A shift ending mid-backlog (or an auto-close on reconnect) leaves
+    // _currentShiftId() null. GPS must still drain by each row's own shiftId —
+    // otherwise the shift's final trail is stranded forever.
     await _seedGps(db, 2);
     final f = _fakeDio();
     final svc = SyncFlushService(db, f.dio, () => null);
     await svc.flush();
-    expect(f.posted, isEmpty);
-    expect(await db.dueGps('s1', _farFuture), hasLength(2));
+    expect(f.paths.any((p) => p == '/shifts/s1/locations'), isTrue,
+        reason: 'GPS posts to its own shiftId, not the (null) current shift');
+    expect(await db.dueGps('s1', _farFuture), isEmpty);
   });
 
   group('wakefulness flush', () {
-    test('posts the queued answer and dequeues on success', () async {
+    test('posts the queued answer to the offline endpoint and dequeues', () async {
       await _seedWake(db);
       final f = _fakeDio();
       final svc = SyncFlushService(db, f.dio, () => 's1');
       await svc.flush();
-      expect(f.paths.any((p) => p.contains('/wakefulness/chk1/respond')), isTrue);
+      expect(f.paths.any((p) => p == '/shifts/s1/wakefulness/offline'), isTrue,
+          reason: 'schedule-fired answers go to the offline materialise endpoint');
+      // The absolute window + typed code + schedule mark travel verbatim.
+      final body = f.jsonBodies.firstWhere((b) => b.containsKey('window_reference'));
+      expect(body['window_reference'], 1782342);
+      expect(body['code'], '4821');
+      expect(body['scheduled_at'], '2026-06-30T10:00:00Z');
       expect(await db.dueWakefulness(_farFuture), isEmpty);
     });
 
@@ -213,6 +250,21 @@ void main() {
       final svc = SyncFlushService(db, f.dio, () => null);
       await svc.flush();
       expect(await db.dueWakefulness(_farFuture), isEmpty);
+    });
+
+    test('offline (no server response) keeps the row and does NOT burn an attempt',
+        () async {
+      // Repeatedly failing while offline must not erode the 12-try budget — an
+      // offline stretch used to delete the oldest answers before reconnect.
+      await _seedWake(db);
+      final svc = SyncFlushService(db, _offlineDio(), () => 's1');
+      for (var i = 0; i < 5; i++) {
+        await svc.flush();
+      }
+      final all = await db.dueWakefulness(_farFuture);
+      expect(all, hasLength(1), reason: 'the answer is kept, never dropped');
+      expect(all.single.attempts, 0,
+          reason: 'no-response failures are "not yet", not strikes');
     });
   });
 
@@ -268,6 +320,18 @@ void main() {
       final all = await db.duePhotos('s1', _farFuture);
       expect(all.single.attempts, 1);
     });
+
+    test('flushes even with no active shift (proof photo from an ended shift) (H1)',
+        () async {
+      final seeded = await _seedPhoto(db);
+      final f = _fakeDio();
+      final svc = SyncFlushService(db, f.dio, () => null);
+      await svc.flush();
+      expect(f.paths.any((p) => p.contains('/shifts/s1/photos')), isTrue,
+          reason: 'photo posts to its own shiftId, not the (null) current shift');
+      expect(await db.duePhotos('s1', _farFuture), isEmpty);
+      expect(await File(seeded.path).exists(), isFalse);
+    });
   });
 
   test('flush order: wakefulness before GPS', () async {
@@ -281,5 +345,28 @@ void main() {
     expect(wakeIdx, isNonNegative);
     expect(gpsIdx, isNonNegative);
     expect(wakeIdx, lessThan(gpsIdx), reason: 'wakefulness flushes first');
+  });
+
+  test('flush order: photos before GPS (compliance before bulk telemetry)',
+      () async {
+    await _seedPhoto(db);
+    await _seedGps(db, 1);
+    final f = _fakeDio();
+    final svc = SyncFlushService(db, f.dio, () => 's1');
+    await svc.flush();
+    final photoIdx = f.paths.indexWhere((p) => p.contains('/photos'));
+    final gpsIdx = f.paths.indexWhere((p) => p.contains('/locations'));
+    expect(photoIdx, isNonNegative);
+    expect(gpsIdx, isNonNegative);
+    expect(photoIdx, lessThan(gpsIdx), reason: 'photos flush before GPS');
+  });
+
+  test('enqueuing a photo/wakefulness row fires onImportantEnqueue', () async {
+    final photoSignal = expectLater(db.onImportantEnqueue.first, completes);
+    await _seedPhoto(db);
+    await photoSignal;
+    final wakeSignal = expectLater(db.onImportantEnqueue.first, completes);
+    await _seedWake(db);
+    await wakeSignal;
   });
 }

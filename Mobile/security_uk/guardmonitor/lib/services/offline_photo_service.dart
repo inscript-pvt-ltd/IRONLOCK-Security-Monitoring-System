@@ -42,40 +42,64 @@ class OfflinePhotoService {
     final nonce = await _nonces.draw(shiftId);
     if (nonce == null) return null; // pool dry — surface "reconnect to verify"
 
-    final proof = _timeAnchor.capture();
-    final capturedAt = proof.capturedAt.toIso8601String();
-    // The exact strings the flush will send, so the signature covers them.
-    final lat = latitude?.toString() ?? '';
-    final lng = longitude?.toString() ?? '';
+    // From here the nonce is CLAIMED (marked drawn). Any failure before the row
+    // is durably enqueued must roll it back — and delete any durable copies —
+    // so a partial capture can't silently burn a scarce pool nonce or leak
+    // orphaned files (M3). The signature must cover the drawn nonce, so we can't
+    // draw later; instead we release on failure.
+    var durable = const <String>[];
+    try {
+      final proof = _timeAnchor.capture();
+      final capturedAt = proof.capturedAt.toIso8601String();
+      // The exact strings the flush will send, so the signature covers them.
+      final lat = latitude?.toString() ?? '';
+      final lng = longitude?.toString() ?? '';
 
-    final durable = await _persistFiles(filePaths);
+      durable = await _persistFiles(filePaths);
 
-    final signatures = <String>[];
-    for (final path in durable) {
-      final hash = sha256.convert(await File(path).readAsBytes()).toString();
-      signatures.add(PhotoService.buildSignature(
-        secret: secret,
+      final signatures = <String>[];
+      for (final path in durable) {
+        final hash = sha256.convert(await File(path).readAsBytes()).toString();
+        signatures.add(PhotoService.buildSignature(
+          secret: secret,
+          nonceValue: nonce,
+          requestId: '', // offline / self-initiated → no request id
+          capturedAt: capturedAt,
+          latitude: lat,
+          longitude: lng,
+          imageHash: hash,
+        ));
+      }
+
+      return await _db.enqueuePhoto(PhotoQueueCompanion.insert(
+        shiftId: shiftId,
         nonceValue: nonce,
-        requestId: '', // offline / self-initiated → no request id
+        filePaths: jsonEncode(durable),
+        signatures: jsonEncode(signatures),
+        ntpReference: Value(proof.ntpReference),
+        elapsedSeconds: proof.elapsedSeconds,
+        latitude: Value(latitude),
+        longitude: Value(longitude),
         capturedAt: capturedAt,
-        latitude: lat,
-        longitude: lng,
-        imageHash: hash,
+        createdAt: DateTime.now().millisecondsSinceEpoch,
       ));
+    } catch (_) {
+      await _rollback(nonce, durable);
+      return null;
     }
+  }
 
-    return _db.enqueuePhoto(PhotoQueueCompanion.insert(
-      shiftId: shiftId,
-      nonceValue: nonce,
-      filePaths: jsonEncode(durable),
-      signatures: jsonEncode(signatures),
-      ntpReference: Value(proof.ntpReference),
-      elapsedSeconds: proof.elapsedSeconds,
-      latitude: Value(latitude),
-      longitude: Value(longitude),
-      capturedAt: capturedAt,
-      createdAt: DateTime.now().millisecondsSinceEpoch,
-    ));
+  /// Undoes a failed capture that already claimed a nonce: returns the nonce to
+  /// the pool and deletes any durable copies made. Best-effort — never throws.
+  Future<void> _rollback(String nonce, List<String> files) async {
+    try {
+      await _db.releaseNonce(nonce);
+    } catch (_) {}
+    for (final f in files) {
+      try {
+        await File(f).delete();
+      } catch (_) {}
+    }
   }
 
   /// Deletes the whole durable `queued_photos/` directory — used on sign-out so a

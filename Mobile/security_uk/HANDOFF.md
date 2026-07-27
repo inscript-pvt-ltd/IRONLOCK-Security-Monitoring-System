@@ -5,6 +5,985 @@ Each entry: what changed, current state, what's verified, and what's still open.
 
 ---
 
+## 2026-07-27 (cont. 2) — Wakefulness "3-digit code" — REAL CAUSE FOUND + FIXED: display clipping (prior "stale build" call was WRONG)
+
+A device **confirmed updated** still showed a 3-digit code → disproves the stale-build conclusion below.
+Re-read the overlay render path and found the actual bug — **it's cosmetic, in `_CodeDisplay`
+(`wakefulness_overlay.dart`), not the logic.**
+
+- The code was drawn as `code.split('').join('   ')` (triple-spaced) at `fontSize sp(40)` **+**
+  `letterSpacing: 8` — a very wide string — in a `Container` with **no width cap**, `maxLines: 1`,
+  **`overflow: TextOverflow.visible`**. That never shrinks/wraps: when wider than the screen it paints
+  past both edges (center-aligned) and the parent **clips** it. On a **narrow device** the outer digit
+  (usually the padded leading `0`) is cut off → `0472` looks like `472`, and the 4-cell pad can't complete.
+- Fits every qualifier: "some devices" = narrow screens · overlay shows 3 · online AND offline (same
+  widget) · **persists after update** (widget still in current code).
+- **Fix:** wrapped the code `Text` in `FittedBox(fit: BoxFit.scaleDown)` + `Container width: double.infinity`
+  → 4 digits always fit (scaled down if tight), can never be clipped. `flutter analyze` clean; TOTP
+  vectors still pass.
+- The TOTP-parity work (below) stands — it proved the logic was never the problem, which is what
+  pointed at rendering. Keep Jerry's backend length-mismatch WARNING log as a monitor.
+
+**State:** `flutter analyze` clean · TOTP vector suite passes. Investigation doc updated (real cause on
+top; stale-build section marked superseded). **Ask the user to confirm on an affected narrow device.** Not committed.
+
+---
+
+## 2026-07-27 (cont.) — Wakefulness "3-digit code" — RESOLVED: stale app build, current code proven correct  ⛔️ SUPERSEDED (see entry above)
+
+Field report: some devices show a **3-digit** wakefulness code (offline AND online, in the overlay).
+Investigated (`docs/WAKEFULNESS_3DIGIT_CODE_OFFLINE_2026-07-27.md`); **not a current-code bug.**
+
+- **Our offline TOTP is byte-for-byte identical to the backend** — ran Jerry's 13 vectors incl. all 6
+  **leading-zero** cases (`58000004 → 0690`, `58000011 → 0104`, …); every one returns a 4-char code
+  with the zero kept. New permanent guard: `test/services/totp_backend_vectors_test.dart`.
+- Jerry confirmed: **`totp_digits` is always 4** (global, never per-site; clamped 4–8), and the server
+  **never emitted a 3-char code** (`str_pad(..,4)`; tray body + `data.code` share one variable). So
+  the tray-mismatch and per-site-digits theories are both eliminated.
+- Current app pads on **both** paths (`trigger`/`triggerLocal` → `_normalizeCode`; overlay shows
+  `state.code`); `472→0472` asserted by passing tests. The current build **cannot** render 3 digits.
+- ⇒ **Cause = a stale app binary older than the 2026-07-21 padding fix.** Fix = update those devices.
+  **Decisive evidence still wanted: the app version on an affected device.**
+- Backend also widened code columns `varchar(4)→(8)` (a 5th char was 500-ing) + added a
+  length-mismatch WARNING log (fires if a live device still drops a zero post-update). Online codes
+  → 1000–9999 next deploy (no leading zero at all). Rollout NOT blocked.
+- **Optional hardening (Jerry-endorsed, deferred):** respect `prov.digits` end-to-end so a future
+  deliberate 5–8 digit config can't break the fixed-4 pad. Not urgent (digits always 4). Documented
+  in the investigation doc's step 3; NOT implemented.
+
+**State:** `flutter analyze` clean · **210 tests pass** (was 197; +13 TOTP vectors). Not committed.
+
+---
+
+## 2026-07-27 (cont.) — In-app Privacy Policy + Terms viewer, and app display name → "IronLock"
+
+- **App display name → "IronLock"** (was "Guard Monitor"): `android:label` (AndroidManifest) +
+  iOS `CFBundleDisplayName`. Left the pubspec package `name: guardmonitor` and the applicationId
+  `com.ironlock.guardmonitor` untouched (package name must stay lowercase / matches imports;
+  applicationId is FCM-bound and Play-locking). Native change → needs a full rebuild to show.
+- **Legal docs bundled + in-app viewer** (user supplied the full UK-GDPR Privacy Policy + T&C):
+  - `assets/legal/privacy_policy.md` + `assets/legal/terms.md` (NEW; registered under
+    `flutter: assets:`). These are also the source to host at the Play privacy-policy URL.
+  - `lib/screens/legal/legal_screen.dart` (NEW) — `LegalScreen` with Privacy/Terms tabs, renders
+    the markdown via a tiny in-house block renderer (headings/bullets/paragraphs) using AppType/
+    AppColors — **no new dependency** (no flutter_markdown). `LegalDoc` enum + `LegalScreen.open()`.
+  - Entry points: first-run `privacy_notice_overlay` gained a "Read the full Privacy Policy &
+    Terms" link; the `login_screen` footer now has tappable **Privacy Policy · Terms** links.
+  - Test: `test/screens/legal_screen_test.dart` (assets load + carry expected content; enum shape).
+
+**State:** `flutter analyze` clean · **197 tests pass** (was 195; +2). Not committed.
+**Note:** the Privacy Policy still needs **hosting at a public URL** for the Play listing (the
+bundled file is the source) — Play requires a URL, not just in-app text.
+
+---
+
+## 2026-07-27 (cont.) — Per-site verification settings (empty schedules) + pubspec name fix
+
+Jerry shipped **per-site on/off + min/max gap** for photo & wakefulness checks
+(`FLUTTER_HANDOFF — Per-Site Verification Settings`). No API shape change; the only new thing:
+**`photos.schedule` / `wakefulness.schedule` can now be `[]` = that check is OFF for the shift.**
+Audited the app against it and replied (`docs/BACKEND_REPLY_PER_SITE_SETTINGS_2026-07-27.md`).
+
+- **Already correct:** empty **photo** schedule → `PhotoProvisioning.fromJson` returns null → not
+  armed → nothing fires. Empty **wakefulness** schedule → parses with zero marks → `checkSchedule`
+  no-ops + `scheduleWakefulnessChecks([])` registers nothing. Manual pushes still handled (pending
+  polls + FCM are NOT gated on the schedule). iOS 64-notif cap already safe (`_maxScheduledPerType
+  = 31` → 31·2+1 ≤ 64).
+- **`totp_seed` is not the switch (his §3.2):** our seed check only decides "provision vs mock
+  fallback poll," never "wakefulness on"; off-config (seed + empty schedule) fires nothing AND
+  suppresses the `/welfare/pending` fallback. Locked in: `test/providers/wakefulness_provisioning_test.dart`.
+- **Fixed (his §3.3):** the offline-photo **nonce prefetch** (`refillIfLow`) was unconditional;
+  now gated on "photo schedule armed" at shift start + the 20s online top-up (skipped when photos
+  off — a manual online request carries its own nonce, so nothing breaks). Resume-prime left
+  unconditional (races the async restore; a lone wasted prefetch is harmless).
+- **His §5 tight gaps — answered, no code change yet:** offline capture is guard-response-latency
+  bound (camera can't fire backgrounded); worst-case ~15 min (`fireWindowMinutes`). Told Jerry to
+  keep the **minimum gap ≥ ~20 min** for offline sites; offered an adaptive fire window if he wants
+  tighter sites to fail-fast to "missed". Marks beyond 31/type rely on the foreground poll.
+
+- **🔴 Caught while here: `pubspec.yaml` `name:` had been changed to `IronLock`** — invalid (Dart
+  package names must be lowercase) and it broke **every** `package:guardmonitor/...` import →
+  `flutter analyze` showed **507 errors**. **Reverted to `name: guardmonitor`** (matches all imports
+  + the directory); `flutter pub get` + analyze clean again. (If a display name was wanted, that's
+  the store listing / `android:label`, NOT the pubspec package name.)
+
+**State:** `flutter analyze` clean · **195 tests pass** (was 192; +3). Not committed.
+
+---
+
+## 2026-07-27 — Android release signing + R8 wired for Play Store (build verified)
+
+Prepped the app for a real Play Store upload (guide: `docs/PLAY_STORE_RELEASE.md`).
+- **Was:** the release build signed with the **debug** key (`build.gradle.kts` →
+  `signingConfigs.getByName("debug")`) — Google Play rejects that.
+- **Now:** `android/app/build.gradle.kts` loads `android/key.properties` (already gitignored,
+  alongside `*.jks`/`*.keystore`), defines a **release** signing config from it, and uses it for
+  release builds — **falling back to debug when the file is absent** so local `flutter run
+  --release` and CI without secrets still build. Also turned on **R8** (`isMinifyEnabled` +
+  `isShrinkResources`) with a new `android/app/proguard-rules.pro` (keeps for
+  `flutter_local_notifications`/Gson + a Play Core `-dontwarn`).
+- **Verified it builds:** `flutter build appbundle --release --obfuscate
+  --split-debug-info=build/symbols` → `✓ app-release.aab (67.8MB)` in ~177s (debug-signed
+  fallback, since no keystore yet). So R8 + the ProGuard rules compile cleanly.
+- **Still on the user (not code):** generate `~/ironlock-release.jks` + create
+  `android/key.properties` (step 2) — then the same build command emits an upload-ready
+  release-signed AAB automatically. Then the Play Console work: background-location declaration
+  (+ demo video), `USE_EXACT_ALARM` + location-FGS justifications, data-safety form, privacy
+  policy URL. Full checklist in `docs/PLAY_STORE_RELEASE.md`.
+- **Note:** 67.8MB is the *universal* AAB (all ABIs + assets); Play's per-device split delivery
+  ships far less. Non-fatal build warnings only (KGP plugin notice for battery_plus/camerax;
+  DWARF-in-ELF from obfuscation).
+
+**State:** release AAB builds; `key.properties`/keystore not created (intentional — user owns the
+signing key). Nothing committed. iOS App Store still Apple-account-blocked (separate track).
+
+---
+
+## 2026-07-24 (cont.) — Offline photo NTP/time thread with Jerry — CLOSED, no app changes
+
+Jerry sent `FLUTTER_HANDOFF — Offline Photo "Scheduled" vs "Capture" Time` (two times on the
+timeline: `requested_at` = scheduled slot, `submitted_at` = true shutter — not a bug). Audited
+our offline photo time path against it and replied
+(`docs/BACKEND_REPLY_OFFLINE_PHOTO_TIME_2026-07-24.md`); **Jerry replied back and both open
+questions resolved with NO app change:**
+
+- **We already send `ntp_reference` + `elapsed_seconds` on offline photos** (exact names) —
+  `PhotoService.submitOfflinePhotos`; values from `TimeAnchorService.capture()`, stored on the
+  queue row, re-sent verbatim by the flush.
+- **Q1 (our pre-projected form: `ntp_reference` = projected shutter instant, `elapsed_seconds`
+  = 0) — ACCEPTED, keep as-is.** Jerry's `reconstructCaptureTime()` computes
+  `ntp_reference + elapsed_seconds` and trusts it; `0` is NOT read as "no proof" (that's why
+  SH-1049 verified). Do **not** switch to the raw last-sync+gap form — pure churn + regression
+  risk. Bonus: our non-null anchor also gets the EXIF-vs-NTP clock-manipulation cross-check.
+- **Q2 (add NTP fields to the ONLINE path) — Jerry RETRACTED the ask; do NOT.** Online is
+  server-anchored (`server_received_at`); phone-NTP there would risk a false `TIMELINE_ANOMALY`
+  hard-reject (capture time predating nonce issuance). **Online path stays exactly as-is.**
+- **SH-1050 "empty NTP" = correct behaviour** — that phone never obtained an NTP anchor (offline
+  from launch); we correctly OMIT `ntp_reference` rather than send an untrusted wall-clock value,
+  so the server falls to `captured_at` + flags `NTP_UNAVAILABLE`. No payload fix possible (needs
+  ≥1 online NTP sync); already mitigated by priming the anchor at start/resume/cold-start.
+- **Drift (~7–10 min slot→capture) = guard response latency to the offline local notification**
+  (camera can't fire backgrounded → notification → tap → poll opens camera → shutter). Expected,
+  not a poll interval. Dashboard headlines the capture time + shows the slot as a note — truthful.
+- **15-min `fireWindowMinutes` cap confirmed as the "too-late = missed" threshold** — interlocks
+  with Jerry's new server-side Missed reconciliation. Keep it.
+- **Only optional, non-blocking follow-up:** a separate `ntp_last_sync_at` **diagnostic** field
+  so the backend could judge anchor age. Jerry won't consume it until agreed → **not
+  implemented** (would be dead weight now).
+
+**No code changed. No tests changed.** Thread closed on both sides. (Unrelated: the 90s
+offline-capture expiry from the entry below is a real code change; this NTP thread is docs-only.)
+
+---
+
+## 2026-07-24 (cont.) — Offline scheduled photo: add a 90s expiry (overlay no longer lingers forever)
+
+**Bug:** an OFFLINE scheduled photo capture opened with **no countdown and no expiry** — so
+if the guard never took the shot, the camera overlay stayed open **forever** (no way for it
+to close itself). Online requests already expire on the server's 90s window; offline had none.
+
+**Fix:** the scheduled capture now runs the **same fixed 90s window** as an online request,
+anchored to when the screen opens (there's no server issue-time offline). On expiry the
+screen closes (after the existing ~3s "expired" beat) and records a **miss** locally for an
+honest end-shift summary (the server also logs the missed scheduled check from the
+reconstructed timeline). The captured photo is still validated server-side by its
+**NTP-anchored timestamp**, not this client timer — the 90s only bounds the overlay, it does
+NOT gate offline validity (pool nonce is still shift-long).
+- `photo_provider.dart`: `openScheduled()` now opens a full `kPhotoWindowSeconds` (90s) window
+  (was a no-countdown idle surface).
+- `photo_screen.dart`: scheduled mode runs the per-second tick (was `return`-ing before it);
+  the timer/progress bar now shows for scheduled too, with the "Offline — saved and uploaded
+  when you reconnect" note kept **beneath** it; expiry records `recordPhoto(passed:false)`
+  (scheduled only — online still leaves the verdict to the server).
+- Tests: `test/providers/photo_seconds_remaining_test.dart` (+2: opens at 90s; ticks to expiry).
+
+**State:** analyze clean · **192 tests pass** (was 190; +2). Not committed. Same-second
+capture-vs-expiry race is safe: once the guard taps Use Photo the status goes `uploading`,
+which the tick skips, so the countdown stops before it can double-fire a miss.
+
+---
+
+## 2026-07-24 (cont.) — Swipe-kill cold-start bugs: photo "out of nowhere" + missing site name
+
+Two on-device bugs reported after removing the app from recents then reopening: (1) the
+shift details don't show; refreshing then **triggers a photo verification out of nowhere**
+and only then shows the offline-saved items; (2) the **site name is blank**. Both were the
+same class of gap as the wakefulness fixes — **state that only lived in memory or on the
+server, lost on a cold start.**
+
+- **🟠 Photo "out of nowhere" — FIXED.** `PhotoScheduleNotifier._fired` (the offline
+  scheduled-capture dedup) was **in-memory only** — the exact bug we'd just fixed for
+  wakefulness, but for photos. After a swipe-kill, `restore()` re-armed the schedule with an
+  **empty** `_fired`, so the next offline poll re-fired a scheduled mark the guard had
+  already handled (or a still-in-window missed one) → the camera opened unprompted. Now
+  persisted: `SecureStorageService.{save,get,clear}PhotoFired`; `_markFired` persists each
+  fire; `restore()` loads the set **before** the first `checkSchedule`; cleared on shift end
+  / sign-out / fresh provision. Test: `test/providers/photo_fired_persistence_test.dart`.
+- **🟠 Missing site name / shift details on cold start — FIXED.** The site name, schedule,
+  and overdue banner all read from `currentShiftProvider` (`CurrentShiftModel`), which was
+  **never persisted** — on cold start it stayed null until `GET /shifts/current` succeeded,
+  and offline (or the known null-for-active backend bug) it never did, so the card showed
+  `—`. Now the shift object is snapshotted to disk while active: added `toJson()` to
+  `CurrentShiftModel` + `ShiftSiteModel`/`ShiftGeofenceModel` (UTC-emit so
+  `parseServerUtc(...).toLocal()` round-trips to the same instant); `CurrentShiftNotifier`
+  persists on every mutation (`fetch`/`start`/`end`/`requestEarlyEnd`/`clear`, cleared on a
+  completed/cancelled/missed/null status) and `restoreSnapshot()` rebuilds it on cold start
+  **before** the server fetch (wired into `AuthNotifier.build`, ahead of
+  `shiftProvider.restoreFromDisk()`). `fetch()`'s existing null-guard then preserves the
+  restored snapshot on a bad poll. Tests: `test/models/current_shift_snapshot_test.dart`.
+- **"Shows offline items only after" — explained, no separate fix.** That's just the
+  `pendingSync` chip refreshing during the same poll; once the shift card renders from the
+  snapshot and the fired-set no longer misfires, the sequence reads correctly.
+
+**Files:** `models/current_shift_model.dart`, `services/secure_storage_service.dart`,
+`providers/shift_provider.dart`, `providers/auth_provider.dart`,
+`providers/photo_schedule_provider.dart`. **State:** analyze clean · **190 tests pass**
+(was 186; +4). Not committed. **On-device check:** start a shift → swipe-kill → reopen →
+confirm the card shows site name + schedule immediately (offline too) and NO photo screen
+opens unprompted on refresh.
+
+---
+
+## 2026-07-24 (cont.) — Carried-over open items from HANDOFF: 3 app-side fixes + 1 backend ask
+
+Swept the whole HANDOFF for still-open items we'd been carrying and cleared the
+actionable app-side ones. (Apple-Developer-account iOS parity items left as-is, per
+request; L1/L2 on-device verify + backfill-flag flip still parked as before.)
+
+- **🟠 Captive-portal / dead-Wi-Fi blind spot — FIXED (was deferred "needs a call",
+  2026-07-22 cont.5 #2).** `isOnlineProvider` is interface-based (`connectivity_plus`),
+  so on a venue captive portal / associated-but-dead Wi-Fi it reported **online** while
+  **no** API call got through — which suppressed the offline welfare/photo scheduler
+  **and** failed every poll, so the guard saw **no prompt at all**. Added a real
+  **server-reachability** signal: `serverReachableProvider` + a `_ReachabilityInterceptor`
+  on the shared Dio (`api_client.dart`) — any HTTP response (even 4xx/5xx) ⇒ reachable;
+  a null-response error (connection/timeout) ⇒ unreachable. `home_screen._pollBackend`
+  now gates the offline scheduler on **interface-online AND server-reachable**, so a
+  "connected but unreachable" phone falls back to the offline path and keeps prompting.
+  **Not the old mislabel bug** (2026-07-22 cont.2): that was a genuinely-online guard
+  tagged Offline via push-availability; this uses true reachability, and since the
+  server really can't be reached, recording via the offline endpoint (→ tagged Offline)
+  is *correct*. Test: `test/services/server_reachability_test.dart`.
+- **🟢 Offline nonce pool not primed on resume — FIXED (low, carried since 2026-07-23).**
+  `start()` primed the offline nonce pool + NTP anchor, but `resumeFromServer` and
+  `restoreFromDisk` didn't — so a guard who resumed/relaunched a shift then dropped
+  offline couldn't queue an offline photo until the first 20s poll. Extracted
+  `_primeOfflineBuffers(shiftId)` (detached, fully guarded) and called it from all three
+  paths (`shift_provider.dart`).
+- **🟢 Fired-marks dedup lost on app-kill — FIXED (welfare-flow #6, carried since
+  2026-06-25).** The schedule notifier's in-memory `_fired` set reset on a kill, so a
+  cold-start restore could **re-challenge and double-count** a welfare mark the guard
+  already answered. Now persisted: `SecureStorageService.{save,get,clear}WakefulnessFired`
+  (wiped on shift end / sign-out / fresh provision); `WakefulnessScheduleNotifier`
+  restores it in `restore()` **before** the first `checkSchedule`, and `_markFired`
+  persists each mark as it fires. Test: `test/providers/wakefulness_fired_persistence_test.dart`.
+- **🟢 Login "Signing in…" arc didn't spin — FIXED (cosmetic).** Was painted against
+  `AlwaysStoppedAnimation(0)`; replaced with a `_SpinningLoader` (repeating controller +
+  `RotationTransition`) in `login_screen.dart`. The other noted cosmetic — "Use Photo"
+  flashing "Try Again" — was **already resolved** in code (the result block shows Try
+  Again only for `PhotoStatus.failed`, never `flagged`), so no change.
+
+**Backend ask (new deliverable):** `docs/BACKEND_ASKS_2026-07-24_LATE_OFFLINE_WINDOW.md`
+— confirm the server accepts a **late** offline submission for an older window (no
+max-age cutoff on `/wakefulness/offline`, and offline photos accepted on `captured_at`
+regardless of flush delay). This got load-bearing *because* of the captive-portal fix:
+a guard can now be "effectively offline" for a whole shift on a bad network, so offline
+answers may be flushed much later. Idempotency + `window_reference`/`scheduled_at` are
+already sent, so if there's no cutoff there's nothing to build.
+
+**State:** `flutter analyze` clean · **186 tests pass** (was 181; +5). Nothing committed.
+**Still open (unchanged):** L1/L2 on-device defunct-crash verify + remove the `main.dart`
+diagnostic; flip `sendGpsBackfillFlag` after Jerry's OK; iOS FCM/APNs + Universal Links
+(Apple Developer account); the 3 confirmations in `BACKEND_ASKS_2026-07-24.md`.
+
+---
+
+## 2026-07-24 — Full manual code audit + fixes (1 high, 5 medium, 8 low)
+
+**Goal:** deep, file-by-file review of the whole app (not test-driven), documented in
+`guardmonitor/docs/CODE_AUDIT_2026-07-24.md`, then fix the findings without breaking anything.
+
+**Audit result:** 1 high, 5 medium, 8 low + a "reviewed & cleared" list and a coverage map.
+**All fixed except L1/L2** (temp diagnostic in `main.dart` + the unverified defunct-element crash —
+held together pending ONE on-device confirmation; do not remove the diagnostic until then).
+
+**Fixes shipped:**
+- **H1 (data loss)** — offline **GPS + photos were stranded** when a shift ended with a backlog
+  (flush was gated on the *live* shift; wakefulness wasn't). Now GPS/photo flush is
+  **shift-independent**: `dueGpsAll`/`duePhotosAll` + group by each row's own `shiftId` in
+  `sync_flush_service.dart`. Regression tests added (drain with `currentShiftId == null`).
+- **M1** — `totalPending()` now uses a COUNT() `customSelect` instead of loading every row each poll.
+- **M2** — wakefulness code enforced to **exactly 4 digits**: `_normalizeCode` returns null for
+  >4 (or empty); short values still zero-pad (leading-zero restore). Both `trigger`/`triggerLocal`
+  skip a malformed code (stay idle → server raises its own miss). Tests added.
+- **M3** — offline-photo `enqueueCapture` now **rolls back** a claimed nonce (`releaseNonce`) +
+  deletes durable copies if persist/sign/enqueue throws.
+- **M4/M5** — new `lib/utils/server_time.dart` `parseServerUtc` (zone-less string → UTC before
+  localise), applied in `current_shift_model`, `shift_service`, `shift_access_link`; shift parse
+  logs a clear error instead of an obscure cast; `fetch()` keeps last-good shift on a bad poll.
+- **L3** — photo schedule sorted ascending on parse. **L4** — notification ids now use an
+  isolate-stable FNV-1a hash in a wider band (fixes cross-isolate mismatch + collisions).
+  **L5** — per-type notification cap 31 so wakefulness+photo+shift-end ≤ iOS's 64.
+  **L6** — shift-end reminder now exact-with-inexact-fallback. **L7** — location gate now gated on
+  `shift.active` (Sign Out reachable pre-shift). **L8** — in-memory seen-review set bounded.
+
+**Backend follow-ups (non-blocking, all fixed defensively app-side):**
+`guardmonitor/docs/BACKEND_ASKS_2026-07-24.md` — (1) always emit UTC datetimes with `Z`,
+(2) `/shifts/current` never a partial shift with null `scheduled_*`, (3) wakefulness `code` always
+4-char zero-padded.
+
+**Offline END (same session):** the END button is now **disabled while offline** with the hint
+"You're offline — reconnect to end your shift" (`_ActionButtons`, `home_screen.dart` — `locked =
+pending || !online`). Ending is a server op (duration/early-end approval/auto-close), so a tap
+offline only failed with an error before. Backend auto-close at scheduled_end+grace stays the net.
+(Considered but NOT done: queueing the end offline like Phase-7 captures — would need a backend
+`ended_at` backfill; parked. START has the same offline-fails property — left as-is for now.)
+
+**Offline-flush data-loss fix + sync progress bar (same session):**
+- **Root cause found** (guard reported: 3 wake + 1 photo offline → only the last wake synced): the
+  enqueue-kick + 60s heartbeat I added earlier fire the flush *while still offline*, and every failed
+  offline attempt incremented a row's `attempts` toward the 12-strike cap — so on a long offline
+  stretch the OLDEST queued answers hit the cap and were auto-deleted before reconnect.
+- **Fix:** (1) `_runCycle` skips entirely while `!_wasOnline` (wait for a real connection, then push);
+  (2) a "no server response" failure (offline/timeout, `DioException.response == null`) now GATES the
+  row (`gateGps`/`gateWakefulness`/`gatePhoto` — set next_attempt, no increment) instead of striking
+  it. Only a real server 5xx counts toward the cap. New test: 5 offline flushes keep the row at
+  attempts 0. Net: queued checks wait indefinitely for a connection; only an active server rejection
+  can drop them.
+- **Sync progress bar:** `pendingSyncProvider` now holds `SyncProgress {pending, total}` (high-water
+  denominator). `_SyncStatusChip` shows a `LinearProgressIndicator` + "Uploading N of M… X%" that
+  fills as rows drain; a 1.2s tick (online + backlog only) animates it. Offline shows the saved count.
+
+**Shift survives a swipe-kill + sync progress-bar completion (same session):**
+- **Bug:** removing the app from recents then reopening lost the whole active shift (elapsed time,
+  schedules, counters). Cause: `ShiftState` was **in-memory only** — on cold start the app rebuilt the
+  shift purely from `GET /shifts/current`, so a null-for-active response (known backend bug) or being
+  offline wiped it.
+- **Fix:** persist `ShiftState` to secure storage (`saveShiftState`/`getShiftState`/`clearShiftState`,
+  added to `clearSession`). `ShiftState.toJson/fromJson`; `ShiftNotifier._persist()` mirrors every
+  mutation (start/resume/record*/end/reconcile); `restoreFromDisk()` rebuilds the active shift +
+  restarts GPS + re-arms schedules/reminder. Wired into `AuthNotifier.build()` on cold start, BEFORE
+  the server fetch — and `fetch()`'s existing null-guard then preserves it. Server can still CLOSE it
+  via `reconcileServerClosed`. Round-trip test added.
+- **Progress bar:** was blinking out on a fast flush. `SyncProgress` gained a `completed` state; the
+  chip now lingers ~3s at 100% green "All offline items synced ✓" before hiding (`visible` gate).
+
+**State:** `flutter analyze` clean; **181 tests pass** (was 168). Nothing committed. **Open:** L1/L2
+need one on-device run (trigger a welfare/photo overlay, confirm no defunct-element spam, then remove
+the `FlutterError.onError` diagnostic from `main.dart`).
+
+---
+
+## 2026-07-23 (cont.) — Offline flush: priority ordering + faster triggers
+
+**Goal:** stop compliance-critical data (welfare answers, proof photos) from arriving late on the
+dashboard when a phone reconnects — they were queuing behind a long GPS backlog.
+
+**Three changes (all in `sync_flush_service.dart` + `offline_queue_db.dart`):**
+1. **Reordered flush** — was wakefulness → **GPS** → photos; now **wakefulness → photos → GPS**
+   (compliance-critical before bulk telemetry). Server tolerates any order (`PHASE_7_SYNC_INTEGRITY.md
+   §3`), so this is safe. Second benefit: a transient GPS failure `return`s out of the cycle, so
+   putting photos *before* GPS means they're already sent before GPS can abort the run.
+2. **Enqueue-kick** — `OfflineQueueDb` now exposes `onImportantEnqueue` (a broadcast stream fired by
+   `enqueueWakefulness`/`enqueuePhoto`, **not** GPS). `SyncFlushService.start()` subscribes and kicks
+   an immediate `flush()` so an important capture drains the instant signal is back instead of waiting
+   for a connectivity edge. single-flight makes it safe to over-fire.
+3. **60s heartbeat** — `SyncFlushService` runs `Timer.periodic(60s)` while started, as a backstop for
+   the "online flag never flips but requests fail" soft-failure case. Empty queue = no-op.
+
+`stop()` cancels the enqueue sub + heartbeat; `OfflineQueueDb.close()` closes the stream controller.
+
+**Payloads/endpoints/idempotency unchanged** — only order + timing of the sends. Sent Jerry an FYI:
+`docs/BACKEND_NOTE_FLUSH_PRIORITY_2026-07-23.md` (no backend action needed; flags slightly more
+duplicate re-sends from the new triggers, already handled by idempotent responses).
+
+**State:** `flutter analyze` clean · **168 tests pass** (was 166; +2: photos-before-GPS ordering,
+`onImportantEnqueue` fires). Not committed.
+
+**Jerry's reply (`BACKEND_NOTE_FLUSH_PRIORITY_2026-07-23.md` → his reply):** reorder **confirmed,
+shipped**. Order-independence + idempotency verified server-side; keep GPS big-batch-last (don't split
+into small requests — we already do). One optional guardrail: a `backfill:true` flag on reconnect-drain
+GPS POSTs so a **>200-ping backlog** (~50+ min offline at 15s cadence) can't have its 2nd chunk misread
+as a live tick and retroactively page. **Prepared app-side, held OFF:** `SyncFlushService.sendGpsBackfillFlag`
+(false) → adds `backfill:true` to every `_flushGps` body when flipped. Every `_flushGps` request IS a
+backfill by definition (live pings post direct; only failed ones queue). ⚠️ **Do NOT flip until Jerry
+confirms the server honours the field** (he asked us not to send it yet). Reply sent:
+`docs/BACKEND_REPLY_FLUSH_PRIORITY_2026-07-23.md` — asks him to wire it up + confirm placement/semantics,
+then it's a one-line flip + redeploy. Also confirmed to him we do NOT send a position-first ping ahead of
+the backlog (his corollary guardrail).
+
+---
+
+## 2026-07-23 (cont.) — Crash fix: deep-link double-handling (Flutter built-in vs app_links)
+
+**🔴 Crash — FIXED.** Tapping/handling a shift-access SSO link threw
+`Could not find a generator for route "/<64-hex-token>"` from `didPushRouteInformation`. Cause:
+the app handles the `ironlock://shift-access/<token>` link itself via the **app_links** plugin
+(`deep_link_service.dart`), but **Flutter's built-in deep-linking was also enabled** and tried to
+push the link's path as a named route — the app has no router, so `MaterialApp` crashed.
+**Fix:** disabled Flutter's automatic deep-linking on both platforms so app_links is the sole
+handler (app_links uses a separate channel, unaffected):
+- iOS `ios/Runner/Info.plist`: `FlutterDeepLinkingEnabled = false`.
+- Android `AndroidManifest.xml`: `<meta-data flutter_deeplinking_enabled = false>` in the activity.
+
+⚠️ **Native config change → needs a full rebuild** (stop `flutter run` with `q`, re-run), NOT a hot
+restart. `flutter analyze` clean · 166 tests pass (Dart untouched). Not committed.
+
+---
+
+## 2026-07-23 (cont.) — Crash fix: `ref` used in dispose() + blanket HTTP debug logging
+
+**🔴 Crash — FIXED.** On-device teardown threw `Bad state: Using "ref" when a widget is about to or
+has been unmounted is unsafe` from `_WakefulnessOverlayState.dispose` (the `reset()` call). Riverpod
+forbids `ref` in `dispose` once the element is unmounted during tree finalization. Fixed in TWO steps
+(the first surfaced a SECOND Riverpod error — *"modified a provider while the widget tree was building"* —
+because mutating a provider synchronously in dispose still runs during tree finalization):
+- Capture the notifier in a field in `initState` (`late final WakefulnessNotifier _notifier` /
+  `late final PhotoNotifier _photoNotifier`) so dispose never touches `ref`.
+- **Defer the reset off the frame:** dispose now calls `Future.microtask(_notifier.reset)` /
+  `Future.microtask(_photoNotifier.reset)` — runs after the frame, when provider mutation is safe.
+  `wakefulness_overlay._close()` **no longer resets at all** — its `.then` runs during the pop's frame,
+  so a direct reset there threw the same "modify during build" AND cascaded rebuilds into the defunct
+  overlay (`'_lifecycleState != defunct'` assertions spamming). dispose's deferred microtask is the sole
+  reset now.
+- `photo_screen.dart`'s reset was introduced by *my* 2026-07-22 expiry-close change — same anti-pattern.
+- Swept all `dispose()` in `lib/` for `ref.read/watch/listen` — none remain.
+
+**Debug logging (dev visibility for on-device testing).**
+- `api_client.dart`: added a **debug-only** `_DebugLogInterceptor` on the shared Dio — logs every
+  request/response/error as `[http] → METHOD url` / `[http] ← status METHOD path` / `[http] ✗ status
+  METHOD path code=…`. **Never logs bodies/headers** (they carry the password, JWTs, `hmac_secret`).
+  Covers ALL backend calls in one place; only added when `kDebugMode`.
+- `auth_service.login`: added `[auth]` request/OK/FAILED logs (identifier + status + error code, never
+  the password/tokens) so a login failure's real reason (window/creds/network) is visible.
+
+**State:** `flutter analyze` clean · **166 tests pass**. Not committed. On-device: hot-restart (R) to
+pick up the Dio-interceptor change.
+
+---
+
+## 2026-07-23 (cont.) — Timezone: localize LOGIN_WINDOW_CLOSED (+ full time-display audit)
+
+Jerry flagged a wrong-zone login message (an 11:25 shift showed as "05:55" — the tester's UTC+5:30
+offset). Rule from backend: **every datetime is UTC (ISO-8601 `Z`); the app must localize on-device.**
+For `LOGIN_WINDOW_CLOSED`, build the copy from the machine-readable `details` timestamps, NOT the
+server's pre-rendered `message` (which renders in one fixed server zone).
+
+**🟠 LOGIN_WINDOW_CLOSED message — FIXED.** Both login paths (password + SSO redeem) showed
+`apiError.message`/`err.message` verbatim → the wrong-zone string. Added
+`ShiftAccessException.loginWindowMessage(ApiError)` (+ `_localHHmm` helper) that switches on
+`details.reason`: `too_early` → composes *"You can sign in from {window_opens_at, local} — 15 minutes
+before your {next_shift_start, local} shift."* from the UTC `details` via `DateTime.parse(...).toLocal()`;
+`expired` → "Your sign-in window has closed." (the login screen already shows the contact-supervisor
+cue when `windowExpired`); `no_shift` → own copy; falls back to the server `message` only when `details`
+is absent/unparseable. `login_screen._signIn` now routes LOGIN_WINDOW_CLOSED through it (switch on code);
+`shift_access_link.fromDio` uses it too — one shared localizer for both paths.
+
+**Full time-display audit — clean.** Every other wall-clock render already uses a DateTime that's
+localized at the source: `CurrentShiftModel.fromJson` does `.toLocal()` on scheduled/actual start/end;
+`ShiftState.startTime` = `actualStart` (localized) or `DateTime.now()` (local); the manual `_fmtHHmm`/
+`_formatTime`/`_fmt` formatters read `.hour`/`.minute` off those already-local values. The login-window
+hint `opensAt` derives from `cs.scheduledStart` (local). Durations/deadlines (nonce `expires_at`,
+wakefulness `issued_at + response_seconds`) compare UTC instants directly — no zone needed. So the only
+raw-UTC-to-screen leak was the login message; now fixed.
+
+**Files:** `lib/services/shift_access_link.dart` (localizer + helper),
+`lib/screens/login/login_screen.dart` (route LOGIN_WINDOW_CLOSED through it + import),
+`test/services/shift_access_link_test.dart` (updated expired test + 3 new: too_early localization,
+missing-timestamp fallback, no_shift).
+
+**State:** `flutter analyze` clean · **166 tests pass** (was 163, +3). Not committed.
+**Note:** backend is also fixing its `message` to render UK time, but device-localization is the real
+fix and is zone-correct anywhere. In dev, an admin browser and a test device in different zones will
+legitimately differ by the offset — expected; prod is all-UK.
+
+---
+
+## 2026-07-23 (cont.) — Backend reply reconciliation (nonce TTL + wakefulness issued_at)
+
+Jerry answered `docs/BACKEND_ASKS_2026-07-23.md` — all 3 handled server-side. Reconciled the app.
+
+**🔴 #1 Offline-photo nonce TTL (the blocker) — server-fixed, app decoupled.** Pool nonces now stay
+valid the whole shift (server keys off each nonce's own `expires_at` + a grace margin). The app
+**already** stored and enforced per-nonce `expires_at` in the `NoncePool` table, so the "can't save the
+photo" (`NONCE_EXPIRED`) path is fixed with no structural change. **BUT** Jerry's change also flips the
+aggregate `offline_nonce_ttl_minutes` (start `photos` block) from a fixed `15` to shift-length (~500 for
+8 h). `PhotoProvisioning.dueMark` was reusing that field as the *offline-photo fire window*, so doing
+nothing would have ballooned "fire a due mark within 15 min" into "…within ~8 h" — firing wildly-late
+captures that miss the mark the server matches by timestamp. **Fixed by decoupling:** new fixed
+`PhotoProvisioning.fireWindowMinutes = 15` constant drives `dueMark`; `offlineNonceTtlMinutes` is now
+display/round-trip metadata only. Added a regression test locking this in (a 500-min TTL must NOT widen
+the fire window).
+
+**🟡 #2 `issued_at` on the wakefulness push — server-added, app already handles it.** `push_router`
+already parsed `data.issued_at` and `_dispatch` already used it, so a tapped live challenge now opens
+instantly. Kept the stale-tap guard (`!confirmReceipt && issuedAt == null → drop`) as defence-in-depth
+for the deploy-rollout window / malformed payloads; updated its "remove once backend sends issued_at"
+comment. Updated `push_router` payload doc.
+
+**🟡 #3 Expired photo-pending pruning + CRITICAL — confirmed in code.** No app change (our defensive
+handling was already correct). Re-test on device after Jerry's next deploy + `config:cache`.
+
+**Files:** `lib/providers/photo_schedule_provider.dart` (decouple fire window),
+`lib/services/push_messaging_service.dart` (comment), `lib/services/push_router.dart` (payload doc),
+`lib/services/nonce_pool_service.dart` (doc: shift-spanning TTL), `test/providers/photo_schedule_test.dart`
+(+regression test), `docs/BACKEND_ASKS_2026-07-23.md` (resolved banner).
+
+**State:** `flutter analyze` clean · **163 tests pass** (was 162, +1). Not committed.
+**Still owed by backend:** #1/#2 land on their next release; #3 re-test post-deploy. The nonce-TTL ask
+is now closed.
+
+---
+
+## 2026-07-23 (cont.) — Deep interaction audit (client-readiness) + iOS notif fixes
+
+Function-level audit of the logic-bearing code focused on *interactions/clashes* (provider lifecycles,
+async races, shared state, ID collisions), for a client deliverable. Found + fixed 2 real bugs; the
+crypto/TOTP/time/DB/HMAC layers remain clean.
+
+**🔴 Notification ID collision — FIXED.** `showPhotoReview` used id `2000 + (hash & 0xFFF)` → range
+[2000, 6095], which **overlapped** the wakefulness reminders (3000-3063), photo reminders (4000-4063),
+and photo requests (`5000 + (hash & 0xFFF)` = [5000, 9095]). A review notification could land on the
+same OS id as a **scheduled welfare-check reminder and cancel it** → a guard silently misses the
+prompt. Fixed: reviews → `100000 + (hash & 0xFFF)`, requests → `200000 + (hash & 0xFFF)` — distinct
+high ranges clear of everything.
+
+**🟠 Cross-session state leak on sign-out — FIXED.** The single app-root ProviderScope survives
+sign-out, so providers not explicitly invalidated carried the previous guard's state to the next guard
+on the same device (shift handover). `alertsProvider` (previous guard's welfare-miss alerts),
+`pendingPhotoProvider`/`photoProvider` (stale/expired photo request), `photoReviewProvider` (seen-set),
+`zoneProvider`/`zoneUpdatedAtProvider`, `activeTabProvider` are now all invalidated in
+`AuthNotifier.signOut()` alongside the shift/wakefulness ones.
+
+**iOS notification foreground presentation — FIXED.** All four notifications used empty
+`DarwinNotificationDetails()`, so on iOS nothing showed while the app was foregrounded. Added a shared
+`_darwin` config (`presentAlert/Badge/Sound/Banner: true`). Also documented the iOS 64-pending-notif
+cap. (iOS does NOT have the Android Doze problem — its scheduled notifications fire on time.)
+
+**Audited clean:** main.dart lifecycle wiring, auth build/persist/signOut ordering, shift start/end/
+resume/reconcile (the end vs auto-close race is correctly gated by end_type), SSO token extraction
+(strict 64-hex), battery timer/subscription disposal, deep-link handling, photo-review dedup.
+
+**Still open (unchanged):** offline-photo 15-min nonce TTL (backend), dead-Wi-Fi/captive-portal #2
+(decision), `USE_EXACT_ALARM` Play-policy (decision), nonce pool not primed on resumeFromServer (low).
+
+**Files:** `lib/services/notification_service.dart`, `lib/providers/auth_provider.dart`.
+
+**Deeper round — parsing/model robustness (client data safety).** Read the models + auth/shift
+services + login + camera lifecycle line-by-line. Two fragility bugs where imperfect server data would
+break a core flow, both FIXED:
+- **`GuardProfileModel.fromJson`** hard-cast every required string → a guard record with any null field
+  (e.g. null `last_name`) threw mid-parse and **failed the whole login** with a cryptic TypeError. Now
+  defaults each string (`as String? ?? ''`).
+- **`CurrentShiftModel.fromJson`** parsed `site`/`geofence` with hard casts (`coordinates as List`) → a
+  malformed geofence threw out of the whole shift parse, **dropping the shift on every 20s poll** and
+  stranding the guard on a disabled START. Now parses nested objects via a try/catch `_parseNested`
+  helper (bad sub-object → null, shift still loads).
+Confirmed clean: login error handling (catches Dio + generic), camera controller lifecycle (releases
+before re-open, handles dispose-during-init), shift-start server reconciliation. Minor cosmetic noted
+(login "Signing in…" loader uses AlwaysStoppedAnimation so the arc doesn't spin — visual only).
+
+**Files (deeper round):** `lib/models/guard_profile_model.dart`, `lib/models/current_shift_model.dart`.
+**162 tests pass · analyze clean.** Not committed.
+
+---
+
+## 2026-07-23 — Device-test bugs: offline notifications (Android Doze) + offline photo (nonce TTL)
+
+Two real on-device failures reported (Android): (1) offline welfare/photo reminder notifications only
+appeared on reconnect/unlock, never at the due time; (2) offline photo capture failed "couldn't save
+the photo," and the flush "wasn't working."
+
+**#1 Offline notifications — FIXED (Android Doze / inexact alarms).** Root cause: no exact-alarm
+permission was declared, so `exactAllowWhileIdle` threw and `_scheduleChecks` silently fell back to
+`inexactAllowWhileIdle` — which Doze batches until the device wakes. Fix: declared
+`SCHEDULE_EXACT_ALARM` (maxSdk 32) + `USE_EXACT_ALARM` in AndroidManifest, and
+`NotificationService.requestPermission()` now calls `requestExactAlarmsPermission()` (Android 12
+runtime grant). `_scheduleChecks` already tries exact first, so it now fires on time in Doze.
+⚠️ **Play-policy note:** `USE_EXACT_ALARM` is store-reviewed — justified as core lone-worker safety
+timing, but the listing must declare it. Also: aggressive OEM battery managers (Xiaomi/Samsung/etc.)
+can still kill alarms, so FCM push remains the reliable delivery path; exact local alarms are the
+offline fallback.
+
+**#2 Offline photo "can't save" — DIAGNOSED, needs a BACKEND change.** The offline photo path draws a
+prefetched pool nonce valid **15 min**, but offline photo marks are **50–70 min apart** and the pool
+only refills while online — so a guard offline > ~15 min always has an expired pool → `draw()` null →
+"couldn't save," and nothing queues (so the flush has nothing to drain — the "flush not working" is a
+symptom). Unlike wakefulness (shared TOTP seed, works offline indefinitely), photo has no offline-
+durable credential. **Backend ask:** issue offline-pool nonces with a TTL covering realistic offline
+stretches (hours), or move offline photo to a seed/HMAC model. No app-side fix possible (can't
+prefetch while offline).
+
+**Diagnostics added (so the next test is conclusive):** the offline-photo failure now names the cause
++ shows pool depth (`photo_screen.dart`); `NoncePoolService.refillIfLow` logs prefetch parse
+count/failure instead of swallowing silently (distinguishes a broken endpoint from TTL expiry).
+
+**Files:** `android/app/src/main/AndroidManifest.xml`, `lib/services/notification_service.dart`,
+`lib/services/nonce_pool_service.dart`, `lib/screens/photo/photo_screen.dart`.
+**162 tests pass · analyze clean.** Not committed.
+
+---
+
+## 2026-07-22 (cont. 5) — Full-app bug audit + 5 fixes
+
+Audited every layer for correctness bugs (offline sync, time-anchor, TOTP, SQLCipher/DB, auth
+refresh, GPS, photo capture/upload, schedules, connectivity, sign-out). Most of the app is clean;
+fixed 5 real issues. **#2 deliberately deferred** (needs a product call — see below).
+
+**#1 🔴 Refresh interceptor concurrency (api_client.dart).** `_pendingRetries` was drained with a
+`for-in` loop containing `await`s; a concurrent `401 TOKEN_EXPIRED` (the poll + GPS fire several at
+once) appending mid-drain raised a `ConcurrentModificationError` → caught by the outer catch → a
+**spurious forced sign-out** mid-shift; items added after the loop were `clear()`ed unresolved →
+**hung requests**. Fixed: pop-based drain (`_drainPending`, `while removeAt(0)`) that tolerates
+concurrent adds, plus `_failPending` so every queued request's handler resolves on the
+refresh-failure paths too (no more hangs). Verified no orphan window exists (no awaits between the
+drain and the `finally`).
+
+**#3 🟡 Photo transport failure double-counted (photo_screen.dart).** A network blip on an online
+upload recorded `recordPhoto(passed:false)`, then a successful Try Again recorded `passed:true` — one
+request counted as both a miss and a pass. Now a transport failure shows "Upload failed — tap Try
+Again" and records **nothing** (the server owns the real missed-photo verdict); only a genuine server
+rejection counts as a miss.
+
+**#4 🟡 Flush didn't stop on a mid-flush network drop (sync_flush_service.dart).** `_flushWakefulness`
+/ `_flushPhotos` kept looping every due row on a transient failure (burning a Dio timeout each), unlike
+`_flushGps` which returns early. Both now `return` on a `retry` decision (a per-row 4xx is still a
+`drop`, so it doesn't stop the loop).
+
+**#5 🟢 Offline pool-dry capture not counted (photo_screen.dart).** A scheduled offline capture that
+can't queue (dry pool / no key) is discarded and won't re-fire, but wasn't recorded as a miss — now it
+is, so the end-shift summary is honest.
+
+**#6 🟢 Hardcoded digit count (wakefulness_provider.dart).** `s.entry.length != 4` → `!=
+kWakefulnessDigits`.
+
+**#2 ⏸️ DEFERRED (needs a call).** `isOnlineProvider` is interface-based (`connectivity_plus`), so on
+dead-Wi-Fi / captive portal `online==true`: the offline TOTP scheduler is gated off AND the online
+poll fails → the guard sees no welfare challenge (server still records the miss + alerts). A fix needs
+a reachability signal, but done wrong it re-introduces the "online check tagged Offline" mislabel we
+fixed in cont. 2. Left for a product decision.
+
+**Files:** `services/api_client.dart`, `services/sync_flush_service.dart`,
+`screens/photo/photo_screen.dart`, `providers/wakefulness_provider.dart`.
+**162 tests pass · analyze clean.** Not committed. No interceptor unit test added (would need a new
+mock-adapter dep + plugin-channel mocking — verified by reasoning + existing suite instead).
+
+---
+
+## 2026-07-22 (cont. 4) — Offline-sync test findings: 4 Flutter-owned fixes
+
+Implemented the app-side items from `docs/TEST_FINDINGS_TRIAGE_2026-07-22.md` +
+`docs/FLUTTER_APP_TASKS_2026-07-22.md` (backend owns the rest: reconnect clustering, DELAYED_UPLOAD,
+offline badge). Full root-cause report was produced first; these are the fixes.
+
+**#4 caveat — empty nonce pool on immediate offline (shift_provider.dart).** Shift start now primes
+the offline nonce pool + NTP anchor (`refillIfLow` + `ensureFresh`), not only the 20s poll — so a
+guard who drops offline in the first seconds can still queue an offline photo. Detached + fully
+guarded (await inside try/catch, `.ignore()`) so it can never block/fail shift start.
+
+**#1 — online/manual photo request raised no notification.** Root cause: nothing ever `.show()`s for
+an incoming photo *request* (only scheduled reminders + review outcomes existed); the wakefulness
+"heads-up" seen in the test was the *scheduled* local reminder coinciding, not a push. Added
+`NotificationService.showPhotoRequest(requestId)` (stable id base 5000). Called from
+`_backgroundHandler`'s `PHOTO_REQUEST` case (so a data-only push becomes visible once APNs lands;
+works on Android now) **and** when the home listener first surfaces a new online request (parity with
+wakefulness).
+
+**#2a — stale tapped wakefulness got a full fresh window.** The FCM `WAKEFULNESS_CHALLENGE` payload
+carries no `issued_at`, so `trigger()` couldn't date a tapped-old push → granted a full window for a
+dead check whose barrier then stranded the screen. `push_messaging_service._dispatch` now drops a
+TAP-delivered (`!confirmReceipt`) wakefulness with no `issued_at`; a genuinely-live one re-surfaces
+via the `/wakefulness/pending` poll. **Backend ask filed** (added to `BACKEND_ASKS_2026-07-22.md`):
+include `issued_at` in the wakefulness push so the guard can be dropped for the right reason.
+
+**#3 + #2b — simultaneous wake+photo raced; cold-start listener miss.** New pure-Dart
+`ChallengeQueue` (services/challenge_queue.dart) serialises full-screen challenge presentation.
+`home_screen` now funnels BOTH the wakefulness overlay and the photo screen through it (one FIFO,
+one at a time) instead of two independent `ref.listen`s racing `showDialog` vs `Navigator.push`.
+Listener bodies extracted to `_onWakefulnessState`/`_onPendingPhotoState` + presenter helpers, and a
+post-frame `_presentPendingChallenges()` covers the cold-start case where a push tap set state before
+the listeners registered (ref.listen won't replay the current value). `_wakefulnessPresenting` guard
+prevents double-enqueue.
+
+**Files:** `providers/shift_provider.dart`, `services/notification_service.dart`,
+`services/push_messaging_service.dart`, `services/challenge_queue.dart` (NEW),
+`screens/home/home_screen.dart`; tests: `test/services/challenge_queue_test.dart` (NEW, 5 cases).
+
+**162 tests pass · analyze clean.** Not committed. #4 offline photo confirmed already working
+(pool-nonce capture, no internet at capture); the prefetch closes the only remaining gap.
+
+---
+
+## 2026-07-22 (cont. 3) — Backend reply reconciled (schedules / tagging / expired photo-pending)
+
+Jerry replied to `docs/BACKEND_ASKS_2026-07-22.md`. **Net: no app code changes needed** — every
+point is either a confirmation or already handled. Reconciliation:
+
+- **§1 `schedule: []` was NOT a bug.** A 30-min test shift is mathematically always empty: first
+  welfare mark = start + 30–45 min, first photo mark = start + 50–70 min — both past a 30-min
+  `scheduled_end`. He declined to special-case short shifts (keeps production cadence honest).
+  → **To observe checks on-device, use a ~2-hour test shift.** Welfare guaranteed with a window
+  **>45 min**, photos with **>70 min**.
+- **Schedule model:** welfare every 30–45 min, photos every 50–70 min (random draw once at start,
+  ≤64 marks); **fixed at start** — trust the start payload for the whole shift. ⚠️ There is
+  currently **no re-fetch endpoint** — only `POST /start` returns the arrays and start can't be
+  re-called on an active shift. We already cache them on-device at start, so fine; but a mid-shift
+  reinstall/clear can't recover them. Jerry will add `GET /shifts/{id}/schedule` if we need it.
+- **§2 Offline tagging = endpoint-based** — `/respond` → Online, `/wakefulness/offline` → Offline.
+  **Caveat:** `/respond` still flips to Offline if the body carries `window_reference` or
+  `is_offline`. Verified our `WakefulnessService.respond()` body is clean (`code` + `responded_at`
+  only) — nothing to fix.
+- **§2b expired photo-pending = real backend gap, fix queued** (poll now filters on the live
+  deadline, not just status). Our defensive handling (`_seenPhotoRequestIds` + auto-close) stays.
+  Confirmed **expiry raises the CRITICAL "missed" alert server-side on its own** — the app correctly
+  does nothing on expiry but close the screen.
+- **§3 manual welfare trigger** appears on `/wakefulness/pending` with all five fields → our
+  iOS-without-push path is confirmed working.
+
+**Edge case to watch:** if a guard reconnects and their GPS ping lands **before** their offline
+flush, the minute-cron may push an online check for a mark already answered offline → one ONLINE +
+one OFFLINE row for that mark. Rare, both recorded truthfully. If seen on the dashboard, send Jerry
+the two check IDs.
+
+**No code changed. `docs/BACKEND_ASKS_2026-07-22.md` checklist marked resolved.** Not committed.
+
+---
+
+## 2026-07-22 (cont. 2) — Fix: expired photo request re-opened into a dead capture loop
+
+**Symptom:** a missed photo verification, then pull-to-refresh, showed "request expired — new
+request in 30s"; after 30s the camera re-opened, but capturing then failed "try again / timed out" —
+in a loop.
+
+**Root cause (three parts):**
+1. The server keeps a **missed/expired** request marked `pending`, and the poll/pull-to-refresh
+   re-opened it every cycle (`_handlingPhotoRequestId` only guarded while a screen was open).
+2. `PhotoNotifier.tick()` **auto-reset the expired state to a fresh idle 90s window** — re-opening a
+   live camera for a request whose server nonce/window was already dead.
+3. So a capture into that fake-fresh window hit `NONCE_EXPIRED` → `failed` → "Try Again" → repeat.
+   The `_UploadStatus` text even promised "new request in 30s", which the app can't do.
+
+**Fix:**
+- **home_screen:** added `_seenPhotoRequestIds` (bounded) — a request id opened once (completed OR
+  missed) is never re-opened; only a genuinely new id opens. Poll + navigation both check it.
+- **photo_provider:** `tick()` no longer resets expired → idle (never re-opens a live window); added
+  `PhotoNotifier.reset()`.
+- **photo_screen:** on expiry, drop any held batch and **auto-close after ~3s** (show "Verification
+  window expired — closing…") instead of reopening; `reset()` the provider on `dispose` so a terminal
+  state can't block the next request / the offline scheduler. Removed the misleading
+  "new request in Ns" copy + the now-unused `expireCountdown` UI param.
+
+**157 tests pass · analyze clean.** Not committed.
+
+---
+
+## 2026-07-22 (cont.) — Fix: online welfare check was recorded as "Offline" on iOS
+
+**Symptom:** answered a welfare check while online, but the dashboard tagged it **Offline**.
+**Cause:** the dashboard tags a check Offline when the answer hits `/wakefulness/offline`. The home
+poll ran the local TOTP scheduler whenever push wasn't delivering (`!online || !isDelivering`) — and
+on **iOS without APNs** `isDelivering` is always false, so the scheduler fired **even when online**
+and answered via the offline endpoint → mislabelled.
+**Fix:** now that `GET /wakefulness/pending` gives a proper online delivery path (answers via
+`/respond` → recorded Online), gate the local scheduler on **`!online`** only. So: online → push or
+the pending-poll (`/respond`, Online); offline → local scheduler (`/wakefulness/offline`, Offline).
+One-liner in `home_screen._pollBackend`. Added debug logs in `wakefulness_provider._report`
+(`[wakefulness] answer via ONLINE/OFFLINE endpoint …`) to make the path visible.
+**157 tests pass · analyze clean.** Not committed.
+> Note: current test shift returns empty `schedule: []` for both wakefulness + photos, so no
+> scheduled checks fire at all (online or offline) until the backend populates them.
+
+---
+
+## 2026-07-22 — On-screen sync indicator (verify offline flush untethered) + flush debug logs
+
+**Why:** offline can't be tested in **debug** — killing Wi-Fi/data drops the laptop's VM-Service
+tether and the debug app dies. So verification has to work on a **standalone** build with no logs.
+
+**Added an on-device sync indicator (release-safe):**
+- `OfflineQueueDb.totalPending()` — count of all buffered rows (GPS + wakefulness + photos).
+- `pendingSyncProvider` (`PendingSyncNotifier`) — refreshed by the home poll + pull-to-refresh.
+- Home screen: a `_SyncStatusChip` in the content — offline → "N items saved offline — will upload
+  when online"; online → "Syncing N…" with a spinner. When the backlog drains to 0, a snackbar
+  "Offline data synced (N items)" confirms it. Lets you watch offline→reconnect flush **with no
+  laptop**: go offline (chip counts up) → reconnect (chip → syncing → snackbar → gone).
+- **Debug-only flush logs** in `SyncFlushService` (`[sync] … → POST <endpoint> → success/retry/drop`
+  + the base URL) so a *tethered* debug run also shows each POST hitting the branded host.
+
+**How to verify untethered:** `flutter run --release --dart-define-from-file=config/prod.json` once
+over cable → unplug → toggle Airplane mode. Confirm on the chip/snackbar (and cross-check the
+dashboard "Offline" tag). Release strips the `[sync]` logs — the chip/snackbar is the on-device
+signal.
+
+**157 tests pass · analyze clean.** Not committed.
+
+---
+
+## 2026-07-21 (cont. 3) — Offline welfare/photo check notifications (were never scheduled)
+
+**Bug:** the guard got **no offline notifications** for welfare/photo checks. Root cause: the app
+never scheduled any — `NotificationService` only had the shift-end reminder + photo-review toast.
+The offline checks were only surfaced by the in-app 20s poll (`checkSchedule`), which requires the
+app **foregrounded**. Per `FLUTTER_HANDOFF_WAKEFULNESS_OFFLINE_AND_UX.md` §0, offline prompts must be
+**local notifications the app schedules at shift start** (a push can't reach an offline device).
+
+**Fix — schedule OS-level local notifications at each schedule mark:**
+- `NotificationService`: new `scheduleWakefulnessChecks(marks)` / `schedulePhotoChecks(marks)` +
+  `cancelWakefulnessChecks()` / `cancelPhotoChecks()`. One notification per **future** mark (id
+  ranges 3000+/4000+, capped 64), replaced on re-provision. Tries an **exact** alarm, falls back to
+  **inexact** if the OS withholds exact-alarm permission. Entire path is best-effort (never throws —
+  a notification failure must not break shift start).
+- Wired in `WakefulnessScheduleNotifier` + `PhotoScheduleNotifier`: schedule on `provisionFromJson`
+  (shift start) and `restore` (relaunch/re-arm); cancel on `clear` (shift end / reconcile). Also
+  cancelled explicitly in `AuthNotifier.signOut` (invalidate disposes the notifiers without running
+  `clear`).
+- The OS fires these even backgrounded/killed/offline; tapping one opens the app and the existing
+  scheduler raises the challenge/capture for the due mark.
+
+**Notes / tradeoffs:**
+- **Timing:** `SCHEDULE_EXACT_ALARM` isn't declared (Play-Store exact-alarm policy), so scheduling
+  uses the **inexact** fallback → a reminder can fire a little late in Doze. If exact welfare timing
+  is needed, add `USE_EXACT_ALARM`/`SCHEDULE_EXACT_ALARM` to the Android manifest.
+- **Online double-notify:** when online **and** FCM is delivering, the server also pushes at the same
+  mark → the guard may see two banners (the in-app challenge is still deduped by `check_id`, so only
+  one prompt appears). Not an issue on iOS (no APNs) or offline. Follow-up if annoying: cancel the
+  local mark-notification once its push/challenge is handled.
+- **iOS:** local notifications need the notification permission (already requested at shift start);
+  iOS caps ~64 pending — fine for a realistic shift's mark count.
+
+**157 tests pass · analyze clean.** Not committed. Open: on-device verify a scheduled reminder fires
+while backgrounded/offline and opens the right check.
+
+---
+
+## 2026-07-21 (cont. 2) — Backend confirmed live; parser pinned to confirmed envelope
+
+Jerry replied (`docs/BACKEND_REPLY_2026-07-21.md`) to `docs/BACKEND_ASKS_2026-07-21.md`: **all four
+items confirmed live on the branded host.** Reconciled the app to the confirmed contract:
+- `GET /wakefulness/pending` envelope pinned to **`data.challenges[]`** (empty array = nothing
+  pending; no `pending:false` field). `extractPendingWakefulness` already handled it; added 2 tests
+  using Jerry's exact payload, and tightened the doc comment. **157 tests pass · analyze clean.**
+- `POST /wakefulness/offline`: duplicates → 200 `ALREADY_RESOLVED`, wrong code → 200
+  `{result:FAILED, reason:OFFLINE_CODE_MISMATCH}` — both non-4xx, so our "any 200 = dequeue" flush
+  is correct. Success body is enveloped (`data.result`/`data.reason`); we don't parse it (a no-throw
+  200 is enough), so no change needed.
+- Code padding: **no backend change** — the wire already carries `"0472"`; the lost zero was an
+  app-side parse, covered by our zero-pad-on-receipt (`_normalizeCode`). Verified `push_router`
+  keeps `code` a string (`s('code')`), so nothing drops it upstream now.
+- **App side is contract-complete.** Only the on-device verification pass remains (offline answer →
+  reconnect → "Offline" on the timeline/Welfare Report; pending-poll raising the sheet on iOS).
+
+---
+
+## 2026-07-21 (cont.) — Field fixes: wakefulness digit entry, location-off gate, pull-to-refresh
+
+Three device-reported issues, all app-side. **154 tests pass (was 151) · `flutter analyze` clean.**
+Not committed.
+
+### 🐞 Wakefulness code could only be partially entered
+Guard reported a **4-digit** code in the notification but the app let them type only 3 (and OK
+never enabled). Root cause: the server push `data.code` dropped a leading zero (`472` where the
+tray body shows `0472`), against a fixed 4-cell pin — the 4th cell could never fill.
+**Codes are always exactly 4 digits (online + offline)**, so the fix **normalises every incoming
+code to 4**: `WakefulnessNotifier._normalizeCode` strips non-digits and zero-pads to
+`kWakefulnessDigits` (4), applied in `trigger()` and `triggerLocal()`. The pin stays fixed at 4 —
+a 3-digit code is **never** shown or accepted; `472` is displayed and matched as `0472`.
+(Earlier this session I'd made the pin adaptive to the code length; reverted — we only ever want 4.)
+- Files: `lib/providers/wakefulness_provider.dart`, `lib/overlays/wakefulness_overlay.dart`.
+- ⚠️ **Backend ask:** send the wakefulness push `data.code` already **zero-padded to 4** so it
+  matches the notification body.
+
+### 📍 Location turned off mid-shift no longer leaves the app blind
+When the guard switches off Location Services (Control Center / swipe-down), GPS silently produces
+nothing but the app kept working. Now a **non-dismissible full-screen gate blocks the app until
+location is switched back on**.
+- New `locationServiceEnabledProvider` (`lib/services/gps_service.dart`): seeded optimistically
+  (`true`, no cold-start flash), corrected by `Geolocator.isLocationServiceEnabled()`, kept live by
+  `getServiceStatusStream()` (instant on a foreground toggle), and re-checked each 20s poll (catches
+  a toggle made while backgrounded).
+- New `lib/overlays/location_required_overlay.dart` — `PopScope(canPop:false)`, "Open Location
+  Settings" (`Geolocator.openLocationSettings()`), auto-clears when location returns. Shown from
+  `home_screen` when `!locationOn`. Distinct from the existing **permission-denied** banner (this is
+  the OS master toggle, not app authorisation).
+
+### 🔄 Pull-to-refresh on the home screen
+Both the active-shift scroll and the pre-shift scroll are wrapped in `RefreshIndicator` →
+`_pollBackend` (with `AlwaysScrollableScrollPhysics`), so a guard can force a shift-state / check /
+location refresh instead of waiting for the 20s tick. Files: `lib/screens/home/home_screen.dart`.
+
+### Tests / open
+- +3 regression tests (`test/providers/wakefulness_code_length_test.dart`: 3/4/6-digit entry).
+- Open: on-device verify — Control-Center location toggle raises/clears the gate; a short (3-digit)
+  code is enterable + submittable; pull-to-refresh feels right on both screens.
+
+---
+
+## 2026-07-21 — Offline wakefulness flush endpoint + wakefulness/pending poll (Jerry's 2026-07-06 handoff)
+
+Implemented the two backend deltas from `docs/FLUTTER_HANDOFF_WAKEFULNESS_OFFLINE_AND_UX.md`
+(+ the matching bits of the updated `FLUTTER_API_GUIDE (1).md`). Reviewed the API guide against
+the code first: the **early-end approval flow, checked_in/missed statuses, photo schedule, reviews,
+push routing were already implemented** — the only real gaps were the two wakefulness items below.
+**151 tests pass (was 143) · `flutter analyze` clean.** Not committed.
+
+### 🔴 FIXED — offline wakefulness answers were being silently dropped
+A schedule-fired (TOTP) challenge has **no server `check_id`** — the app invents `totp-<window>`.
+Both `submitOffline` and the online `respond(isOffline:true)` path were POSTing that synthetic id to
+`/wakefulness/{checkId}/respond`, which **404s on the real backend** → `classifyFlush` treats 4xx as
+terminal → **the answer was dropped** (exactly the gap Jerry reported). Now routed to the new
+**`POST /shifts/{id}/wakefulness/offline`** (`{window_reference, code, scheduled_at?, responded_at?}`),
+which the server materialises + records (pass or fail). Idempotent per (shift, window_reference) →
+`ALREADY_RESOLVED` on a 200.
+- `api_config.dart`: `wakefulnessOffline(shiftId)` + `wakefulnessPending(shiftId)`.
+- `wakefulness_service.dart`: `submitOffline` now targets the offline endpoint keyed on **shiftId**
+  (not checkId) with the doc's body; **`respond()` cleaned up** to online-only (dropped the
+  `isOffline`/`windowReference` workaround params).
+- `wakefulness_provider.dart` `_report`: a schedule-fired challenge (`isOffline`, has
+  `windowReference`) **never** calls `respond`. **Online → POST the offline endpoint immediately;
+  offline/failed → enqueue for the reconnect flush.** Real online (push/pending-poll) challenges with
+  a real `check_id` keep `respond`. Added `scheduledAt` to `WakefulnessState`/`triggerLocal` so the
+  flush sends the exact schedule mark.
+- `offline_queue_db.dart`: `WakefulnessQueue` gained **`shiftId`** (so a flush survives the shift
+  ending mid-backlog) + **`scheduledAt`**. `schemaVersion 1→2` with a **destructive** `onUpgrade`
+  (drop+recreate all tables) — the queue is a session-scoped, droppable buffer, so losing it is safe.
+  Regenerated `offline_queue_db.g.dart` (`dart run build_runner build`, native-assets on).
+- `sync_flush_service._flushWakefulness`: flushes via `submitOffline(shiftId: row.shiftId, …,
+  scheduledAt: row.scheduledAt)`.
+
+### 🟠 NEW — `GET /shifts/{id}/wakefulness/pending` poll (push-miss fallback)
+Twin of the photo pending-poll — makes the in-app code-entry sheet reliable when the FCM push is
+missed (notably **iOS with no APNs**). Added to `home_screen._pollBackend` (online + idle branch):
+tolerant `extractPendingWakefulness()` parser → `confirmReceived()` (fire-and-forget) → `trigger()`.
+No collision with the offline TOTP scheduler: that uses `totp-<win>` ids and only runs when
+offline/push-down; this surfaces server-initiated challenges (real uuids); the notifier's `check_id`
+dedup covers the overlap. A `DioException` (older backend without the endpoint) is swallowed.
+
+### §3 foreground UX — already covered
+The foreground `onMessage` handler already routes wakefulness→`trigger`→overlay and
+photo→`setPending`→PhotoScreen via `ref.listen`, deduped by id — so a foregrounded push already
+raises the sheet in-app. The missing reliability piece was the pending-poll above (done). No new code.
+
+### Tests
+- `wakefulness_offline_enqueue_test.dart` rewritten: offline→queued (with shiftId/scheduledAt),
+  **online→recorded immediately, not queued**, online-push→uses `/respond`.
+- `wakefulness_verdict_test.dart`: `respond` override signature updated (online-only).
+- `sync_flush_service_test.dart`: wakefulness flush now asserts the **offline endpoint path + body**
+  (window_reference/code/scheduled_at); `_seedWake` carries shiftId/scheduledAt.
+- `offline_queue_db_test.dart`: `enqueueWakefulness` seed carries shiftId.
+- NEW `extract_pending_wakefulness_test.dart` (7 cases: shapes, empty, missing code, expires_at
+  back-compute).
+
+### Open / next
+- 🔴 **On-device verification** (the only thing left): offline shift → answer a TOTP challenge →
+  reconnect → confirm it lands on the timeline/report tagged "Offline"; and a missed push → the
+  `/wakefulness/pending` poll raises the sheet in-app on iOS.
+- 🟡 **Mock backend** (`mock-backend/server.js`) does **not** serve `/wakefulness/offline` or
+  `/wakefulness/pending` — the home poll swallows the 404, so it's harmless locally, but add them if
+  you want to exercise these flows against the mock.
+- Carry-over: iOS APNs, EXIF↔NTP ≤30s, cert pinning, obfuscation (unchanged from Phase 7).
+
+---
+
 ## 2026-06-30 (cont. 2) — Phase 7 offline sync: CODE-COMPLETE + docs consolidated
 
 Phase 7 (offline capture → flush-on-reconnect) is now **feature-complete in code and unit-tested**

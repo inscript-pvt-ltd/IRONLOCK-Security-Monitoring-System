@@ -60,6 +60,17 @@ abstract class ApiConfig {
   static String wakefulnessRespond(String checkId) => '/wakefulness/$checkId/respond';
   // Confirms an online wakefulness push actually arrived (Phase 6). Online-only.
   static String wakefulnessReceived(String checkId) => '/wakefulness/$checkId/received';
+  // Flush a challenge that fired on-device from the TOTP schedule — it has NO
+  // server check_id (the server never created a row for an unreachable/push-down
+  // device), so it can't go to /respond. The server re-derives the TOTP for the
+  // sent window_reference and materialises the check. Idempotent per
+  // (shift, window_reference). Body: {window_reference, code, scheduled_at?, responded_at?}.
+  static String wakefulnessOffline(String shiftId) => '/shifts/$shiftId/wakefulness/offline';
+  // Push-miss fallback: any outstanding ONLINE wakefulness challenge for the
+  // shift (check_id, code, issued_at, response_seconds, expires_at). The twin of
+  // /shifts/{id}/photos/pending — polled so the code-entry sheet can be raised
+  // in-app even when the FCM push was missed (notably iOS without APNs).
+  static String wakefulnessPending(String shiftId) => '/shifts/$shiftId/wakefulness/pending';
   // Non-contractual interim poll — only the local mock serves this. The real
   // backend drives wakefulness from the TOTP schedule returned at shift start.
   static const String welfarePending = '/welfare/pending';

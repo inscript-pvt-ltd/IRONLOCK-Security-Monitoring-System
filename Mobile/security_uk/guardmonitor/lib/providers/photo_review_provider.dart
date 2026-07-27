@@ -58,6 +58,14 @@ class PhotoReviewNotifier extends Notifier<void> {
     if (requestId.isEmpty || _seen.contains(requestId)) return;
     _seen.add(requestId);
     await SecureStorageService.addSeenReviewId(requestId);
+    // Keep the in-memory set bounded — the persisted list is already capped
+    // (SecureStorageService._maxSeenReviews), so on growth just resync to it
+    // rather than letting _seen grow without limit across a long session (L8).
+    if (_seen.length > 200) {
+      _seen
+        ..clear()
+        ..addAll(await SecureStorageService.getSeenReviewIds());
+    }
 
     final approved = decision.toUpperCase() == 'APPROVED';
     final description = approved

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../../providers/app_providers.dart';
+import '../../services/nonce_pool_service.dart';
 import '../../services/offline_photo_service.dart';
 import '../../services/photo_service.dart';
 import '../../services/secure_storage_service.dart';
@@ -75,10 +76,14 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
   // the (N+1)th under review; on Use Photos it's appended and the batch uploads.
   final List<String> _capturedPaths = [];
   bool _popping = false;  // guards the auto-pop after a successful upload
+  // Captured in initState so dispose() can reset the FSM WITHOUT `ref` — using
+  // `ref` in dispose throws once the element is unmounted during tree teardown.
+  late final PhotoNotifier _photoNotifier;
 
   @override
   void initState() {
     super.initState();
+    _photoNotifier = ref.read(photoProvider.notifier);
 
     _scanCtrl = AnimationController(
       vsync: this,
@@ -92,22 +97,24 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
 
     _initCamera();
 
-    // Offline scheduled mode has no server response window — there's no
-    // countdown and no expiry; validity is purely the 15-min pool-nonce TTL,
-    // judged server-side from the reconstructed capture time. So skip the window
-    // anchor + the per-second tick entirely; just open an idle capture surface.
+    // Offline scheduled mode has no *server* response window, but leaving the
+    // overlay open forever if the guard never takes the photo is worse. So it
+    // gets the SAME fixed 90s window as an online request — anchored to when the
+    // screen opens (there's no server issue-time offline). On expiry the screen
+    // closes and the mark is recorded as a miss (the server also logs the missed
+    // scheduled check from the reconstructed timeline). The captured photo is
+    // still validated server-side by its NTP-anchored timestamp, not this timer.
     if (widget.scheduled) {
       WidgetsBinding.instance.addPostFrameCallback(
           (_) => ref.read(photoProvider.notifier).openScheduled());
-      return;
+    } else {
+      // Open the request's window anchored to when it was *issued/arrived*, not to
+      // now — the server's response window is fixed, so a late tap (e.g. the guard
+      // opened the notification minutes later) must spend the elapsed time and may
+      // even open already-expired. The provider is global and may still hold the
+      // previous request's terminal state, so set it explicitly here.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _openWindow());
     }
-
-    // Open the request's window anchored to when it was *issued/arrived*, not to
-    // now — the server's response window is fixed, so a late tap (e.g. the guard
-    // opened the notification minutes later) must spend the elapsed time and may
-    // even open already-expired. The provider is global and may still hold the
-    // previous request's terminal state, so set it explicitly here.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _openWindow());
 
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       final s = ref.read(photoProvider);
@@ -316,6 +323,13 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
     _cameraCtrl?.dispose();
     // Best-effort cleanup of any temp shots not consumed by an upload.
     _deleteFiles([_capturedPath, ..._capturedPaths]);
+    // Reset the (global) photo FSM so a terminal state (expired/failed) left on
+    // screen close can't block the next request or the offline scheduler. Use the
+    // captured [_photoNotifier] (not `ref` — throws once unmounted) AND defer off
+    // the current frame: mutating a provider synchronously in dispose throws
+    // "modified a provider while the widget tree was building". Microtask runs
+    // after the frame, when it's safe.
+    Future.microtask(_photoNotifier.reset);
     super.dispose();
   }
 
@@ -478,12 +492,25 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
         ));
         await Navigator.of(context).maybePop();
       } else {
-        // Pool dry (never prefetched) or signing key missing — can't queue.
+        // enqueueCapture returned null — can't queue, so this capture is lost (a
+        // scheduled mark won't re-fire). Record the miss AND surface the actual
+        // reason: an empty/expired nonce pool and a missing signing key are very
+        // different faults, and the generic message hid which one we hit. (No
+        // nonce was consumed on a null return, so these reads are accurate.)
+        final poolDepth =
+            await ref.read(noncePoolServiceProvider).available(shiftId);
+        final hasKey = await SecureStorageService.getHmacSecret() != null;
+        if (!mounted) return;
         ref.read(photoProvider.notifier).setResult(PhotoStatus.failed);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              "Couldn't save the photo offline. Reconnect and try again."),
-          duration: Duration(seconds: 4),
+        ref.read(shiftProvider.notifier).recordPhoto(passed: false);
+        final msg = !hasKey
+            ? 'Missing signing key — sign out and back in, then retry.'
+            : 'No offline photo credential available (pool empty — depth '
+                '$poolDepth). Offline capture needs a nonce prefetched within the '
+                'last ~15 min; reconnect to refresh.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(msg),
+          duration: const Duration(seconds: 6),
         ));
       }
       return;
@@ -539,9 +566,16 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
         ),
       );
     } catch (_) {
+      // Transport failure (timeout / connection drop) — NOT a rejection. The
+      // guard did respond; the upload just didn't land. Don't record a local
+      // "miss" (that would double-count against a successful Try Again, and the
+      // server owns the real missed-photo verdict). Show Try Again instead.
       if (!mounted) return;
       ref.read(photoProvider.notifier).setResult(PhotoStatus.failed);
-      ref.read(shiftProvider.notifier).recordPhoto(passed: false);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Upload failed — check your connection and tap Try Again.'),
+        duration: Duration(seconds: 4),
+      ));
     }
   }
 
@@ -589,15 +623,32 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
           if (mounted) navigator.maybePop();
         });
       }
-      // Window lapsed — the committed batch can never upload now, so drop it so
-      // it can't reappear as stale thumbnails when the provider auto-resets to
-      // idle. The held shot stays frozen on screen (handled by `showCaptured`).
+      // Window lapsed. The request is dead server-side — a capture now would only
+      // fail NONCE_EXPIRED — so drop any committed batch and CLOSE the screen
+      // after briefly showing "timed out", instead of reopening a live camera. A
+      // new capture must come from a new server request.
       if (next.status == PhotoStatus.expired &&
-          prev?.status != PhotoStatus.expired &&
-          _capturedPaths.isNotEmpty) {
-        final stale = List<String>.from(_capturedPaths);
-        setState(() => _capturedPaths.clear());
-        _deleteFiles(stale);
+          prev?.status != PhotoStatus.expired) {
+        if (_capturedPaths.isNotEmpty) {
+          final stale = List<String>.from(_capturedPaths);
+          setState(() => _capturedPaths.clear());
+          _deleteFiles(stale);
+        }
+        // An OFFLINE scheduled capture that timed out uncaptured is a genuine
+        // miss — nothing was queued, so record it locally for an honest end-shift
+        // summary (the server also logs the missed scheduled check from the
+        // reconstructed timeline). Guarded to once by the `prev != expired` check.
+        // The online path leaves the verdict to the server, so don't count it here.
+        if (widget.scheduled) {
+          ref.read(shiftProvider.notifier).recordPhoto(passed: false);
+        }
+        if (!_popping) {
+          _popping = true;
+          final navigator = Navigator.of(context);
+          Future.delayed(const Duration(seconds: 3), () {
+            if (mounted) navigator.maybePop();
+          });
+        }
       }
     });
 
@@ -657,9 +708,39 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                     ],
                   ),
                   SizedBox(height: context.s(12)),
-                  // Offline scheduled capture has no countdown — show a static
-                  // hint instead of the response-window timer/bar.
-                  if (widget.scheduled)
+                  // Response window + progress. Offline scheduled captures now run
+                  // the SAME fixed 90s window as an online request (so the overlay
+                  // can't linger forever) — the only difference is a note that the
+                  // shot saves offline instead of uploading now.
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('Respond within', style: AppType.caption),
+                      Text(
+                        isExpired ? 'Expired' : '${photo.secondsRemaining}s',
+                        style: AppType.label.copyWith(
+                          color: isExpired ? AppColors.danger : timerColor,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: context.s(8)),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(
+                      value: isExpired
+                          ? 0
+                          : photo.secondsRemaining /
+                              (photo.windowSeconds == 0 ? 1 : photo.windowSeconds),
+                      backgroundColor: AppColors.border,
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning,
+                      ),
+                      minHeight: 3,
+                    ),
+                  ),
+                  if (widget.scheduled) ...[
+                    SizedBox(height: context.s(8)),
                     Row(
                       children: [
                         Icon(Icons.cloud_off,
@@ -672,34 +753,6 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                           ),
                         ),
                       ],
-                    )
-                  else ...[
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text('Respond within', style: AppType.caption),
-                        Text(
-                          isExpired ? 'Expired' : '${photo.secondsRemaining}s',
-                          style: AppType.label.copyWith(
-                            color: isExpired ? AppColors.danger : timerColor,
-                          ),
-                        ),
-                      ],
-                    ),
-                    SizedBox(height: context.s(8)),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(2),
-                      child: LinearProgressIndicator(
-                        value: isExpired
-                            ? 0
-                            : photo.secondsRemaining /
-                                (photo.windowSeconds == 0 ? 1 : photo.windowSeconds),
-                        backgroundColor: AppColors.border,
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          photo.secondsRemaining <= 10 ? AppColors.danger : AppColors.warning,
-                        ),
-                        minHeight: 3,
-                      ),
                     ),
                   ],
                 ],
@@ -846,10 +899,7 @@ class _PhotoScreenState extends ConsumerState<PhotoScreen>
                     if (photo.status != PhotoStatus.idle &&
                         !isReviewing &&
                         photo.status != PhotoStatus.capturing) ...[
-                      _UploadStatus(
-                        status: photo.status,
-                        expireCountdown: photo.expireCountdown,
-                      ),
+                      _UploadStatus(status: photo.status),
                     ],
                     // Only a genuine miss (rejection / transport failure) offers
                     // Try Again. FLAGGED means the photo WAS accepted & stored
@@ -1222,9 +1272,8 @@ class _ShutterButtonState extends State<_ShutterButton> {
 // ── Upload status ─────────────────────────────────────────────────────────────
 
 class _UploadStatus extends StatelessWidget {
-  const _UploadStatus({required this.status, required this.expireCountdown});
+  const _UploadStatus({required this.status});
   final PhotoStatus status;
-  final int expireCountdown;
 
   @override
   Widget build(BuildContext context) {
@@ -1247,7 +1296,7 @@ class _UploadStatus extends StatelessWidget {
           Expanded(
             child: Text(
               status == PhotoStatus.expired
-                  ? '⏱ Request expired — new request in ${expireCountdown}s'
+                  ? '⏱ Verification window expired — closing…'
                   : cfg.text,
               style: AppType.caption.copyWith(fontSize: context.sp(13), color: cfg.color),
             ),

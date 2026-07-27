@@ -9,21 +9,26 @@ import '../../config/api_config.dart';
 import '../../models/api_response.dart';
 import '../../models/current_shift_model.dart';
 import '../../providers/alerts_provider.dart';
+import '../../data/offline_queue_db.dart';
 import '../../providers/app_providers.dart';
 import '../../providers/wakefulness_provider.dart';
 import '../../services/api_client.dart';
+import '../../services/challenge_queue.dart';
 import '../../services/connectivity_service.dart';
 import '../../services/gps_service.dart';
 import '../../services/nonce_pool_service.dart';
+import '../../services/notification_service.dart';
 import '../../services/push_messaging_service.dart';
 import '../../services/secure_storage_service.dart';
 import '../../services/time_anchor_service.dart';
+import '../../services/wakefulness_service.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_gradients.dart';
 import '../../theme/app_shadows.dart';
 import '../../theme/app_typography.dart';
 import '../../theme/responsive.dart';
 import '../../overlays/end_shift_sheet.dart';
+import '../../overlays/location_required_overlay.dart';
 import '../../overlays/permission_gate_overlay.dart';
 import '../../overlays/privacy_notice_overlay.dart';
 import '../../overlays/wakefulness_overlay.dart' hide AppGradients;
@@ -93,6 +98,53 @@ import '../photo/photo_screen.dart';
   );
 }
 
+/// Parses the outstanding ONLINE wakefulness challenge from
+/// `GET /shifts/{id}/wakefulness/pending` (the twin of the photo pending poll).
+/// The backend confirmed the envelope (BACKEND_REPLY_2026-07-21.md): challenges
+/// come back under **`data.challenges[]`**, and an **empty array means nothing
+/// pending** (there is no `pending:false` flag). We stay tolerant of the other
+/// plausible shapes too (a nested object, a bare list) as defence, but
+/// `data.challenges[]` is the real one. Both `check_id` and `code` are required —
+/// without the code there's no challenge to raise. Returns null when nothing is
+/// pending.
+({String checkId, String code, DateTime? issuedAt, int? responseSeconds})?
+    extractPendingWakefulness(dynamic data) {
+  Map<String, dynamic>? m;
+  if (data is Map<String, dynamic>) {
+    if (data['pending'] == false) return null;
+    final list = data['challenges'] ?? data['wakefulness_challenges'];
+    if (list is List) {
+      if (list.isEmpty || list.first is! Map) return null;
+      m = (list.first as Map).cast<String, dynamic>();
+    } else {
+      final nested = data['challenge'] ??
+          data['wakefulness'] ??
+          data['pending_challenge'];
+      m = nested is Map<String, dynamic> ? nested : data;
+    }
+  } else if (data is List && data.isNotEmpty && data.first is Map) {
+    m = (data.first as Map).cast<String, dynamic>();
+  }
+  if (m == null) return null;
+  final checkId = (m['check_id'] ?? m['id'])?.toString();
+  final code = m['code']?.toString();
+  if (checkId == null || checkId.isEmpty) return null;
+  if (code == null || code.isEmpty) return null;
+  final responseSeconds =
+      int.tryParse((m['response_seconds'] ?? '').toString());
+  DateTime? issuedAt = DateTime.tryParse((m['issued_at'] ?? '').toString())?.toUtc();
+  final expiresAt = DateTime.tryParse((m['expires_at'] ?? '').toString())?.toUtc();
+  if (issuedAt == null && expiresAt != null) {
+    issuedAt = expiresAt.subtract(Duration(seconds: responseSeconds ?? 60));
+  }
+  return (
+    checkId: checkId,
+    code: code,
+    issuedAt: issuedAt,
+    responseSeconds: responseSeconds,
+  );
+}
+
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -102,19 +154,48 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   Timer? _pollingTimer;
+  // Fast tick (while online with a backlog) so the sync progress bar animates as
+  // rows drain, instead of only stepping on the 20s poll. No-op when idle.
+  Timer? _syncProgressTimer;
   StreamSubscription<String>? _zoneSub;
   // The photo request currently being handled (a PhotoScreen is open for it).
   // Guards against the 20s poll — which keeps reporting the same request as
   // pending until it's fulfilled — re-opening a second PhotoScreen on top (H1).
   String? _handlingPhotoRequestId;
+  // Request ids we've already opened a PhotoScreen for. The server keeps
+  // returning a request as "pending" until it's fulfilled — including one whose
+  // window already EXPIRED (a missed check). Without this, every poll / pull-to-
+  // refresh re-opens the same dead request: it opens already-expired, and any
+  // capture then fails NONCE_EXPIRED. Once shown (completed OR missed), a request
+  // id is done here and never re-opened; a genuinely new request has a new id.
+  final _seenPhotoRequestIds = <String>{};
   // Guards against stacking two offline scheduled-capture screens.
   bool _handlingScheduledPhoto = false;
+  // Serialises full-screen challenge presentation (wakefulness overlay + photo
+  // screen) so a wake + photo landing in the same poll/push burst can't race and
+  // stomp each other — they present one after the other instead.
+  final _challengeQueue = ChallengeQueue();
+  // True once the wakefulness overlay is queued/showing, cleared when it closes.
+  // Stops the same challenge being enqueued twice (the state listener can fire
+  // repeatedly while status stays `challenge`, and the post-frame cold-start
+  // check may also see it).
+  bool _wakefulnessPresenting = false;
 
   @override
   void initState() {
     super.initState();
     _pollingTimer = Timer.periodic(const Duration(seconds: 20), (_) {
       _pollBackend();
+    });
+    // Animate the sync progress bar: while online with a backlog, re-count the
+    // queue ~1/sec so the bar fills as rows drain. Cheap COUNT() query; skips
+    // entirely when there's nothing to sync.
+    _syncProgressTimer =
+        Timer.periodic(const Duration(milliseconds: 1200), (_) {
+      if (!mounted) return;
+      if (ref.read(isOnlineProvider) && ref.read(pendingSyncProvider).active) {
+        ref.read(pendingSyncProvider.notifier).refresh();
+      }
     });
     // Update zone state whenever the GPS service gets a server response.
     _zoneSub = ref.read(gpsServiceProvider).zoneStream.listen((zone) {
@@ -123,7 +204,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ref.read(zoneProvider.notifier).set(zoneIndex);
       ref.read(zoneUpdatedAtProvider.notifier).markNow();
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initOnFirstLaunch());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initOnFirstLaunch();
+      // Present any challenge whose state was already set before our listeners
+      // registered (cold-start via a push tap) — ref.listen won't replay it.
+      _presentPendingChallenges();
+    });
   }
 
   /// Sequentially show the permission gate (every launch until both camera +
@@ -167,11 +253,168 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void dispose() {
     _pollingTimer?.cancel();
+    _syncProgressTimer?.cancel();
     _zoneSub?.cancel();
+    _challengeQueue.clear();
     super.dispose();
   }
 
+  /// Re-checks whether a challenge is already pending right after first frame.
+  /// On a cold-start opened by a push tap, the FCM handler sets the provider
+  /// state BEFORE this screen's `ref.listen`s register — and ref.listen never
+  /// replays the current value — so without this the challenge would sit in state
+  /// unshown (stranding the screen). Idempotent: the enqueue guards below stop a
+  /// double-present when the listener also fires.
+  void _presentPendingChallenges() {
+    if (!mounted) return;
+    _onWakefulnessState(ref.read(wakefulnessProvider));
+    _onPendingPhotoState(ref.read(pendingPhotoProvider));
+  }
+
+  /// Enqueues the wakefulness overlay when a challenge is live. Guarded by
+  /// [_wakefulnessPresenting] so repeated state emissions (or the post-frame
+  /// cold-start check) can't stack two overlays for one challenge.
+  void _onWakefulnessState(WakefulnessState next) {
+    if (next.status != WakefulnessStatus.challenge) return;
+    if (_wakefulnessPresenting) return;
+    _wakefulnessPresenting = true;
+    _challengeQueue.enqueue(_presentWakefulness);
+  }
+
+  /// Enqueues a photo capture — offline scheduled or online/manual request —
+  /// preserving the existing per-request dedup ([_handlingPhotoRequestId],
+  /// [_seenPhotoRequestIds], [_handlingScheduledPhoto]).
+  void _onPendingPhotoState(PendingPhotoState next) {
+    if (!next.pending) return;
+    // Phase 7: an OFFLINE schedule-triggered capture — no request id / nonce /
+    // countdown. Open PhotoScreen in scheduled mode; it draws a pool nonce and
+    // queues on submit.
+    if (next.scheduled) {
+      if (_handlingScheduledPhoto) return;
+      _handlingScheduledPhoto = true;
+      ref.read(pendingPhotoProvider.notifier).setPending(false);
+      _challengeQueue.enqueue(_presentScheduledPhoto);
+      return;
+    }
+    if (next.requestId == null || next.nonceValue == null) return;
+    final requestId = next.requestId!;
+    // Already showing a PhotoScreen for this request, or it was already shown
+    // once (completed or missed) — don't re-open it.
+    if (requestId == _handlingPhotoRequestId ||
+        _seenPhotoRequestIds.contains(requestId)) {
+      return;
+    }
+    _handlingPhotoRequestId = requestId;
+    // Mark it shown so a later poll can't re-open the same (possibly expired)
+    // request. Bounded so a long shift can't grow it without limit.
+    _seenPhotoRequestIds.add(requestId);
+    if (_seenPhotoRequestIds.length > 50) {
+      _seenPhotoRequestIds.remove(_seenPhotoRequestIds.first);
+    }
+    // Alert the guard even if a data-only push drew no banner (iOS) or the
+    // screen is queued behind another challenge — parity with wakefulness.
+    unawaited(NotificationService.showPhotoRequest(requestId: requestId));
+    final nonceValue = next.nonceValue!;
+    final issuedAt = next.issuedAt;
+    final receivedAt = next.receivedAt;
+    final responseSeconds = next.responseSeconds;
+    ref.read(pendingPhotoProvider.notifier).setPending(false);
+    _challengeQueue.enqueue(() => _presentOnlinePhoto(
+          requestId: requestId,
+          nonceValue: nonceValue,
+          issuedAt: issuedAt,
+          receivedAt: receivedAt,
+          responseSeconds: responseSeconds,
+        ));
+  }
+
+  // ── Challenge presenters (serialised via [_challengeQueue]) ───────────────
+  // Each returns a Future that completes when its route closes, so the queue
+  // knows when to present the next one. This is the single place any challenge
+  // reaches the screen, which is what keeps a wake + photo from racing.
+
+  /// Presents the wakefulness code overlay. Skips if the challenge already
+  /// resolved while it was queued (nothing live to show).
+  Future<void> _presentWakefulness() async {
+    try {
+      if (!mounted) return;
+      if (ref.read(wakefulnessProvider).status != WakefulnessStatus.challenge) {
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const WakefulnessOverlay(),
+      );
+    } finally {
+      _wakefulnessPresenting = false;
+    }
+  }
+
+  /// Presents an OFFLINE schedule-triggered capture (no request id / nonce).
+  Future<void> _presentScheduledPhoto() async {
+    if (!mounted) {
+      _handlingScheduledPhoto = false;
+      return;
+    }
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const PhotoScreen.scheduled()),
+    );
+    _handlingScheduledPhoto = false;
+  }
+
+  /// Presents an online/manual server-initiated photo request.
+  Future<void> _presentOnlinePhoto({
+    required String requestId,
+    required String nonceValue,
+    DateTime? issuedAt,
+    DateTime? receivedAt,
+    int? responseSeconds,
+  }) async {
+    if (!mounted) {
+      if (_handlingPhotoRequestId == requestId) _handlingPhotoRequestId = null;
+      return;
+    }
+    await Navigator.push(
+      context,
+      MaterialPageRoute<void>(
+        builder: (_) => PhotoScreen(
+          requestId: requestId,
+          nonceValue: nonceValue,
+          issuedAt: issuedAt,
+          receivedAt: receivedAt,
+          responseSeconds: responseSeconds,
+        ),
+      ),
+    );
+    // Free the lock once the capture flow closes, so a genuinely new request for
+    // the same id (rare) can re-open later.
+    if (_handlingPhotoRequestId == requestId) _handlingPhotoRequestId = null;
+  }
+
   Future<void> _pollBackend() async {
+    // Re-check the location master toggle each cycle. The OS status stream
+    // handles a live foreground toggle instantly; this catches a change made
+    // while the app was backgrounded (the stream may not replay it on resume).
+    unawaited(ref.read(locationServiceEnabledProvider.notifier).refresh());
+
+    // Refresh the pending-sync count and, when the backlog just drained to zero,
+    // confirm it on-screen (so the offline→reconnect flush is visible with no
+    // debugger attached).
+    final pendingBefore = ref.read(pendingSyncProvider).pending;
+    await ref.read(pendingSyncProvider.notifier).refresh();
+    final pendingAfter = ref.read(pendingSyncProvider).pending;
+    if (pendingBefore > 0 && pendingAfter == 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Offline data synced ($pendingBefore item'
+              '${pendingBefore == 1 ? '' : 's'})'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+
     // Always refresh the current shift so `can_start`/`can_end` stay live —
     // this is what flips the START button on once the server's 15-minute
     // pre-shift window opens, with no user action needed.
@@ -181,23 +424,28 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final dio = ref.read(dioProvider);
 
-      // Wakefulness: when the backend provisioned a TOTP schedule at shift
-      // start, drive challenges locally from it. The local scheduler is the
-      // fallback for when push can't deliver — when push is genuinely
-      // delivering, the server's FCM challenge is the single authority, so
-      // running the scheduler too would double-fire (a locally-computed code vs
-      // the server's pushed code) for the same window (H2). Fall back to the
-      // non-contractual `/welfare/pending` poll only when no seed was issued
-      // (the local mock).
+      // Wakefulness: when the backend provisioned a TOTP schedule at shift start,
+      // the local scheduler drives challenges from it — but ONLY WHEN OFFLINE.
       //
-      // Gate on isDelivering, NOT isAvailable: on iOS Firebase core can be
-      // "available" (plist present) yet never get a push (no APNs key), which
-      // would silently suppress the scheduler and drop every check. isDelivering
-      // is true only once a token actually registered.
+      // When online, a scheduled check exists as a real server row and is
+      // delivered by push (Android/FCM) OR the `/wakefulness/pending` poll below
+      // (iOS without APNs), both of which answer via `/respond` → recorded
+      // ONLINE. Running the local scheduler while online would instead answer via
+      // `/wakefulness/offline` → the dashboard mislabels an online check as
+      // "Offline" (and risks double-firing the same window). So gate the local
+      // scheduler on `!online`, not on push availability.
       final scheduler = ref.read(wakefulnessScheduleProvider.notifier);
-      final online = ref.read(isOnlineProvider);
+      // "Effectively online" = the OS interface is up AND the backend actually
+      // answered our recent requests. A phone on a captive portal / dead Wi-Fi
+      // reports interface-online but no API call gets through; treating that as
+      // online would suppress the offline scheduler AND fail every poll, so the
+      // guard would see NO welfare/photo prompt at all. Falling back to the
+      // offline path keeps prompting — and since the server truly can't be
+      // reached, the answer is legitimately recorded offline (no mislabelling).
+      final online =
+          ref.read(isOnlineProvider) && ref.read(serverReachableProvider);
       if (scheduler.isArmed) {
-        if (!online || !PushMessaging.isDelivering) {
+        if (!online) {
           scheduler.checkSchedule();
         }
       } else {
@@ -229,19 +477,61 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         // the NTP anchor fresh so a verification photo can still be captured +
         // signed if the link drops mid-shift. Best-effort, fire-and-forget.
         if (online) {
-          unawaited(ref.read(noncePoolServiceProvider).refillIfLow(shiftId));
+          // Only top up the offline-photo nonce pool when photo verification is
+          // ON for this shift (per-site setting → armed schedule). Photos off ⇒
+          // no offline capture will ever fire, so a prefetch is wasted (a manual
+          // online request carries its own nonce). Keeps the NTP anchor fresh
+          // regardless — it's cheap and also backs wakefulness time-integrity.
+          if (photoScheduler.isArmed) {
+            unawaited(ref.read(noncePoolServiceProvider).refillIfLow(shiftId));
+          }
           unawaited(ref.read(timeAnchorServiceProvider).ensureFresh());
+
+          // Wakefulness push-miss fallback: discover any outstanding ONLINE
+          // challenge and raise the code-entry sheet in-app, even when the FCM
+          // push never landed (notably iOS with no APNs). The offline TOTP
+          // scheduler above is the OFFLINE authority and uses `totp-<win>` ids;
+          // this poll surfaces server-initiated challenges (real uuids), so the
+          // notifier's check_id dedup keeps the two paths from double-raising.
+          if (ref.read(wakefulnessProvider).status == WakefulnessStatus.idle) {
+            try {
+              final wRes = await dio.get<Map<String, dynamic>>(
+                ApiConfig.wakefulnessPending(shiftId),
+              );
+              final challenge = extractPendingWakefulness(wRes.data?['data']);
+              if (challenge != null &&
+                  mounted &&
+                  ref.read(wakefulnessProvider).status == WakefulnessStatus.idle) {
+                // Tell the server the challenge was seen (fire-and-forget), then
+                // raise the same sheet the push path uses.
+                unawaited(ref
+                    .read(wakefulnessServiceProvider)
+                    .confirmReceived(challenge.checkId));
+                ref.read(wakefulnessProvider.notifier).trigger(
+                      challenge.checkId,
+                      challenge.code,
+                      responseSeconds: challenge.responseSeconds ?? 60,
+                      issuedAt: challenge.issuedAt,
+                    );
+              }
+            } on DioException catch (_) {
+              // Endpoint absent (older backend) or a transient blip — the push
+              // and the local scheduler remain; ignore.
+            }
+          }
         }
 
         final photoRes = await dio.get<Map<String, dynamic>>(
           ApiConfig.shiftPhotosPending(shiftId),
         );
         final pending = extractPendingPhoto(photoRes.data?['data']);
-        // Skip a request we're already handling so a still-pending poll result
-        // doesn't churn the provider while its PhotoScreen is open (H1).
+        // Skip a request we're already handling (H1) OR one we've already shown
+        // once — the server keeps a missed/expired request "pending", so without
+        // the seen-set it would re-open every poll and dead-end on NONCE_EXPIRED.
         if (pending != null &&
             mounted &&
-            pending.requestId != _handlingPhotoRequestId) {
+            pending.requestId != _handlingPhotoRequestId &&
+            !_seenPhotoRequestIds.contains(pending.requestId)) {
           ref.read(pendingPhotoProvider.notifier).setPending(
                 true,
                 requestId: pending.requestId,
@@ -332,65 +622,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     });
 
     // Show wakefulness overlay when backend triggers a welfare check.
-    ref.listen<WakefulnessState>(wakefulnessProvider, (prev, next) {
-      if (prev?.status != WakefulnessStatus.challenge &&
-          next.status == WakefulnessStatus.challenge) {
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (_) => const WakefulnessOverlay(),
-        );
-      }
-    });
-
-    // Navigate to photo screen when backend requests photo verification.
-    ref.listen<PendingPhotoState>(pendingPhotoProvider, (_, next) {
-      // Phase 7: an OFFLINE schedule-triggered capture — no request id / nonce /
-      // countdown. Open PhotoScreen in scheduled mode; it draws a pool nonce and
-      // queues on submit.
-      if (next.pending && next.scheduled) {
-        if (_handlingScheduledPhoto) return;
-        _handlingScheduledPhoto = true;
-        ref.read(pendingPhotoProvider.notifier).setPending(false);
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => const PhotoScreen.scheduled(),
-          ),
-        ).whenComplete(() => _handlingScheduledPhoto = false);
-        return;
-      }
-      if (next.pending && next.requestId != null && next.nonceValue != null) {
-        final requestId = next.requestId!;
-        final nonceValue = next.nonceValue!;
-        final issuedAt = next.issuedAt;
-        final receivedAt = next.receivedAt;
-        final responseSeconds = next.responseSeconds;
-        // Already showing a PhotoScreen for this request — don't stack another
-        // one when the same request is re-delivered by the poll or a push (H1).
-        if (requestId == _handlingPhotoRequestId) return;
-        _handlingPhotoRequestId = requestId;
-        ref.read(pendingPhotoProvider.notifier).setPending(false);
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => PhotoScreen(
-              requestId: requestId,
-              nonceValue: nonceValue,
-              issuedAt: issuedAt,
-              receivedAt: receivedAt,
-              responseSeconds: responseSeconds,
-            ),
-          ),
-        ).whenComplete(() {
-          // Free the lock once the capture flow closes, so a genuinely new
-          // request for the same id (rare) can re-open later.
-          if (_handlingPhotoRequestId == requestId) {
-            _handlingPhotoRequestId = null;
-          }
-        });
-      }
-    });
+    // Both challenge listeners delegate to methods so a cold-start (where a push
+    // tap set the state BEFORE this listener registered, and ref.listen won't
+    // replay the current value) can re-invoke the same logic from a post-frame
+    // check in initState — see [_presentPendingChallenges].
+    ref.listen<WakefulnessState>(
+        wakefulnessProvider, (_, next) => _onWakefulnessState(next));
+    ref.listen<PendingPhotoState>(
+        pendingPhotoProvider, (_, next) => _onPendingPhotoState(next));
 
     final profile = ref.watch(guardProfileProvider);
     final shift = ref.watch(shiftProvider);
@@ -399,6 +638,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final zone = ref.watch(zoneProvider);
     final zoneUpdatedAt = ref.watch(zoneUpdatedAtProvider);
     final online = ref.watch(isOnlineProvider);
+    // Device location master toggle. When off, GPS silently produces nothing, so
+    // the app is gated behind a blocking overlay until it's switched back on.
+    final locationOn = ref.watch(locationServiceEnabledProvider);
+    // Captures buffered offline and still waiting to upload.
+    final pendingSync = ref.watch(pendingSyncProvider);
 
     // All horizontal padding flows from one responsive value for alignment.
     final hPad = context.s(16);
@@ -408,6 +652,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // Status icon strip
       _StatusIconStrip(battery: battery, zone: zone, online: online),
       SizedBox(height: context.s(16)),
+
+      // Offline sync status — a progress bar that fills as buffered captures
+      // upload, so the offline→reconnect flush is visible on-device (no debugger).
+      if (pendingSync.visible) ...[
+        _SyncStatusChip(progress: pendingSync, online: online),
+        SizedBox(height: context.s(16)),
+      ],
 
       // Header row
       Row(
@@ -479,17 +730,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   child: shift.active
                 // ACTIVE: everything scrolls together so nothing clips on any
                 // phone; the End button flows comfortably below the content.
-                ? SingleChildScrollView(
-                    padding: EdgeInsets.fromLTRB(
-                      hPad, context.s(8), hPad, context.s(24),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        ...content,
-                        SizedBox(height: context.s(32)),
-                        Center(child: _ActionButtons(shift: shift, currentShift: currentShift)),
-                      ],
+                // Pull-to-refresh re-runs the backend poll (shift state, checks,
+                // location toggle) on demand instead of waiting for the 20s tick.
+                ? RefreshIndicator(
+                    onRefresh: _pollBackend,
+                    color: AppColors.gold,
+                    backgroundColor: AppColors.surface,
+                    child: SingleChildScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: EdgeInsets.fromLTRB(
+                        hPad, context.s(8), hPad, context.s(24),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          ...content,
+                          SizedBox(height: context.s(32)),
+                          Center(child: _ActionButtons(shift: shift, currentShift: currentShift)),
+                        ],
+                      ),
                     ),
                   )
                 // INACTIVE: content scrolls at top; Start button sits below
@@ -498,13 +757,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     children: [
                       Expanded(
                         flex: 3,
-                        child: SingleChildScrollView(
-                          padding: EdgeInsets.fromLTRB(
-                            hPad, context.s(8), hPad, context.s(8),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: content,
+                        child: RefreshIndicator(
+                          onRefresh: _pollBackend,
+                          color: AppColors.gold,
+                          backgroundColor: AppColors.surface,
+                          child: SingleChildScrollView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            padding: EdgeInsets.fromLTRB(
+                              hPad, context.s(8), hPad, context.s(8),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: content,
+                            ),
                           ),
                         ),
                       ),
@@ -537,6 +802,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ],
             ),          // closes outer Column
           ),
+          // Blocking gate whenever device location services are off DURING an
+          // active shift — GPS only matters then, and the tracking requirement is
+          // what the block enforces. Gated on shift.active so a guard who isn't on
+          // shift (e.g. wrong account) can still reach Sign Out / the pre-shift
+          // screen instead of being trapped behind it (L7).
+          if (shift.active && !locationOn)
+            const Positioned.fill(child: LocationRequiredOverlay()),
         ],
       ),
     );
@@ -1249,16 +1521,27 @@ class _ActionButtonsState extends ConsumerState<_ActionButtons> {
     // supervisor approval. The hint + button state below mirror where the
     // request is in that approval cycle (pending / approved / rejected).
     final cs = widget.currentShift;
+    final online = ref.watch(isOnlineProvider);
     final isEarly = cs != null && DateTime.now().isBefore(cs.scheduledEnd);
     final pending = cs?.earlyEndPending ?? false;
     final approved = cs?.earlyEndApproved ?? false;
     final rejected = cs?.earlyEndRejected ?? false;
 
-    // While pending, the END button is locked — the guard must wait for the
-    // supervisor's decision (which arrives on the next 20s poll).
+    // Ending is a server operation (duration, early-end approval, auto-close
+    // reconciliation), so it can't complete offline — a tap would only fail with
+    // an error. Lock END while offline with a clear reason instead of letting the
+    // End-Shift sheet dead-end on a failed POST. The backend auto-close at
+    // scheduled_end+grace is the safety net if the guard can't reconnect.
+    final locked = pending || !online;
+
+    // Hint explains a disabled button. Offline takes precedence — the guard must
+    // know WHY END won't respond; then the early-end approval states.
     String? hint;
     Color hintColor = AppColors.muted;
-    if (pending) {
+    if (!online) {
+      hint = "You're offline — reconnect to end your shift.";
+      hintColor = AppColors.warning;
+    } else if (pending) {
       hint = 'Early-end request sent · waiting for supervisor approval';
       hintColor = AppColors.warning;
     } else if (approved) {
@@ -1276,8 +1559,8 @@ class _ActionButtonsState extends ConsumerState<_ActionButtons> {
         mainAxisSize: MainAxisSize.min,
         children: [
           _CircleEndButton(
-            locked: pending,
-            onTap: pending ? null : () => showEndShiftSheet(context),
+            locked: locked,
+            onTap: locked ? null : () => showEndShiftSheet(context),
           ),
           if (hint != null) ...[
             SizedBox(height: context.s(12)),
@@ -1504,6 +1787,103 @@ class _OverdueBannerState extends State<_OverdueBanner> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Sync status chip ──────────────────────────────────────────────────────
+// Shows how many captures are buffered offline and waiting to upload. Online →
+// "Syncing…" (the flush is running); offline → "saved, will upload when online".
+// Makes the offline→reconnect flush visible on-device without a debugger.
+
+class _SyncStatusChip extends StatelessWidget {
+  const _SyncStatusChip({required this.progress, required this.online});
+  final SyncProgress progress;
+  final bool online;
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = progress.completed;
+    final color = completed
+        ? AppColors.success
+        : (online ? AppColors.gold : AppColors.warning);
+    final total = progress.total;
+    final done = progress.done;
+    // Completed → a brief green "all synced ✓"; online → a filling bar with
+    // "done of total"; offline → the count waiting (nothing moves until online).
+    final label = completed
+        ? 'All offline items synced ✓'
+        : online
+            ? (total > 0
+                ? 'Uploading $done of $total offline item${total == 1 ? '' : 's'}…'
+                : 'Syncing…')
+            : '${progress.pending} item${progress.pending == 1 ? '' : 's'} '
+                'saved offline — will upload when online';
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        vertical: context.s(10),
+        horizontal: context.s(12),
+      ),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                completed
+                    ? Icons.check_circle_rounded
+                    : online
+                        ? Icons.sync_rounded
+                        : Icons.cloud_upload_outlined,
+                size: context.s(16),
+                color: color,
+              ),
+              SizedBox(width: context.s(10)),
+              Expanded(
+                child: Text(
+                  label,
+                  style: AppType.caption.copyWith(
+                    fontSize: context.sp(12),
+                    color: color,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (completed || (online && total > 0))
+                Text(
+                  '${(progress.fraction * 100).round()}%',
+                  style: AppType.caption.copyWith(
+                    fontSize: context.sp(12),
+                    color: color,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+            ],
+          ),
+          if (online || completed) ...[
+            SizedBox(height: context.s(8)),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                // Determinate once we know the batch size (and at 100% when just
+                // completed); a thin indeterminate sweep only in the brief moment
+                // before the first count lands.
+                value: (completed || total > 0) ? progress.fraction : null,
+                minHeight: context.s(6),
+                backgroundColor: color.withValues(alpha: 0.18),
+                valueColor: AlwaysStoppedAnimation(color),
+              ),
+            ),
+          ],
         ],
       ),
     );

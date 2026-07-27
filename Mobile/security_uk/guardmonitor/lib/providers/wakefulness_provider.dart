@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app_providers.dart';
 import '../data/offline_queue_db.dart';
+import '../services/notification_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/totp_service.dart';
 import '../services/wakefulness_service.dart';
@@ -12,6 +15,13 @@ import '../services/wakefulness_service.dart';
 /// false-alarm. Below the floor we stay idle and let the server's own
 /// missed-check handling raise the alert.
 const int kMinResponseSeconds = 8;
+
+/// Wakefulness codes are always **exactly 4 digits** — online (server push) and
+/// offline (local TOTP) alike. The pin entry is fixed to this; any incoming code
+/// is normalised to 4 (see [_normalizeCode]) so a server that sends an unpadded
+/// value like `472` is shown and matched as `0472`, never as an un-submittable
+/// 3-digit code.
+const int kWakefulnessDigits = 4;
 
 /// How long we'll wait for the server's authoritative PASS/FAIL on a locally-
 /// correct code before falling back to the optimistic result. A real rejection
@@ -33,6 +43,7 @@ class WakefulnessState {
     this.secondsRemaining = 60,
     this.responseSeconds = 60,
     this.windowReference,
+    this.scheduledAt,
     this.isOffline = false,
     this.startedAt,
     this.deadline,
@@ -47,6 +58,9 @@ class WakefulnessState {
   // Set for a locally-computed TOTP challenge — sent on the offline replay so
   // the server can validate a code generated minutes ago.
   final int? windowReference;
+  // The schedule mark this challenge fired at (UTC) — sent as `scheduled_at` on
+  // the offline flush so the server timeline is exact rather than derived.
+  final DateTime? scheduledAt;
   final bool isOffline;
   final DateTime? startedAt;
   // Wall-clock UTC instant the response window closes. The countdown is derived
@@ -62,6 +76,7 @@ class WakefulnessState {
     int? secondsRemaining,
     int? responseSeconds,
     int? windowReference,
+    DateTime? scheduledAt,
     bool? isOffline,
     DateTime? startedAt,
     DateTime? deadline,
@@ -74,6 +89,7 @@ class WakefulnessState {
         secondsRemaining: secondsRemaining ?? this.secondsRemaining,
         responseSeconds: responseSeconds ?? this.responseSeconds,
         windowReference: windowReference ?? this.windowReference,
+        scheduledAt: scheduledAt ?? this.scheduledAt,
         isOffline: isOffline ?? this.isOffline,
         startedAt: startedAt ?? this.startedAt,
         deadline: deadline ?? this.deadline,
@@ -115,6 +131,10 @@ class WakefulnessNotifier extends Notifier<WakefulnessState> {
     int responseSeconds = 60,
     DateTime? issuedAt,
   }) {
+    // Validate the code shape BEFORE claiming, so a malformed push doesn't burn
+    // a dedup slot and a later corrected push for the same check can still raise.
+    final normalized = _normalizeCode(code);
+    if (normalized == null) return; // not exactly 4 digits — never raise it (M2)
     if (!_claim(checkId)) return;
     final now = DateTime.now().toUtc();
     final remaining = issuedAt == null
@@ -130,7 +150,7 @@ class WakefulnessNotifier extends Notifier<WakefulnessState> {
     state = WakefulnessState(
       status: WakefulnessStatus.challenge,
       checkId: checkId,
-      code: code,
+      code: normalized,
       responseSeconds: responseSeconds,
       secondsRemaining: remaining,
       isOffline: false,
@@ -140,30 +160,52 @@ class WakefulnessNotifier extends Notifier<WakefulnessState> {
   }
 
   /// Locally-computed (TOTP) challenge fired from the shift-start schedule. The
-  /// answer is replayed to the server with its [windowReference] + `is_offline`.
+  /// answer has no server check_id, so it's recorded via the offline materialise
+  /// endpoint keyed on its absolute [windowReference] (immediately when online,
+  /// or buffered for the reconnect flush) — never via `/respond`.
   void triggerLocal(
     String checkId,
     String code, {
     required int windowReference,
+    DateTime? scheduledAt,
     int responseSeconds = 60,
   }) {
+    final normalized = _normalizeCode(code);
+    if (normalized == null) return; // not exactly 4 digits — never raise it (M2)
     if (!_claim(checkId)) return;
     state = WakefulnessState(
       status: WakefulnessStatus.challenge,
       checkId: checkId,
-      code: code,
+      code: normalized,
       responseSeconds: responseSeconds,
       secondsRemaining: responseSeconds,
       windowReference: windowReference,
+      scheduledAt: scheduledAt?.toUtc(),
       isOffline: true,
       startedAt: DateTime.now(),
       deadline: DateTime.now().toUtc().add(Duration(seconds: responseSeconds)),
     );
   }
 
+  /// Normalises an issued code to **exactly** [kWakefulnessDigits] digits, or
+  /// returns null when it can't be. Strips non-digits, then:
+  /// - a SHORT value is a real 4-digit TOTP whose leading zero was dropped in
+  ///   transport (server/notification sends `472` for a true `0472`) → zero-pad
+  ///   back to 4. This restore is legitimate and must stay.
+  /// - EXACTLY 4 → used as-is.
+  /// - LONGER than 4 (or empty) is malformed — a `digits:4` TOTP can never
+  ///   exceed 4 — so return null. The caller must NOT raise a challenge for it
+  ///   (the pin is fixed at 4, so it could never be matched → a false miss);
+  ///   staying idle lets the server raise its own missed-check instead.
+  static String? _normalizeCode(String code) {
+    final digits = code.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty || digits.length > kWakefulnessDigits) return null;
+    return digits.padLeft(kWakefulnessDigits, '0');
+  }
+
   void addDigit(String digit) {
     if (state.status != WakefulnessStatus.challenge) return;
-    if (state.entry.length >= 4) return;
+    if (state.entry.length >= kWakefulnessDigits) return;
     state = state.copyWith(entry: state.entry + digit);
   }
 
@@ -238,35 +280,67 @@ class WakefulnessNotifier extends Notifier<WakefulnessState> {
   /// [localPass] so a connectivity blip can't fail a guard who answered — the
   /// service keeps the record best-effort. Never throws.
   Future<bool> _report(WakefulnessState s, {required bool localPass}) async {
-    if (s.checkId.isEmpty) return localPass;
-    try {
-      return await ref.read(wakefulnessServiceProvider).respond(
-            s.checkId,
-            s.entry,
-            windowReference: s.windowReference,
-            isOffline: s.isOffline,
-          );
-    } catch (_) {
-      // Server unreachable after the service's retries. For an *offline* TOTP
-      // challenge the guard actually answered (a full 4-digit entry), queue the
-      // answer so it replays on reconnect — validity is proven by the absolute
-      // window, so a late flush still lands on the right step. Online (push)
-      // challenges have no replay path; the server raises its own miss.
-      if (s.isOffline && s.windowReference != null && s.entry.length == 4) {
+    // Schedule-fired (TOTP) challenge — it has no server check_id, so it can
+    // never go to /respond. Send it to the offline materialise endpoint keyed on
+    // the absolute window: when online we record it right away; when offline (or
+    // the POST fails) we buffer it for the reconnect flush. Validity is proven by
+    // the window, so a late flush still lands on the right step.
+    if (s.isOffline) {
+      if (s.windowReference == null || s.entry.length != kWakefulnessDigits) {
+        return localPass;
+      }
+      final shiftId = ref.read(shiftProvider).id;
+      if (shiftId == null) return localPass;
+      if (kDebugMode) {
+        debugPrint('[wakefulness] answer via OFFLINE endpoint '
+            '(/shifts/$shiftId/wakefulness/offline) window=${s.windowReference}');
+      }
+      try {
+        await ref.read(wakefulnessServiceProvider).submitOffline(
+              shiftId: shiftId,
+              code: s.entry,
+              windowReference: s.windowReference!,
+              respondedAt: DateTime.now().toUtc().toIso8601String(),
+              scheduledAt: s.scheduledAt?.toIso8601String(),
+            );
+      } catch (_) {
         await _enqueueOfflineAnswer(s);
       }
+      // The UI verdict is the local code comparison (the server re-derives the
+      // same TOTP and never disagrees on the digits); a closed offline window
+      // raises no retroactive alert either way.
+      return localPass;
+    }
+
+    // Online challenge with a real check_id — the server returns the
+    // authoritative PASS/FAIL (catches clock-skew where the local code is right
+    // but the server window already expired).
+    if (s.checkId.isEmpty) return localPass;
+    if (kDebugMode) {
+      debugPrint('[wakefulness] answer via ONLINE endpoint '
+          '(/wakefulness/${s.checkId}/respond)');
+    }
+    try {
+      return await ref.read(wakefulnessServiceProvider).respond(s.checkId, s.entry);
+    } catch (_) {
+      // Server unreachable after the service's retries — trust the local result.
       return localPass;
     }
   }
 
-  /// Buffers an unsent offline wakefulness answer. Best-effort — never throws.
+  /// Buffers an unsent offline wakefulness answer for the reconnect flush.
+  /// Best-effort — never throws.
   Future<void> _enqueueOfflineAnswer(WakefulnessState s) async {
+    final shiftId = ref.read(shiftProvider).id;
+    if (shiftId == null) return;
     try {
       await ref.read(offlineQueueDbProvider).enqueueWakefulness(
             WakefulnessQueueCompanion.insert(
+              shiftId: shiftId,
               checkId: s.checkId,
               code: s.entry,
               windowReference: s.windowReference!,
+              scheduledAt: Value(s.scheduledAt?.toIso8601String()),
               respondedAt: DateTime.now().toUtc().toIso8601String(),
               createdAt: DateTime.now().millisecondsSinceEpoch,
             ),
@@ -366,6 +440,17 @@ class WakefulnessScheduleNotifier extends Notifier<WakefulnessProvisioning?> {
 
   String _key(WakefulnessMark m) => m.checkId ?? m.time.toIso8601String();
 
+  /// Marks [key] fired in memory AND persists the whole set, so a mid-shift
+  /// app-kill can't re-raise (and double-count) an already-handled welfare mark.
+  /// Fire-and-forget — a storage failure must never break the schedule.
+  void _markFired(String key) {
+    _fired.add(key);
+    unawaited(
+      SecureStorageService.saveWakefulnessFired(_fired.toList())
+          .catchError((Object _) {}),
+    );
+  }
+
   /// Parses + persists provisioning from the start response. No-op when the
   /// backend doesn't issue a seed (e.g. the local mock) — leaves the legacy
   /// `/welfare/pending` poll as the active path.
@@ -376,6 +461,12 @@ class WakefulnessScheduleNotifier extends Notifier<WakefulnessProvisioning?> {
     _fired.clear();
     state = prov;
     await SecureStorageService.saveWakefulness(jsonEncode(prov.toJson()));
+    // Fresh schedule → forget any fired marks carried from a previous shift.
+    await SecureStorageService.clearWakefulnessFired();
+    // Register OS-level local notifications at each mark so an OFFLINE /
+    // backgrounded guard is still prompted (there's no push when offline).
+    await NotificationService.scheduleWakefulnessChecks(
+        prov.marks.map((m) => m.time).toList());
   }
 
   /// Re-arms from secure storage after an app relaunch mid-shift.
@@ -383,10 +474,21 @@ class WakefulnessScheduleNotifier extends Notifier<WakefulnessProvisioning?> {
     if (state != null) return;
     final raw = await SecureStorageService.getWakefulness();
     if (raw == null) return;
+    // Restore the fired-marks set FIRST so a relaunch doesn't re-challenge (and
+    // re-count) a welfare mark already handled before the app was killed.
+    _fired
+      ..clear()
+      ..addAll(await SecureStorageService.getWakefulnessFired());
     try {
       final prov = WakefulnessProvisioning.fromJson(
           jsonDecode(raw) as Map<String, dynamic>);
-      if (prov != null) state = prov;
+      if (prov != null) {
+        state = prov;
+        // Re-arm the local notifications too (the OS may have cleared scheduled
+        // ones on reboot / app reinstall).
+        await NotificationService.scheduleWakefulnessChecks(
+            prov.marks.map((m) => m.time).toList());
+      }
     } catch (_) {}
   }
 
@@ -394,6 +496,8 @@ class WakefulnessScheduleNotifier extends Notifier<WakefulnessProvisioning?> {
     _fired.clear();
     state = null;
     await SecureStorageService.clearWakefulness();
+    await SecureStorageService.clearWakefulnessFired();
+    await NotificationService.cancelWakefulnessChecks();
   }
 
   bool get isArmed => state != null;
@@ -417,17 +521,18 @@ class WakefulnessScheduleNotifier extends Notifier<WakefulnessProvisioning?> {
       // Window lapsed before we could show it (app was closed) — the server
       // raises its own CRITICAL; nothing useful to display now.
       if (elapsed > prov.responseSeconds) {
-        _fired.add(key);
+        _markFired(key);
         continue;
       }
 
-      _fired.add(key);
+      _markFired(key);
       final win = Totp.window(mark.time, period: prov.period);
       final code = Totp.codeForWindow(prov.seed, win, digits: prov.digits);
       ref.read(wakefulnessProvider.notifier).triggerLocal(
             mark.checkId ?? 'totp-$win',
             code,
             windowReference: win,
+            scheduledAt: mark.time,
             responseSeconds: prov.responseSeconds,
           );
       return;

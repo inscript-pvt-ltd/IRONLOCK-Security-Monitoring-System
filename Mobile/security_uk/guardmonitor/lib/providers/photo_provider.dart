@@ -75,14 +75,19 @@ class PhotoNotifier extends Notifier<PhotoState> {
         state = s.copyWith(secondsRemaining: remaining);
       }
     } else if (s.status == PhotoStatus.expired) {
+      // Count the "expired" banner down for display, but NEVER auto-reset to a
+      // fresh idle window — that used to re-open a live camera for a request whose
+      // server window is already dead, so any capture then failed NONCE_EXPIRED.
+      // The screen closes itself on expiry and resets this provider on dispose.
       final cd = s.expireCountdown - 1;
-      if (cd <= 0) {
-        state = const PhotoState();
-      } else {
-        state = s.copyWith(expireCountdown: cd);
-      }
+      state = s.copyWith(expireCountdown: cd < 0 ? 0 : cd);
     }
   }
+
+  /// Clears back to a fresh idle state. Called when a PhotoScreen closes so a
+  /// lingering terminal state (expired/failed) can't block the next capture
+  /// (the offline scheduler only fires when this provider is idle).
+  void reset() => state = const PhotoState();
 
   /// Open a request's window with a pre-computed remaining time (anchored to the
   /// request's arrival, not now). [remaining] ≤ 0 opens straight into `expired`.
@@ -100,10 +105,16 @@ class PhotoNotifier extends Notifier<PhotoState> {
           );
   }
 
-  /// Opens an OFFLINE schedule-triggered capture: a fresh idle surface with no
-  /// countdown (offline validity is the pool-nonce TTL, judged server-side from
-  /// the reconstructed capture time — there's no client window to run down).
-  void openScheduled() => state = const PhotoState(status: PhotoStatus.idle);
+  /// Opens an OFFLINE schedule-triggered capture with a fresh full [kPhotoWindowSeconds]
+  /// window, anchored to now. There's no *server* response window offline, but the
+  /// overlay must still expire (otherwise it lingers forever if the guard never
+  /// captures); the photo is validated server-side by its NTP-anchored timestamp,
+  /// not this timer. Expiry closes the screen and records a miss.
+  void openScheduled() => state = const PhotoState(
+        status: PhotoStatus.idle,
+        secondsRemaining: kPhotoWindowSeconds,
+        windowSeconds: kPhotoWindowSeconds,
+      );
 
   void startCapture() => state = state.copyWith(status: PhotoStatus.capturing);
 

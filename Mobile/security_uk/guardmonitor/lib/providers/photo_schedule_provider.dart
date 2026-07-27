@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../services/notification_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/time_anchor_service.dart';
 import 'photo_provider.dart';
@@ -27,9 +29,23 @@ class PhotoProvisioning {
   /// offline validity is purely the pool-nonce TTL.
   final int responseSeconds;
 
-  /// Offline: the drawn pool nonce is valid this long; the capture must fall
-  /// inside it.
+  /// Offline: informational metadata from the server reporting how long a pool
+  /// nonce prefetched *now* stays valid. As of the 2026-07-23 backend fix this is
+  /// **shift-spanning** (e.g. ~500 for an 8 h shift), not a fixed 15 — so one
+  /// prefetch at start covers every 50–70-min mark. Nonce validity is enforced
+  /// per-nonce via each nonce's own stored `expires_at` (see `NoncePoolService`),
+  /// NOT off this aggregate — so this value is display/round-trip only and must
+  /// never gate the fire decision (see [fireWindowMinutes] / [dueMark]).
   final int offlineNonceTtlMinutes;
+
+  /// How late (minutes past a mark) an offline scheduled capture may still fire.
+  /// Deliberately a **fixed, bounded** window — decoupled from
+  /// [offlineNonceTtlMinutes], which now spans the whole shift and would
+  /// otherwise let a capture fire hours late (e.g. after the app was killed for a
+  /// long stretch), landing far outside the mark the server matches by timestamp.
+  /// The 20 s active poll normally fires a due mark within one cycle; this only
+  /// bounds the app-relaunched-late case.
+  static const int fireWindowMinutes = 15;
 
   /// Up to this many images per capture (`photos[]`/`signatures[]`).
   final int maxPhotosPerCapture;
@@ -44,12 +60,14 @@ class PhotoProvisioning {
   String keyFor(DateTime mark) => mark.toUtc().toIso8601String();
 
   /// The first schedule mark that is **due at [now]** (now ≥ mark) and **still
-  /// inside its pool-nonce window** (now ≤ mark + TTL), skipping anything already
-  /// in [fired]. Returns null when nothing should fire. Pure + tamper-agnostic —
-  /// the caller passes a trusted (NTP-anchored) [now]; a mark whose window has
-  /// lapsed is silently skipped (the server records the missed scheduled check).
+  /// inside the bounded fire window** (now ≤ mark + [fireWindowMinutes]), skipping
+  /// anything already in [fired]. Returns null when nothing should fire. Pure +
+  /// tamper-agnostic — the caller passes a trusted (NTP-anchored) [now]; a mark
+  /// whose window has lapsed is silently skipped (the server records the missed
+  /// scheduled check). Uses [fireWindowMinutes], NOT the nonce TTL: the nonce is
+  /// now valid all shift, but a capture fired hours late wouldn't match this mark.
   DateTime? dueMark(DateTime now, Set<String> fired) {
-    final windowSeconds = offlineNonceTtlMinutes * 60;
+    const windowSeconds = fireWindowMinutes * 60;
     for (final mark in schedule) {
       if (fired.contains(keyFor(mark))) continue;
       final elapsed = now.difference(mark).inSeconds;
@@ -68,7 +86,10 @@ class PhotoProvisioning {
         .map((e) => DateTime.tryParse(e.toString()))
         .whereType<DateTime>()
         .map((t) => t.toUtc())
-        .toList();
+        .toList()
+      // Sort ascending so `dueMark` fires marks in chronological order
+      // regardless of the order the server listed them in (L3).
+      ..sort();
     // A photos block with no parseable marks is treated as "not provisioned".
     if (marks.isEmpty) return null;
     return PhotoProvisioning(
@@ -95,6 +116,17 @@ class PhotoScheduleNotifier extends Notifier<PhotoProvisioning?> {
 
   bool get isArmed => state != null;
 
+  /// Marks [key] fired in memory AND persists the whole set, so a mid-shift
+  /// app-kill can't re-fire (out of nowhere) a scheduled photo the guard already
+  /// handled. Fire-and-forget — a storage failure must never break the schedule.
+  void _markFired(String key) {
+    _fired.add(key);
+    unawaited(
+      SecureStorageService.savePhotoFired(_fired.toList())
+          .catchError((Object _) {}),
+    );
+  }
+
   /// Parses + persists the `photos` block from the start response. No-op when the
   /// backend didn't issue one (older builds / the local mock).
   Future<void> provisionFromJson(Map<String, dynamic>? json) async {
@@ -103,6 +135,11 @@ class PhotoScheduleNotifier extends Notifier<PhotoProvisioning?> {
     _fired.clear();
     state = prov;
     await SecureStorageService.savePhotoSchedule(jsonEncode(prov.toJson()));
+    // Fresh schedule → forget any fired marks carried from a previous shift.
+    await SecureStorageService.clearPhotoFired();
+    // OS-level reminders at each mark so an OFFLINE / backgrounded guard is still
+    // prompted to capture (no push reaches an offline device).
+    await NotificationService.schedulePhotoChecks(prov.schedule);
   }
 
   /// Re-arms from secure storage after an app relaunch mid-shift.
@@ -110,10 +147,18 @@ class PhotoScheduleNotifier extends Notifier<PhotoProvisioning?> {
     if (state != null) return;
     final raw = await SecureStorageService.getPhotoSchedule();
     if (raw == null) return;
+    // Restore the fired-marks set FIRST so a relaunch doesn't re-fire a scheduled
+    // photo already handled before the app was killed.
+    _fired
+      ..clear()
+      ..addAll(await SecureStorageService.getPhotoFired());
     try {
       final prov =
           PhotoProvisioning.fromJson(jsonDecode(raw) as Map<String, dynamic>);
-      if (prov != null) state = prov;
+      if (prov != null) {
+        state = prov;
+        await NotificationService.schedulePhotoChecks(prov.schedule);
+      }
     } catch (_) {}
   }
 
@@ -121,6 +166,8 @@ class PhotoScheduleNotifier extends Notifier<PhotoProvisioning?> {
     _fired.clear();
     state = null;
     await SecureStorageService.clearPhotoSchedule();
+    await SecureStorageService.clearPhotoFired();
+    await NotificationService.cancelPhotoChecks();
   }
 
   /// Called on each active-shift poll. When [offline] and a scheduled mark is
@@ -144,7 +191,7 @@ class PhotoScheduleNotifier extends Notifier<PhotoProvisioning?> {
     final now = ref.read(timeAnchorServiceProvider).trustedNow();
     final mark = prov.dueMark(now, _fired);
     if (mark == null) return;
-    _fired.add(prov.keyFor(mark));
+    _markFired(prov.keyFor(mark));
     ref.read(pendingPhotoProvider.notifier).setScheduledOffline();
   }
 }

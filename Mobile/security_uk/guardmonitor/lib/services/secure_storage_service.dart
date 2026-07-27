@@ -16,7 +16,11 @@ class SecureStorageService {
   static const _privacyAcceptedKey = 'ironlock_privacy_accepted';
   static const _hmacSecretKey = 'ironlock_hmac_secret';
   static const _wakefulnessKey = 'ironlock_wakefulness';
+  static const _wakefulnessFiredKey = 'ironlock_wakefulness_fired';
   static const _photoScheduleKey = 'ironlock_photo_schedule';
+  static const _photoFiredKey = 'ironlock_photo_fired';
+  static const _shiftStateKey = 'ironlock_shift_state';
+  static const _currentShiftKey = 'ironlock_current_shift';
   static const _photoReceiptKey = 'ironlock_photo_receipt';
   static const _seenReviewsKey = 'ironlock_seen_reviews';
   static const _dbCipherKey = 'ironlock_db_cipher_key';
@@ -67,6 +71,27 @@ class SecureStorageService {
   static Future<void> clearWakefulness() =>
       _storage.delete(key: _wakefulnessKey);
 
+  /// Keys of wakefulness schedule marks already fired (challenged or lapsed)
+  /// this shift, as a JSON string list. Persisted so an app-kill + cold-start
+  /// mid-shift doesn't re-raise — and double-count — a welfare check the guard
+  /// already answered (the in-memory `_fired` set resets on restart). Cleared on
+  /// shift end, sign-out, and when a fresh schedule is provisioned at start.
+  static Future<void> saveWakefulnessFired(List<String> keys) =>
+      _storage.write(key: _wakefulnessFiredKey, value: jsonEncode(keys));
+
+  static Future<List<String>> getWakefulnessFired() async {
+    final raw = await _storage.read(key: _wakefulnessFiredKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      return (jsonDecode(raw) as List).cast<String>();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<void> clearWakefulnessFired() =>
+      _storage.delete(key: _wakefulnessFiredKey);
+
   /// Photo schedule (offline-capture due-times + window params) from
   /// `POST /shifts/{id}/start`, stored as a JSON blob. Wiped on sign-out.
   static Future<void> savePhotoSchedule(String json) =>
@@ -77,6 +102,54 @@ class SecureStorageService {
 
   static Future<void> clearPhotoSchedule() =>
       _storage.delete(key: _photoScheduleKey);
+
+  /// Keys of offline photo-schedule marks already fired this shift, as a JSON
+  /// string list. Persisted so an app-kill + cold-start mid-shift doesn't
+  /// re-fire a scheduled photo capture the guard already handled (the in-memory
+  /// `_fired` set resets on restart). Cleared on shift end, sign-out, and fresh
+  /// provision.
+  static Future<void> savePhotoFired(List<String> keys) =>
+      _storage.write(key: _photoFiredKey, value: jsonEncode(keys));
+
+  static Future<List<String>> getPhotoFired() async {
+    final raw = await _storage.read(key: _photoFiredKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      return (jsonDecode(raw) as List).cast<String>();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<void> clearPhotoFired() =>
+      _storage.delete(key: _photoFiredKey);
+
+  /// A snapshot of the server's current-shift object (`CurrentShiftModel`) while
+  /// a shift is active, so a cold start after a swipe-kill can render the full
+  /// shift card — site name, schedule, overdue banner — WITHOUT waiting on
+  /// `GET /shifts/current` (null for an active shift on the known backend bug, or
+  /// unreachable offline). Cleared when the shift closes and on sign-out.
+  static Future<void> saveCurrentShift(String json) =>
+      _storage.write(key: _currentShiftKey, value: json);
+
+  static Future<String?> getCurrentShift() =>
+      _storage.read(key: _currentShiftKey);
+
+  static Future<void> clearCurrentShift() =>
+      _storage.delete(key: _currentShiftKey);
+
+  /// The in-progress shift (active flag, id, start time, ref, summary counters)
+  /// as a JSON blob, so a cold start after the app is swipe-killed can restore
+  /// the active shift from the device WITHOUT waiting on `GET /shifts/current`
+  /// (which can be null for an active shift, or unreachable offline). Wiped on
+  /// shift end and sign-out.
+  static Future<void> saveShiftState(String json) =>
+      _storage.write(key: _shiftStateKey, value: json);
+
+  static Future<String?> getShiftState() => _storage.read(key: _shiftStateKey);
+
+  static Future<void> clearShiftState() =>
+      _storage.delete(key: _shiftStateKey);
 
   /// Arrival time of the most recent online photo request, stamped the instant
   /// the app first sees it (the FCM background isolate when locked, or the
@@ -169,7 +242,11 @@ class SecureStorageService {
         _storage.delete(key: _expiresAtKey),
         _storage.delete(key: _hmacSecretKey),
         _storage.delete(key: _wakefulnessKey),
+        _storage.delete(key: _wakefulnessFiredKey),
         _storage.delete(key: _photoScheduleKey),
+        _storage.delete(key: _photoFiredKey),
+        _storage.delete(key: _shiftStateKey),
+        _storage.delete(key: _currentShiftKey),
         _storage.delete(key: _photoReceiptKey),
         _storage.delete(key: _seenReviewsKey),
         _storage.delete(key: _dbCipherKey),

@@ -230,3 +230,39 @@ final gpsServiceProvider = Provider<GpsService>((ref) {
   ref.onDispose(service.dispose);
   return service;
 });
+
+/// Tracks whether the device's **location services** are switched on (the OS
+/// master toggle in Control Center / Settings — distinct from app permission).
+/// GPS tracking silently produces nothing while this is off, so the UI blocks
+/// interaction until it's re-enabled. `true` = enabled.
+///
+/// Seeded optimistically (`true`) so a cold start never flashes the blocker
+/// before the first async read returns, then corrected from
+/// `isLocationServiceEnabled()` and kept live by the OS status stream. Call
+/// [LocationServiceNotifier.refresh] on app-resume — the stream may not emit for
+/// a toggle made while the app was backgrounded.
+class LocationServiceNotifier extends Notifier<bool> {
+  StreamSubscription<ServiceStatus>? _sub;
+
+  @override
+  bool build() {
+    _sub = Geolocator.getServiceStatusStream().listen((status) {
+      state = status == ServiceStatus.enabled;
+    });
+    ref.onDispose(() => _sub?.cancel());
+    unawaited(refresh());
+    return true;
+  }
+
+  Future<void> refresh() async {
+    try {
+      state = await Geolocator.isLocationServiceEnabled();
+    } catch (_) {
+      // Can't determine (e.g. a platform that doesn't report it) — don't block.
+      state = true;
+    }
+  }
+}
+
+final locationServiceEnabledProvider =
+    NotifierProvider<LocationServiceNotifier, bool>(LocationServiceNotifier.new);

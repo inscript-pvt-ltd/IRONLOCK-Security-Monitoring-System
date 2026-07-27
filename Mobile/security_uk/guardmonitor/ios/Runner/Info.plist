@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- The shift-access SSO deep link (ironlock://shift-access/<token>) is handled
+	     entirely by the app_links plugin (deep_link_service.dart). Disable Flutter's
+	     BUILT-IN deep linking so the engine doesn't ALSO push the link's path as a
+	     named route — with no router that throws "Could not find a generator for
+	     route /<token>". app_links keeps working (separate channel). -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>Ironlock Guard Monitor needs camera access to capture photo verification images during your shift.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
@@ -53,7 +60,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Guard Monitor</string>
+	<string>IronLock</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

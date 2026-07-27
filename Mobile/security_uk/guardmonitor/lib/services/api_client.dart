@@ -1,8 +1,15 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/api_config.dart';
 import 'device_info_service.dart';
 import 'secure_storage_service.dart';
+
+/// Force the HTTP logger on in ANY build mode (incl. `--release`) with
+/// `--dart-define=HTTP_LOG=true`. Debug builds log unconditionally; this exists
+/// so a release build under test can surface backend traffic in the `flutter run`
+/// console. Still never logs bodies/headers — only method/path/status/error-code.
+const bool _kForceHttpLog = bool.fromEnvironment('HTTP_LOG');
 
 final dioProvider = Provider<Dio>((ref) {
   final dio = Dio(BaseOptions(
@@ -18,9 +25,101 @@ final dioProvider = Provider<Dio>((ref) {
   ));
 
   dio.interceptors.add(_JwtInterceptor(dio, ref));
+  // Track whether the backend is actually *reachable* (not just whether a
+  // network interface is up). Feeds `serverReachableProvider`. Placed after the
+  // JWT interceptor so it observes the final outcome incl. refresh-retries.
+  dio.interceptors.add(_ReachabilityInterceptor(ref));
+  // Log every request/response/error in one place so ALL backend traffic is
+  // visible in the console. Added last so it sees the final outcome (incl.
+  // anything the JWT interceptor passes through). On in debug automatically, or
+  // in ANY mode via `--dart-define=HTTP_LOG=true` (see [_kForceHttpLog]).
+  if (kDebugMode || _kForceHttpLog) dio.interceptors.add(_DebugLogInterceptor());
 
   return dio;
 });
+
+/// True while the backend answers our requests; false when the interface claims
+/// to be up but the server can't be reached (dead Wi-Fi, a captive portal that
+/// never lets our API calls through, a black-hole cellular handover). Distinct
+/// from [isOnlineProvider], which only reflects the OS network interface.
+///
+/// Why this exists: `connectivity_plus` reports "online" the instant a Wi-Fi
+/// interface associates — even on a hotel/venue captive portal where no API
+/// call ever completes. Gating the offline welfare/photo scheduler on the raw
+/// interface flag then left a guard **silently un-prompted**: the local
+/// scheduler was suppressed (thinks it's online) *and* every server poll failed,
+/// so no challenge appeared at all. The scheduler is instead gated on
+/// interface-online **AND** server-reachable (see `home_screen._pollBackend`),
+/// so a "connected but unreachable" phone falls back to the offline path and
+/// keeps prompting — and, because the server genuinely can't be reached, the
+/// answer is correctly recorded via the offline endpoint (no mislabelling).
+class ServerReachabilityNotifier extends Notifier<bool> {
+  @override
+  bool build() => true; // assume reachable until a request proves otherwise
+
+  /// A request completed with an HTTP response (any status, even 4xx/5xx) → the
+  /// server is reachable. A request that produced no response at all
+  /// (connection error / timeout) → not reachable.
+  void report({required bool reachable}) => state = reachable;
+}
+
+final serverReachableProvider =
+    NotifierProvider<ServerReachabilityNotifier, bool>(ServerReachabilityNotifier.new);
+
+/// Flips [serverReachableProvider] from real request outcomes. A response of any
+/// status means the box answered (reachable); a null-response error means it
+/// didn't (unreachable). The refresh POST inside [_JwtInterceptor] also flows
+/// through here, so the signal stays fresh even during a token refresh.
+class _ReachabilityInterceptor extends Interceptor {
+  _ReachabilityInterceptor(this._ref);
+  final Ref _ref;
+
+  @override
+  void onResponse(Response<dynamic> response, ResponseInterceptorHandler handler) {
+    _ref.read(serverReachableProvider.notifier).report(reachable: true);
+    handler.next(response);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    // `response == null` ⇒ connection error / timeout / DNS failure — the server
+    // never answered. A 4xx/5xx DOES carry a response, so the server IS reachable
+    // (it just rejected the request), which must NOT read as offline.
+    _ref
+        .read(serverReachableProvider.notifier)
+        .report(reachable: err.response != null);
+    handler.next(err);
+  }
+}
+
+/// Logs each HTTP call: method + path + status + (on error) the server error
+/// code. Deliberately **never** logs request/response bodies or headers — they
+/// carry the password, JWTs, and the photo `hmac_secret`. Debug builds only.
+class _DebugLogInterceptor extends Interceptor {
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    debugPrint('[http] → ${options.method} ${options.uri}');
+    handler.next(options);
+  }
+
+  @override
+  void onResponse(Response<dynamic> response, ResponseInterceptorHandler handler) {
+    final r = response.requestOptions;
+    debugPrint('[http] ← ${response.statusCode} ${r.method} ${r.path}');
+    handler.next(response);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    final data = err.response?.data;
+    final code =
+        (data is Map && data['error'] is Map) ? (data['error'] as Map)['code'] : null;
+    debugPrint('[http] ✗ ${err.response?.statusCode ?? err.type.name} '
+        '${err.requestOptions.method} ${err.requestOptions.path}'
+        '${code != null ? ' code=$code' : ''}');
+    handler.next(err);
+  }
+}
 
 /// Holds the sign-out callback so [_JwtInterceptor] can route back to Login
 /// when a refresh is terminally rejected, without `api_client.dart` importing
@@ -90,6 +189,7 @@ class _JwtInterceptor extends Interceptor {
       final refreshToken = await SecureStorageService.getRefreshToken();
       if (refreshToken == null) {
         handler.next(err);
+        _failPending(err);
         _ref.read(forcedSignOutCallbackProvider)?.call();
         return;
       }
@@ -110,6 +210,7 @@ class _JwtInterceptor extends Interceptor {
 
       if (newToken == null) {
         handler.next(err);
+        _failPending(err);
         _ref.read(forcedSignOutCallbackProvider)?.call();
         return;
       }
@@ -133,23 +234,57 @@ class _JwtInterceptor extends Interceptor {
         handler.next(retryErr is DioException ? retryErr : err);
       }
 
-      // Drain any requests that queued while we were refreshing
-      for (final pending in _pendingRetries) {
-        try {
-          final r = await _retry(pending.options, newToken);
-          pending.handler.resolve(r);
-        } catch (e) {
-          pending.handler.next(err);
-        }
-      }
+      // Drain any requests that queued while we were refreshing.
+      await _drainPending(newToken);
     } catch (_) {
       // Refresh itself failed (e.g. TOKEN_INVALID/TOKEN_EXPIRED on refresh) —
       // terminal: there's no token to recover with, force the user to Login.
       handler.next(err);
+      _failPending(err);
       _ref.read(forcedSignOutCallbackProvider)?.call();
     } finally {
+      // The drain/fail helpers pop as they go, so the list is normally empty
+      // here; clear() only mops up the rare item added in the microsecond gap
+      // before _refreshing flips, so it can't leak into the next refresh cycle.
       _pendingRetries.clear();
       _refreshing = false;
+    }
+  }
+
+  /// Retries every request that queued while the refresh was in flight, with the
+  /// fresh [token]. Pops one at a time (instead of a `for-in`) so a concurrent
+  /// 401 appending to the list mid-drain can't raise a ConcurrentModificationError
+  /// — which the outer catch would misread as a refresh failure and force a
+  /// spurious sign-out. Each queued request reports its OWN outcome.
+  Future<void> _drainPending(String token) async {
+    while (_pendingRetries.isNotEmpty) {
+      final pending = _pendingRetries.removeAt(0);
+      try {
+        final r = await _retry(pending.options, token);
+        pending.handler.resolve(r);
+      } catch (e) {
+        pending.handler.next(
+          e is DioException
+              ? e
+              : DioException(requestOptions: pending.options, error: e),
+        );
+      }
+    }
+  }
+
+  /// Rejects every queued request when the refresh itself failed, so those
+  /// futures complete (with the original auth error) instead of hanging forever.
+  void _failPending(DioException err) {
+    while (_pendingRetries.isNotEmpty) {
+      final pending = _pendingRetries.removeAt(0);
+      pending.handler.next(
+        DioException(
+          requestOptions: pending.options,
+          response: err.response,
+          type: err.type,
+          error: err.error,
+        ),
+      );
     }
   }
 
