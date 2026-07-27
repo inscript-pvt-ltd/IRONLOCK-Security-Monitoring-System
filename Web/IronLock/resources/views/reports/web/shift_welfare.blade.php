@@ -176,13 +176,23 @@
                         <div><div class="wf-mini-k">Online / Offline</div><div class="wf-mini-v">{{ $p['mode'] }}</div></div>
                         <div><div class="wf-mini-k">GPS Accuracy</div><div class="wf-mini-v">{{ $dash($p['gps_accuracy']) }}</div></div>
                         <div><div class="wf-mini-k">NTP Status</div><div class="wf-mini-v">{{ $p['ntp_status'] }}</div></div>
-                        <div><div class="wf-mini-k">HMAC Validation</div><div class="wf-mini-v">{{ $p['hmac'] }} ✓</div></div>
+                        <div><div class="wf-mini-k">HMAC Validation</div><div class="wf-mini-v" style="color:{{ $p['hmac'] === 'Failed' ? '#8a2a2a' : 'inherit' }}">{{ $p['hmac'] }}{{ $p['hmac'] === 'Failed' ? '' : ' ✓' }}</div></div>
                         <div><div class="wf-mini-k">EXIF Validation</div><div class="wf-mini-v">{{ $p['exif'] }}</div></div>
                         @if (!empty($p['liveness']))
                             <div><div class="wf-mini-k">Liveness Proof</div><div class="wf-mini-v" style="color:{{ $p['liveness'] === 'Verified' ? '#2e7d32' : '#8a2a2a' }}">{{ $p['liveness'] }}{{ $p['liveness'] === 'Verified' ? ' ✓' : '' }}</div></div>
                         @endif
                         <div><div class="wf-mini-k">Images</div><div class="wf-mini-v">{{ count($p['images']) }}</div></div>
                     </div>
+                    {{-- Only present on a rejected upload (and absent from reports
+                         generated before the reason was recorded, which render as
+                         they always did). The guard answered; the server discarded
+                         the image — say which, so a late answer is not read as
+                         tampering. --}}
+                    @if (!empty($p['rejection_reason']))
+                        <div style="margin-top:8px;padding:6px 10px;border-left:2px solid #8a2a2a;background:#fbf3f3;font-size:12px;color:#8a2a2a;line-height:1.45">
+                            <strong>Photo received but rejected:</strong> {{ $p['rejection_reason'] }}
+                        </div>
+                    @endif
                     @if (count($p['images']))
                         <div class="wf-gallery">
                             @foreach ($p['images'] as $img)

@@ -327,13 +327,21 @@
     // Exposed on window so the toggle buttons' inline onclick can reach it.
     (function () {
         const PAGE_SIZE = 4;
-        const allRows = Array.from(document.querySelectorAll('#alerts-list .alert-row'));
 
         const listEl = document.getElementById('alerts-list');
         const pager = document.getElementById('alerts-pagination');
         const prevBtn = document.getElementById('alerts-prev');
         const nextBtn = document.getElementById('alerts-next');
         const indicator = document.getElementById('alerts-page-indicator');
+
+        // Once every alert is acknowledged the list block isn't rendered at all
+        // (the "No active alerts" empty state takes its place), so none of these
+        // nodes exist. Bail out rather than throw: an uncaught error here aborts
+        // the remainder of this <script>, which would take the Live Map and its
+        // 15s refresh down with it.
+        if (!listEl || !pager || !prevBtn || !nextBtn || !indicator) return;
+
+        const allRows = Array.from(listEl.querySelectorAll('.alert-row'));
 
         let activeSource = 'all';
         let page = 0;

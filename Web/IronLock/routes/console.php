@@ -40,6 +40,15 @@ Schedule::command('wakefulness:dispatch')->everyMinute()->withoutOverlapping();
 // Overlap-protected.
 Schedule::command('wakefulness:timeout-sweep')->everyMinute()->withoutOverlapping();
 
+// Alert on a scheduled photo/wakefulness verification mark that fell inside a
+// closed comms gap and left no trace at all — neither an offline capture
+// flushed by the device nor an online catch-up dispatch (both dispatchers
+// deliberately skip firing a mark once it's older than
+// catchup_staleness_seconds). Previously this only produced a neutral,
+// report-only "Missed" note; this promotes it to a CRITICAL, is_offline
+// alert on the Alert Feed / dashboard. Runs every minute. Overlap-protected.
+Schedule::command('schedule:missed-sweep')->everyMinute()->withoutOverlapping();
+
 // Remove monthly evidence backups whose 30-day retention has elapsed (deletes
 // the backup record + cached ZIP only — never the original evidence). Daily.
 Schedule::command('ironlock:backups-cleanup')->dailyAt('03:30')->withoutOverlapping();

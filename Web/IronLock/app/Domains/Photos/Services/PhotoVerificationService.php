@@ -14,6 +14,7 @@ use App\Domains\Shifts\Models\Shift;
 use App\Domains\Shifts\Models\ShiftEvent;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -145,10 +146,10 @@ class PhotoVerificationService
         // Defensive: at least one, at most five images per request.
         $items = array_values(array_filter($items, fn ($i) => ($i['file'] ?? null) instanceof UploadedFile));
         if (count($items) < 1) {
-            return $this->reject('NO_IMAGE');
+            return $this->reject('NO_IMAGE', $guard, $shift);
         }
         if (count($items) > self::MAX_PHOTOS_PER_REQUEST) {
-            return $this->reject('TOO_MANY_IMAGES');
+            return $this->reject('TOO_MANY_IMAGES', $guard, $shift);
         }
 
         // 1. Resolve the nonce (existence / ownership / not-used). Expiry is
@@ -157,7 +158,7 @@ class PhotoVerificationService
         $check = $this->nonces->validate($nonceValue, $guard);
 
         if (!$check['ok']) {
-            return $this->reject($check['reason']);
+            return $this->reject($check['reason'], $guard, $shift);
         }
 
         /** @var Nonce $nonce */
@@ -182,13 +183,13 @@ class PhotoVerificationService
                     severity: 'WARNING', isOffline: true,
                 );
             }
-            return $this->reject('NONCE_WRONG_SHIFT');
+            return $this->reject('NONCE_WRONG_SHIFT', $guard, $shift);
         }
 
         // 2. Resolve or create the photo request this upload fulfils.
         $request = $this->resolveRequest($guard, $shift, $nonce, $payload, $serverReceivedAt);
         if ($request === null) {
-            return $this->reject('REQUEST_NOT_FOUND');
+            return $this->reject('REQUEST_NOT_FOUND', $guard, $shift);
         }
 
         // 3. HMAC integrity per image — recompute over the canonical payload
@@ -196,7 +197,7 @@ class PhotoVerificationService
         //    Any mismatch ⇒ reject the whole submission (tampered/forged).
         foreach ($items as $item) {
             if (!$this->verifyHmac($guard, $item['file'], $payload + ['signature' => $item['signature']])) {
-                $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt);
+                $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt, 'HMAC_INVALID');
                 // A bad signature on an OFFLINE flush means the stored capture was
                 // tampered with (or signed with the wrong secret) before it synced
                 // — genuinely suspicious, so alert the admin as a WARNING in the
@@ -209,7 +210,7 @@ class PhotoVerificationService
                         severity: 'WARNING', isOffline: true,
                     );
                 }
-                return $this->reject('HMAC_INVALID');
+                return $this->reject('HMAC_INVALID', $guard, $shift);
             }
         }
 
@@ -219,12 +220,12 @@ class PhotoVerificationService
 
         if ($windowReason !== null) {
             // TIMELINE_ANOMALY and NONCE_EXPIRED are hard failures: never stored.
-            $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt);
+            $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt, $windowReason);
             if ($windowReason === PhotoEvidence::FLAG_TIMELINE_ANOMALY) {
                 $this->logEvent($shift, 'TIMELINE_ANOMALY', ['request_id' => $request->id]);
                 $this->raiseAlert($guard, $shift, 'TIMELINE_ANOMALY', 'Photo capture time predates its nonce — rejected.');
             }
-            return $this->reject($windowReason);
+            return $this->reject($windowReason, $guard, $shift);
         }
 
         // 5. Secondary anomaly flags — do NOT reject, only annotate + alert.
@@ -275,8 +276,8 @@ class PhotoVerificationService
         // 6. Accept: consume the nonce (atomic single-use), store, finalise.
         if (!$this->nonces->markUsed($nonce)) {
             // Lost the race — another upload already consumed this nonce.
-            $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt);
-            return $this->reject('NONCE_ALREADY_USED');
+            $this->markRequest($request, PhotoRequest::STATUS_ANOMALY, $serverReceivedAt, 'NONCE_ALREADY_USED');
+            return $this->reject('NONCE_ALREADY_USED', $guard, $shift);
         }
 
         $evidences = [];
@@ -602,19 +603,51 @@ class PhotoVerificationService
         return "{$stamp->format('Y')}/{$stamp->format('m')}/{$stamp->format('d')}/{$ref}/{$filename}";
     }
 
-    private function markRequest(PhotoRequest $request, string $status, Carbon $serverReceivedAt): void
-    {
-        $request->update([
+    /**
+     * Terminal status transition for a request.
+     *
+     * $reason is the machine code that caused an ANOMALY (HMAC_INVALID,
+     * NONCE_EXPIRED, …). It is persisted so an admin reading the timeline or a
+     * welfare report can tell a suspicious capture from a merely late one —
+     * previously the reason only ever reached the app in the 422 body and was
+     * lost server-side the moment the response was sent.
+     */
+    private function markRequest(
+        PhotoRequest $request,
+        string $status,
+        Carbon $serverReceivedAt,
+        ?string $reason = null
+    ): void {
+        $updates = [
             'status' => $status,
             'server_received_at' => $serverReceivedAt,
-        ]);
+        ];
+
+        if ($reason !== null) {
+            $updates['rejection_reason'] = $reason;
+        }
+
+        $request->update($updates);
     }
 
     /**
      * @return array{result: 'REJECTED', flags: array<string>, reason: string, evidence: null}
      */
-    private function reject(string $reason): array
+    private function reject(string $reason, ?Guard $guard = null, ?Shift $shift = null): array
     {
+        // Several rejections happen BEFORE a photo_requests row is resolved
+        // (no image, unknown nonce, nonce minted for another shift, request not
+        // found), so there is nothing to write rejection_reason onto. Those used
+        // to vanish entirely once the 422 was sent. Log them instead — a guard
+        // whose uploads are being turned away at the door leaves no other trace,
+        // and "the app is uploading but nothing appears" is otherwise
+        // undiagnosable from the database alone.
+        Log::warning('Photo upload rejected', [
+            'reason' => $reason,
+            'guard_id' => $guard?->id,
+            'shift_id' => $shift?->id,
+        ]);
+
         return [
             'result' => 'REJECTED',
             'flags' => [],

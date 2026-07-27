@@ -29,6 +29,7 @@
         'PHOTO_SUBMITTED'               => ['label' => 'Photo Submitted',              'tone' => 'ok'],
         'PHOTO_REVIEWED'                => ['label' => 'Photo Reviewed',               'tone' => 'ok'],
         'PHOTO_TIMEOUT'                 => ['label' => 'Photo Timed Out',              'tone' => 'alert'],
+        'PHOTO_MARK_MISSED'             => ['label' => 'Photo Never Captured',         'tone' => 'alert'],
         'TIMELINE_ANOMALY'              => ['label' => 'Photo Timeline Anomaly',       'tone' => 'alert'],
         'CLOCK_MANIPULATION_SUSPECTED'  => ['label' => 'Clock Manipulation Suspected', 'tone' => 'alert'],
         'NTP_UNAVAILABLE'               => ['label' => 'NTP Unavailable',              'tone' => 'warn'],
@@ -37,6 +38,7 @@
         'WAKEFULNESS_CHALLENGE'         => ['label' => 'Wakefulness Challenge',        'tone' => 'ok'],
         'WAKEFULNESS_CONFIRMED'         => ['label' => 'Wakefulness Confirmed',        'tone' => 'ok'],
         'WAKEFULNESS_FAILED'            => ['label' => 'Wakefulness Failed',           'tone' => 'alert'],
+        'WAKEFULNESS_MARK_MISSED'       => ['label' => 'Wakefulness Never Answered',   'tone' => 'alert'],
         // Geofence (Phase 3.3)
         'ZONE_EXIT'                     => ['label' => 'Zone Exit Alert',             'tone' => 'alert'],
         // Offline / backfill (Phase 7). Informational, never alert-red — a closed,
@@ -344,6 +346,11 @@
     }
     .attempt-arrow { flex-shrink: 0; color: var(--text-muted); font-size: 20px; line-height: 1; }
     .attempt-empty-label { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+    /* Why an ANOMALY attempt has no image. The guard did upload — this says what
+       the server objected to, so a late answer is not mistaken for tampering. */
+    .attempt-reject { font-size: 10px; line-height: 1.4; margin-top: 5px; padding: 3px 8px; border-left: 2px solid; border-radius: 0 3px 3px 0; }
+    .attempt-reject.bad  { color: var(--error-red);     border-color: var(--error-red);     background: rgba(200, 60, 60, .07); }
+    .attempt-reject.warn { color: var(--warning-amber); border-color: var(--warning-amber); background: rgba(200, 150, 40, .07); }
 
     /* Per-attempt review status chip (shown in the collection bar). */
     .attempt-review {
@@ -877,6 +884,15 @@
                             $captureTs    = $pr['submitted_at'] ?? null;
                             $offlineSplit = $capturedOffline && $captureTs && $slotTs && $captureTs !== $slotTs;
                             $primaryTs    = $offlineSplit ? $captureTs : $slotTs;
+                            // An ANOMALY means the guard DID upload and the server
+                            // discarded it. Show why: a signature or timeline
+                            // failure is genuinely suspicious (red), while an
+                            // expired/consumed nonce usually just means the answer
+                            // arrived after the response window (amber). Both are
+                            // NULL on requests recorded before the column existed,
+                            // which renders exactly as this panel did before.
+                            $rejLabel = $pr['rejection_label'] ?? null;
+                            $rejTone  = in_array($pr['rejection_reason'] ?? null, ['HMAC_INVALID', 'TIMELINE_ANOMALY'], true) ? 'bad' : 'warn';
                             $previewEvs = array_slice($pr['evidences'] ?? [], 0, 3);
                             $imgCount   = $pr['image_count'] ?? 0;
                             $moreCount  = max(0, $imgCount - 3);
@@ -917,6 +933,9 @@
                                     @if ($offlineSplit)<span class="attempt-slot-note">captured · scheduled <time class="tl-ts-hhmm" data-ts="{{ $iso($slotTs) }}">{{ \Illuminate\Support\Carbon::parse($slotTs)->setTimezone($tz)->format('g:i A') }}</time></span>@endif
                                     &nbsp;·&nbsp;<span class="photo-badge {{ $reqBadge }}" style="font-size:8px;padding:1px 5px;">{{ str_replace('_', ' ', $reqBadge) }}</span>
                                 </div>
+                                @if ($rejLabel)
+                                    <div class="attempt-reject {{ $rejTone }}">Photo received but rejected — {{ $rejLabel }}</div>
+                                @endif
                             </div>
                             @if ($hasImages)
                                 <span class="attempt-review {{ $reviewClass }}">{{ $reviewText }}</span>

@@ -362,6 +362,14 @@ class ShiftController extends Controller
                         'submitted_at' => $r->submitted_at,
                         'image_count' => count($evidences),
                         'captured_offline' => (bool) ($firstMeta['captured_offline'] ?? false),
+                        // Why an ANOMALY row has no photo. An ANOMALY is only
+                        // reachable from the upload endpoint, so the guard DID
+                        // answer and the server discarded the image — without
+                        // this an admin cannot tell tampering from a guard who
+                        // was a few seconds past the response window. NULL for
+                        // every request recorded before the column existed.
+                        'rejection_reason' => $r->rejection_reason,
+                        'rejection_label' => $r->rejectionLabel(),
                         'evidences' => $evidences,
                     ];
                 });

@@ -37,6 +37,14 @@ use Illuminate\Support\Str;
  */
 class WakefulnessService
 {
+    /**
+     * Bounds for the challenge-code length. 4 is the shipped contract (the push
+     * body, the app UI and the wakefulness_checks.challenge_code column all
+     * assume it); 8 is the widest the column holds.
+     */
+    private const MIN_DIGITS = 4;
+    private const MAX_DIGITS = 8;
+
     public function __construct(
         private readonly AlertService $alerts,
         private readonly FcmService $fcm,
@@ -57,9 +65,9 @@ class WakefulnessService
         }
 
         $now = Carbon::now();
-        $code = str_pad((string) random_int(0, 9999), $this->digits(), '0', STR_PAD_LEFT);
+        $code = $this->randomCode();
 
-        
+
         $check = WakefulnessCheck::create([
             'id' => (string) Str::uuid(),
             'shift_id' => $shift->id,
@@ -168,6 +176,8 @@ class WakefulnessService
         // the column is decimal(4,2), so cap it at 99.99.
         $elapsed = $check->scheduled_at ? $check->scheduled_at->diffInSeconds($serverReceivedAt) : null;
         $responseTime = $elapsed === null ? null : min(99.99, round($elapsed, 2));
+
+        $this->noteCodeLength($check, $code);
 
         $check->submitted_code = $code;
         $check->responded_at = $respondedAt ? $this->parse($respondedAt) : $serverReceivedAt;
@@ -289,6 +299,8 @@ class WakefulnessService
             'online_or_offline' => WakefulnessCheck::MODE_OFFLINE,
             'request_type' => WakefulnessCheck::TYPE_SCHEDULED,
         ]);
+
+        $this->noteCodeLength($check, $code);
 
         // Backfill the challenge into the timeline too — the online path logs
         // WAKEFULNESS_CHALLENGE at dispatch; offline it fired on-device, so we
@@ -555,9 +567,75 @@ class WakefulnessService
         return (int) config('ironlock.wakefulness_deadline_grace_seconds', 5);
     }
 
+    /**
+     * The challenge-code length, shared with the device via the shift-start
+     * payload. Re-clamped here (config/ironlock.php already clamps) so a
+     * hand-edited bootstrap/cache/config.php can never make str_pad() a no-op
+     * and emit a short code.
+     */
     private function digits(): int
     {
-        return (int) config('ironlock.totp_digits', 4);
+        $digits = (int) config('ironlock.totp_digits', 4);
+
+        return ($digits >= self::MIN_DIGITS && $digits <= self::MAX_DIGITS) ? $digits : self::MIN_DIGITS;
+    }
+
+    /**
+     * A uniformly random ONLINE challenge code of exactly digits() characters,
+     * never starting with a zero.
+     *
+     * Two deliberate properties:
+     *
+     * 1. The range is DERIVED from digits(). It was previously a hardcoded
+     *    random_int(0, 9999) that was then padded to digits(), so the two could
+     *    disagree — at digits=6 every code was "00xxxx" (10,000 of a possible
+     *    1,000,000), and had digits ever resolved below 4 the pad became a no-op
+     *    and ~10% of codes came out short.
+     *
+     * 2. The floor is 10^(digits-1), not 0, so a leading zero is impossible and
+     *    the value is exactly `digits` characters WITHOUT padding. This removes
+     *    the whole class of client-side bugs where "0472" is parsed as an int
+     *    and rendered as "472" — there is simply no leading zero to lose.
+     *    The cost is 10% of the keyspace (9,000 codes instead of 10,000), which
+     *    is immaterial: a challenge is single-submission inside a 60s window,
+     *    not a secret being brute-forced.
+     *
+     * NOTE — this guarantee covers ONLINE challenges only. Offline codes come
+     * from Totp::codeForWindow(), which is RFC 6238 (`binary % 10^digits`) and
+     * therefore DOES produce leading zeros about 10% of the time. That cannot be
+     * constrained the same way without diverging from the standard the device's
+     * TOTP library implements. Offline codes are still strings on every hop and
+     * the comparison paths still left-pad, so a device that drops a leading zero
+     * on an offline code must be fixed on the device — see noteCodeLength().
+     */
+    private function randomCode(): string
+    {
+        $digits = $this->digits();
+
+        return (string) random_int(10 ** ($digits - 1), (10 ** $digits) - 1);
+    }
+
+    /**
+     * Warn when a submitted code arrives at a different length than issued.
+     *
+     * Every comparison in this service left-pads the submitted value, so a
+     * client that parsed "0742" as an int and sent "742" still PASSES — correct
+     * for the guard, but it means a device-side padding bug produces no failed
+     * check and stays invisible. This is the only signal that it happened.
+     */
+    private function noteCodeLength(WakefulnessCheck $check, string $code): void
+    {
+        if (strlen($code) === $this->digits()) {
+            return;
+        }
+
+        Log::warning('Wakefulness: submitted code length differs from issued length', [
+            'check_id' => $check->id,
+            'guard_id' => $check->guard_id,
+            'expected_digits' => $this->digits(),
+            'submitted_digits' => strlen($code),
+            'mode' => $check->online_or_offline,
+        ]);
     }
 
     /** TOTP time-step in seconds (RFC-6238 default 30s), shared with the app. */

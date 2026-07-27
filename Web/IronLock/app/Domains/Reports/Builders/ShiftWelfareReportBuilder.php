@@ -120,6 +120,12 @@ class ShiftWelfareReportBuilder extends ReportBuilder
             if (!empty($p['submitted_at'])) {
                 $add('Photo', 'Request ' . $no . ' submitted', '', $p['submitted_at']);
             }
+            // An ANOMALY row means the guard DID upload and the server discarded
+            // the image; without the reason the CSV shows only the status, which
+            // reads the same for a tampered photo and a late one.
+            if (!empty($p['rejection_reason'])) {
+                $add('Photo', 'Request ' . $no . ' rejected', $p['rejection_reason']);
+            }
             // Liveness proof + the raw SHA-256 fingerprints stay in the CSV (the
             // machine-readable/forensic copy) even though the report page shows
             // only the plain-language result. Both are toggle-gated by the composer.

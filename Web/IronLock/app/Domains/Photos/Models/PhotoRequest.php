@@ -35,6 +35,37 @@ class PhotoRequest extends Model
     public const STATUS_ANOMALY = 'ANOMALY';
 
     /**
+     * Plain-English text for a stored `rejection_reason`.
+     *
+     * An ANOMALY always means the guard DID upload and the server discarded it,
+     * but the four causes are not equally serious: a bad signature is genuinely
+     * suspicious, whereas an expired nonce usually just means the guard answered
+     * after the response window closed. The raw codes are the app-facing
+     * contract (PhotoController returns them verbatim in the 422 body), so they
+     * are kept as-is in the column and only translated for admin display.
+     */
+    public const REJECTION_LABELS = [
+        'HMAC_INVALID' => 'Signature check failed — the image did not match its signature (possible tampering).',
+        'NONCE_EXPIRED' => 'Answered after the response window closed — the photo arrived too late to be accepted.',
+        'NONCE_ALREADY_USED' => 'The one-time token had already been consumed by an earlier upload.',
+        'TIMELINE_ANOMALY' => 'Capture time predates the token that authorised it — device clock inconsistent.',
+    ];
+
+    /**
+     * Human-readable rejection text, or NULL when nothing was recorded (every
+     * request created before the column existed, and every non-rejected one).
+     */
+    public function rejectionLabel(): ?string
+    {
+        if ($this->rejection_reason === null) {
+            return null;
+        }
+
+        return self::REJECTION_LABELS[$this->rejection_reason]
+            ?? str_replace('_', ' ', $this->rejection_reason);
+    }
+
+    /**
      * The table associated with the model.
      */
     protected $table = 'photo_requests';
@@ -65,6 +96,7 @@ class PhotoRequest extends Model
         'request_type',
         'nonce_issued_at',
         'status',
+        'rejection_reason',
         'requested_at',
         'submitted_at',
         'server_received_at',

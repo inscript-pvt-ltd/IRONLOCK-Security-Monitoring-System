@@ -191,9 +191,11 @@ class ShiftReportComposer
             'PHOTO_SUBMITTED' => ['Photo Verification Submitted', ['label' => 'Verified', 'style' => 'ok']],
             'PHOTO_REVIEWED' => ['Photo Reviewed', ['label' => 'Reviewed', 'style' => 'ok']],
             'PHOTO_TIMEOUT' => ['Photo Verification Missed', ['label' => 'Timeout', 'style' => 'warn']],
+            'PHOTO_MARK_MISSED' => ['Photo Never Captured', ['label' => 'Missed', 'style' => 'bad']],
             'WAKEFULNESS_CHALLENGE', 'WAKEFULNESS_ISSUED' => ['Wakefulness Challenge', ['label' => 'Issued', 'style' => 'dash']],
             'WAKEFULNESS_PASSED', 'WAKEFULNESS_CONFIRMED' => ['Wakefulness Passed', ['label' => 'Pass', 'style' => 'ok']],
             'WAKEFULNESS_FAILED' => ['Wakefulness Failed', ['label' => 'Fail', 'style' => 'bad']],
+            'WAKEFULNESS_MARK_MISSED' => ['Wakefulness Never Answered', ['label' => 'Missed', 'style' => 'bad']],
             'LATE_CHECKIN_AUTHORIZED' => ['Late Check-In Authorised', ['label' => 'Admin', 'style' => 'dash']],
             'SHIFT_EXCUSED' => ['Shift Excused', ['label' => 'Admin', 'style' => 'dash']],
             'SHIFT_REASSIGNED' => ['Shift Reassigned', ['label' => 'Admin', 'style' => 'dash']],
@@ -330,7 +332,16 @@ class ShiftReportComposer
                     'result' => $r->status,
                     'gps_accuracy' => isset($meta['gps_accuracy']) ? '±' . $meta['gps_accuracy'] . ' m' : null,
                     'ntp_status' => in_array(\App\Domains\Photos\Models\PhotoEvidence::FLAG_NTP_UNAVAILABLE, $flags, true) ? 'Unavailable' : 'Synced',
-                    'hmac' => 'Valid',
+                    // Was hardcoded 'Valid', which was a false statement on the one
+                    // request type where it matters: an upload rejected for a bad
+                    // signature still reported "HMAC Validation: Valid ✓".
+                    'hmac' => $r->rejection_reason === 'HMAC_INVALID' ? 'Failed' : 'Valid',
+                    // Why a request holds no image. Only ever set on ANOMALY, which
+                    // means the guard did upload and the server discarded it — the
+                    // report previously showed the status with no explanation, so a
+                    // late answer and a tampered one read identically. NULL on
+                    // anything recorded before the column existed.
+                    'rejection_reason' => $r->rejectionLabel(),
                     'exif' => in_array(\App\Domains\Photos\Models\PhotoEvidence::FLAG_TIMELINE_ANOMALY, $flags, true) ? 'Review' : 'Valid',
                     'nonce_value' => $includeNonce ? optional($r->nonce)->nonce_value : null,
                     // Plain-language liveness result (only when the toggle is on): a
