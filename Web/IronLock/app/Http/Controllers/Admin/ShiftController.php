@@ -217,11 +217,15 @@ class ShiftController extends Controller
                     $request->boolean('override_11hr_rest')
                 );
 
-                // 16-hour maximum is a hard block — never overridable (spec rule #22).
+                // The duration hard block is never overridable (spec rule #22).
+                // Message comes from the violation itself so it reflects the
+                // effective ceiling (16h normally, or the review-bypass guard's
+                // max_duration_hours) rather than a hardcoded "16 hours".
                 if ($assessment['blocked']) {
                     return response()->json([
                         'success' => false,
-                        'error' => 'Shift duration exceeds 16 hours maximum. This cannot be overridden.',
+                        'error' => $assessment['block_violation']['message']
+                            ?? 'Shift duration exceeds the maximum allowed and cannot be saved.',
                         'wtr_violation' => $assessment['block_violation']
                     ], 422);
                 }
@@ -844,7 +848,8 @@ class ShiftController extends Controller
                 if ($assessment['blocked']) {
                     return response()->json([
                         'success' => false,
-                        'error' => 'Shift duration exceeds 16 hours maximum. This cannot be overridden.',
+                        'error' => $assessment['block_violation']['message']
+                            ?? 'Shift duration exceeds the maximum allowed and cannot be saved.',
                         'wtr_violation' => $assessment['block_violation']
                     ], 422);
                 }
@@ -1329,6 +1334,38 @@ class ShiftController extends Controller
     }
 
     /**
+     * The WTR duration ceiling for one guard. 16 hours for everyone, EXCEPT
+     * the single account designated for Play Store review
+     * (config('ironlock.review_bypass'), matched by email) which gets
+     * max_duration_hours instead.
+     *
+     * TEMPORARY — see Details/Important/PLAY_STORE_REVIEW_BYPASS.md for why
+     * this exists and the safe-removal steps. To retire: delete this method
+     * and change its one call site in validateWorkingTimeRegulations() back
+     * to the literal `16`.
+     */
+    private function wtrMaxDurationHours(string $guardId): int
+    {
+        if (! config('ironlock.review_bypass.enabled')) {
+            return 16;
+        }
+
+        $bypassEmail = config('ironlock.review_bypass.guard_email');
+
+        if (empty($bypassEmail)) {
+            return 16;
+        }
+
+        $guard = Guard::find($guardId);
+
+        if (! $guard || ! $guard->email || strcasecmp($guard->email, $bypassEmail) !== 0) {
+            return 16;
+        }
+
+        return max(16, (int) config('ironlock.review_bypass.max_duration_hours', 72));
+    }
+
+    /**
      * Validate Working Time Regulations for a proposed shift.
      *
      * @param string $guardId
@@ -1348,12 +1385,15 @@ class ShiftController extends Controller
         $dMins  = $totalMins % 60;
         $durationLabel = $dMins > 0 ? "{$dHours}h {$dMins}min" : "{$dHours}h";
 
-        // Rule 1: 16-hour absolute maximum (cannot be overridden)
-        if ($duration > 16) {
+        // Rule 1: 16-hour absolute maximum (cannot be overridden). $maxHours is
+        // 16 for every guard except the single Play Store review account (see
+        // wtrMaxDurationHours() — TEMPORARY, remove with the review bypass).
+        $maxHours = $this->wtrMaxDurationHours($guardId);
+        if ($duration > $maxHours) {
             $violations[] = [
                 'type' => 'DURATION_16HR_BLOCK',
                 'severity' => 'ERROR',
-                'message' => "Shift duration of {$durationLabel} exceeds the 16-hour maximum and cannot be saved.",
+                'message' => "Shift duration of {$durationLabel} exceeds the {$maxHours}-hour maximum and cannot be saved.",
                 'override_allowed' => false
             ];
         }
