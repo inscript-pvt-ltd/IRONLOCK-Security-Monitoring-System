@@ -35,8 +35,8 @@ class SetupReviewBypassGuard extends Command
 
     protected $signature = 'ironlock:review-bypass
         {--email= : Guard email (defaults to config ironlock.review_bypass.guard_email)}
-        {--site=Test Site : Name of an existing, non-archived site to attach the shift to}
-        {--hours= : Shift duration in hours (defaults to config ironlock.review_bypass.max_duration_hours)}
+        {--site=Test Site : Non-archived site to attach the shift to (omit on a re-run to keep the current one)}
+        {--hours= : Shift length in hours, counted from NOW (defaults to config ironlock.review_bypass.max_duration_hours)}
         {--days=7 : How many days from now the login-window override should stay open}
         {--password= : Guard password to set (a strong random one is generated if omitted)}';
 
@@ -59,11 +59,13 @@ class SetupReviewBypassGuard extends Command
             $this->newLine();
         }
 
-        $site = Site::where('name', $this->option('site'))->whereNull('archived_at')->first();
+        $siteName = $this->resolveSiteName($email);
+
+        $site = Site::where('name', $siteName)->whereNull('archived_at')->first();
 
         if (! $site) {
             $available = Site::whereNull('archived_at')->pluck('name')->implode(', ');
-            $this->error("Site \"{$this->option('site')}\" not found (or archived). Active sites: {$available}");
+            $this->error("Site \"{$siteName}\" not found (or archived). Active sites: {$available}");
 
             return self::FAILURE;
         }
@@ -108,6 +110,45 @@ class SetupReviewBypassGuard extends Command
             . $guard->email . ' in .env (then `php artisan config:clear`) if not already done.');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Which site the shift should sit on.
+     *
+     * `--site` has a default ("Test Site"), so on a re-run an omitted `--site`
+     * would otherwise silently migrate an already-working review shift to a
+     * different site. An omitted `--site` therefore keeps whatever site the
+     * existing review shift is already on; only an explicitly passed `--site`
+     * moves it.
+     *
+     * Deliberately looks at the last tagged shift in ANY status, unlike the
+     * reuse query in findOrCreateShift(): once the first review shift has been
+     * auto-closed (Completed) a re-run creates a fresh shift, and that fresh
+     * shift should still land on the site the review was set up against —
+     * not silently fall back to the "Test Site" default.
+     */
+    private function resolveSiteName(string $email): string
+    {
+        $given = (string) $this->option('site');
+
+        if ($this->input->hasParameterOption('--site')) {
+            return $given;
+        }
+
+        $currentName = Shift::where('override_reason', self::SHIFT_MARKER)
+            ->whereHas('assignedGuard', fn ($q) => $q->whereRaw('LOWER(email) = ?', [strtolower($email)]))
+            ->orderByDesc('created_at')
+            ->with('site')
+            ->first()
+            ?->site
+            ?->name;
+
+        if ($currentName && $currentName !== $given) {
+            $this->info("Keeping the existing review shift on site \"{$currentName}\" "
+                . '(pass --site explicitly to move it).');
+        }
+
+        return $currentName ?: $given;
     }
 
     /**
@@ -160,29 +201,77 @@ class SetupReviewBypassGuard extends Command
     {
         $existing = Shift::where('guard_id', $guard->id)
             ->where('override_reason', self::SHIFT_MARKER)
-            ->whereIn('status', [Shift::STATUS_SCHEDULED, Shift::STATUS_CHECKED_IN, Shift::STATUS_ACTIVE])
+            ->whereIn('status', [
+                Shift::STATUS_SCHEDULED,
+                Shift::STATUS_CHECKED_IN,
+                Shift::STATUS_ACTIVE,
+                // A shift the mark-missed sweep already flagged is still reusable
+                // — revive it below rather than leaving it behind and stacking up
+                // a second review shift for the same guard.
+                Shift::STATUS_MISSED,
+            ])
             ->orderByDesc('created_at')
             ->first();
 
-        $overrideUntil = now()->addDays($days);
+        $now = now();
+        $overrideUntil = $now->copy()->addDays($days);
 
         if ($existing) {
-            // Refresh site/geofence/duration too, not just the override date —
-            // otherwise re-running with a different --site (e.g. moving from a
-            // throwaway test site to the real one) would silently leave the
-            // shift on the old site.
-            $existing->update([
+            // Refresh site/geofence too, not just the dates — otherwise
+            // re-running with a different --site (e.g. moving from a throwaway
+            // test site to the real one) would silently leave the shift on the
+            // old site.
+            //
+            // `hours` counts from NOW, never from the original scheduled_start:
+            // the whole reason to re-run is "the reviewer still needs time", and
+            // anchoring to the old start would just rewrite scheduled_end back
+            // into the past once the first window has elapsed.
+            $attributes = [
                 'site_id' => $site->id,
                 'geofence_id' => $geofence->id,
-                'scheduled_end' => $existing->scheduled_start->copy()->addHours($hours),
+                'scheduled_end' => $now->copy()->addHours($hours),
                 'checkin_override_until' => $overrideUntil,
-            ]);
-            $this->info("Existing review shift found ({$existing->reference}) — refreshed site/duration/login window.");
+            ];
+
+            if ($existing->status === Shift::STATUS_ACTIVE) {
+                // Reviewer is mid-shift: never move a running shift's start.
+                // Its photo/wakefulness marks were provisioned once at start()
+                // and all sit inside the OLD window, so top them up across the
+                // newly added tail — otherwise the extension runs with no
+                // verification checks at all and there is nothing to review.
+                $existing->scheduled_end = $attributes['scheduled_end'];
+
+                $attributes['wakefulness_schedule'] = $this->appendMarks(
+                    $existing->wakefulness_schedule,
+                    $existing->buildWakefulnessSchedule($now)
+                );
+                $attributes['photo_schedule'] = $this->appendMarks(
+                    $existing->photo_schedule,
+                    $existing->buildPhotoSchedule($now)
+                );
+
+                $this->info("Existing review shift is ACTIVE ({$existing->reference}) — extended to {$hours}h "
+                    . 'from now, verification schedule topped up for the new tail.');
+            } else {
+                // Not started yet — roll the whole window forward so the
+                // reviewer gets a clean, full-length shift instead of one whose
+                // start is days in the past (and clear the missed/check-in state
+                // that a lapsed first attempt may have left behind).
+                $attributes['scheduled_start'] = $now;
+                $attributes['status'] = Shift::STATUS_SCHEDULED;
+                $attributes['checked_in_at'] = null;
+                $attributes['resolved_at'] = null;
+
+                $this->info("Existing review shift found ({$existing->reference}) — window rolled forward: "
+                    . "{$hours}h starting now.");
+            }
+
+            $existing->update($attributes);
 
             return $existing;
         }
 
-        $scheduledStart = now();
+        $scheduledStart = $now;
         $scheduledEnd = $scheduledStart->copy()->addHours($hours);
 
         $shift = Shift::create([
@@ -200,5 +289,22 @@ class SetupReviewBypassGuard extends Command
         $this->info("Created new review shift: {$shift->reference}");
 
         return $shift;
+    }
+
+    /**
+     * Merge freshly-drawn schedule marks onto the ones already on file, kept
+     * unique and in chronological order (the dispatchers and the app's offline
+     * trigger both read these arrays in sequence).
+     *
+     * @param  array<int, string>|null  $existing
+     * @param  array<int, string>  $fresh
+     * @return array<int, string>
+     */
+    private function appendMarks(?array $existing, array $fresh): array
+    {
+        $marks = array_values(array_unique(array_merge($existing ?? [], $fresh)));
+        sort($marks);
+
+        return $marks;
     }
 }
